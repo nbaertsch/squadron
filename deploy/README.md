@@ -4,17 +4,21 @@ Squadron runs as a **standalone service** that receives GitHub webhooks and orch
 
 ## Architecture
 
-```
-Your Repo                            Squadron Instance (Azure, etc.)
-┌──────────────────────┐             ┌────────────────────────────────┐
-│ .squadron/           │  ──sync──▶  │ /data/.squadron/ (config)      │
-│   config.yaml        │             │ /data/.squadron-data/ (SQLite) │
-│   agents/            │             │ /tmp/squadron-worktrees/       │
-│ .github/workflows/   │             │                                │
-│   squadron-deploy.yml│             │ squadron serve --repo-root /data│
-└──────────────────────┘             └──────────────┬─────────────────┘
-                                                    │
-GitHub App (webhooks) ─────────────────────────────▶│
+```mermaid
+flowchart LR
+  subgraph repo["Your Repo"]
+    config[".squadron/<br>config.yaml<br>agents/*.md"]
+    workflow[".github/workflows/<br>squadron-deploy.yml"]
+  end
+
+  subgraph instance["Squadron Instance (Azure)"]
+    data["/data/.squadron/ (config)<br>/data/.squadron-data/ (SQLite)"]
+    worktrees["/tmp/squadron-worktrees/"]
+    server["squadron serve<br>--repo-root /data"]
+  end
+
+  workflow -- "sync config<br>(on push)" --> data
+  ghapp["GitHub App<br>(webhooks)"] --> server
 ```
 
 - **Your repo** contains `.squadron/` configuration (agent definitions, project settings)
