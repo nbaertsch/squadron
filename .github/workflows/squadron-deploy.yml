@@ -67,9 +67,7 @@ jobs:
   # Deploy infrastructure + sync config
   # ════════════════════════════════════════════════════════════════════
   deploy:
-    if: >
-      github.event_name == 'push'
-      || (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
     runs-on: ubuntu-latest
 
     steps:
@@ -130,7 +128,6 @@ jobs:
           echo "Resource group ready: ${{ steps.params.outputs.resource-group }}"
 
       - name: Deploy infrastructure (Bicep)
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
         id: bicep
         uses: azure/arm-deploy@v2
         with:
@@ -258,7 +255,9 @@ jobs:
   # Sync config only (no infrastructure changes)
   # ════════════════════════════════════════════════════════════════════
   sync-config:
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config'
+    if: >
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config')
+      || github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
@@ -286,6 +285,13 @@ jobs:
           STORAGE_ACCOUNT=$(az storage account list \
             --resource-group "$RG" \
             --query "[0].name" --output tsv)
+
+          if [ -z "$STORAGE_ACCOUNT" ]; then
+            echo "::warning::No storage account found in resource group '$RG'."
+            echo "::warning::Run the workflow with action=deploy once to create infrastructure."
+            exit 0
+          fi
+
           STORAGE_KEY=$(az storage account keys list \
             --account-name "$STORAGE_ACCOUNT" \
             --query "[0].value" --output tsv)
