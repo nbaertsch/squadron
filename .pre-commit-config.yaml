@@ -1,0 +1,24 @@
+# See https://pre-commit.com for more information
+# Install: uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+
+repos:
+  # ── Ruff (lint + format) — runs on every commit ────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.6
+    hooks:
+      - id: ruff
+        name: ruff lint
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        name: ruff format
+
+  # ── Unit tests — runs on push only ─────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: pytest-unit
+        name: unit tests
+        entry: uv run pytest tests/ --ignore=tests/e2e -x -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

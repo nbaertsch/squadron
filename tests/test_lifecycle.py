@@ -515,11 +515,13 @@ class TestPostTurnStateMachine:
 class TestCleanupAgent:
     async def test_destroys_session_and_stops_copilot(self, registry):
         from squadron.agent_manager import AgentManager
+        from squadron.config import RuntimeConfig
 
         config = MagicMock()
         config.project = MagicMock()
         config.project.owner = "x"
         config.project.repo = "y"
+        config.runtime = RuntimeConfig()
 
         manager = AgentManager(
             config=config,
@@ -553,10 +555,13 @@ class TestCleanupAgent:
     async def test_handles_delete_session_failure_gracefully(self, registry):
         from squadron.agent_manager import AgentManager
 
+        from squadron.config import RuntimeConfig
+
         config = MagicMock()
         config.project = MagicMock()
         config.project.owner = "x"
         config.project.repo = "y"
+        config.runtime = RuntimeConfig()
 
         manager = AgentManager(
             config=config,

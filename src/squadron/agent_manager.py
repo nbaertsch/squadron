@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -85,6 +84,12 @@ class AgentManager:
         # PM processing task
         self._pm_task: asyncio.Task | None = None
         self._running = False
+
+        # Agent concurrency limiter
+        max_concurrent = config.runtime.max_concurrent_agents
+        self._agent_semaphore: asyncio.Semaphore | None = (
+            asyncio.Semaphore(max_concurrent) if max_concurrent > 0 else None
+        )
 
     async def start(self) -> None:
         """Start the agent manager — begin PM consumer loop."""
@@ -372,6 +377,17 @@ class AgentManager:
             )
             return existing
 
+        # Check concurrency limit
+        if self._agent_semaphore is not None:
+            if self._agent_semaphore.locked():
+                logger.warning("Agent concurrency limit reached — queueing %s", agent_id)
+            await self._agent_semaphore.acquire()
+            logger.debug(
+                "Agent semaphore acquired for %s (%d slots remaining)",
+                agent_id,
+                self._agent_semaphore._value,  # noqa: SLF001
+            )
+
         # Determine branch name
         branch = self._branch_name(role, issue_number)
 
@@ -425,6 +441,12 @@ class AgentManager:
         if agent.status != AgentStatus.SLEEPING:
             logger.warning("Agent %s is not sleeping (status=%s)", agent_id, agent.status)
             return
+
+        # Check concurrency limit before waking
+        if self._agent_semaphore is not None:
+            if self._agent_semaphore.locked():
+                logger.warning("Agent concurrency limit reached — queueing wake for %s", agent_id)
+            await self._agent_semaphore.acquire()
 
         # Transition to ACTIVE
         agent.status = AgentStatus.ACTIVE
@@ -591,6 +613,8 @@ class AgentManager:
                 )
                 # Remove task reference but keep CopilotAgent alive for resume
                 self._agent_tasks.pop(record.agent_id, None)
+                # Release concurrency slot — sleeping agents don't count
+                self._release_semaphore()
 
             elif updated.status == AgentStatus.COMPLETED:
                 # Agent called report_complete → full cleanup
@@ -666,18 +690,26 @@ class AgentManager:
             worktree = Path(agent_record.worktree_path)
             if worktree.exists():
                 try:
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(worktree)],
-                        cwd=str(self.repo_root),
-                        capture_output=True,
-                        text=True,
+                    await self._run_git(
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(worktree),
                         timeout=30,
                     )
                     logger.info("Removed worktree %s for agent %s", worktree, agent_id)
                 except Exception:
                     logger.warning("Failed to remove worktree %s for agent %s", worktree, agent_id)
 
+        # Release concurrency slot
+        self._release_semaphore()
+
         logger.info("Cleaned up agent %s", agent_id)
+
+    def _release_semaphore(self) -> None:
+        """Release one concurrency slot (if semaphore is active)."""
+        if self._agent_semaphore is not None:
+            self._agent_semaphore.release()
 
     def _build_custom_agents(self, agent_def: "AgentDefinition") -> list[dict[str, Any]] | None:
         """Build SDK CustomAgentConfig list from an agent definition's subagents.
@@ -1160,8 +1192,40 @@ class AgentManager:
                             logger.warning("Unknown role in config: %s", role_name)
         return None
 
+    async def _run_git(self, *args: str, timeout: int = 60) -> tuple[int, str, str]:
+        """Run a git command asynchronously without blocking the event loop.
+
+        Returns (returncode, stdout, stderr).
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(self.repo_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        return (
+            proc.returncode or 0,
+            (stdout_bytes or b"").decode(),
+            (stderr_bytes or b"").decode(),
+        )
+
     async def _create_worktree(self, record: AgentRecord) -> Path:
-        """Create a git worktree for an agent's branch."""
+        """Create a git worktree for an agent's branch.
+
+        When ``config.runtime.sparse_checkout`` is enabled, only a minimal
+        set of top-level metadata files is checked out initially.  The
+        agent's Copilot CLI can read any file via git commands, so the
+        full tree is accessible — but disk usage drops dramatically for
+        large repos.  The agent will ``git sparse-checkout add <dir>``
+        on-demand as it navigates the codebase.
+        """
         worktree_dir = (
             self.repo_root / ".squadron-data" / "worktrees" / f"issue-{record.issue_number}"
         )
@@ -1174,28 +1238,79 @@ class AgentManager:
         try:
             # Create branch from default branch
             default_branch = self.config.project.default_branch
-            subprocess.run(
-                ["git", "branch", record.branch, f"origin/{default_branch}"],
-                cwd=str(self.repo_root),
-                capture_output=True,
-                text=True,
+            await self._run_git(
+                "branch",
+                record.branch,
+                f"origin/{default_branch}",
             )
 
-            # Create worktree
-            result = subprocess.run(
-                ["git", "worktree", "add", str(worktree_dir), record.branch],
-                cwd=str(self.repo_root),
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                logger.error("Failed to create worktree: %s", result.stderr)
-                # Fall back to repo root for prototype
-                return self.repo_root
+            if self.config.runtime.sparse_checkout:
+                # Sparse worktree: --no-checkout first, then set up sparse-checkout cone
+                returncode, stdout, stderr = await self._run_git(
+                    "worktree",
+                    "add",
+                    "--no-checkout",
+                    str(worktree_dir),
+                    record.branch,
+                )
+                if returncode != 0:
+                    logger.error("Failed to create sparse worktree: %s", stderr)
+                    return self.repo_root
 
-            logger.info("Created worktree: %s → %s", record.branch, worktree_dir)
+                # Initialize sparse-checkout in cone mode
+                await self._run_git_in(
+                    worktree_dir,
+                    "sparse-checkout",
+                    "init",
+                    "--cone",
+                )
+                # Start with only top-level files (README, config, etc.)
+                await self._run_git_in(
+                    worktree_dir,
+                    "sparse-checkout",
+                    "set",
+                    "/",
+                )
+                # Now do the actual checkout
+                await self._run_git_in(worktree_dir, "checkout")
+
+                logger.info("Created sparse worktree: %s → %s", record.branch, worktree_dir)
+            else:
+                # Full worktree (original behavior)
+                returncode, stdout, stderr = await self._run_git(
+                    "worktree",
+                    "add",
+                    str(worktree_dir),
+                    record.branch,
+                )
+                if returncode != 0:
+                    logger.error("Failed to create worktree: %s", stderr)
+                    return self.repo_root
+
+                logger.info("Created worktree: %s → %s", record.branch, worktree_dir)
         except Exception:
             logger.exception("Worktree creation failed, using repo root")
             return self.repo_root
 
         return worktree_dir
+
+    async def _run_git_in(self, cwd: Path, *args: str, timeout: int = 60) -> tuple[int, str, str]:
+        """Run a git command in a specific directory (e.g. inside a worktree)."""
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        return (
+            proc.returncode or 0,
+            (stdout_bytes or b"").decode(),
+            (stderr_bytes or b"").decode(),
+        )

@@ -365,8 +365,113 @@ uv run pytest tests/e2e/ -v --log-cli-level=INFO
 | `GITHUB_PRIVATE_KEY` | Yes | PEM-encoded private key |
 | `GITHUB_INSTALLATION_ID` | Yes | Installation ID for target repo |
 | `GITHUB_WEBHOOK_SECRET` | Yes | Webhook HMAC secret |
+| `COPILOT_GITHUB_TOKEN` | Yes | Fine-grained PAT from a Copilot-licensed account |
 | `ANTHROPIC_API_KEY` | BYOK only | API key for Anthropic provider |
 | `OPENAI_API_KEY` | BYOK only | API key for OpenAI provider |
+
+## Deployment
+
+Squadron runs as a single long-lived container. The recommended deployment uses **Fly.io** with CI/CD from your repo.
+
+### Architecture
+
+```
+┌─────────────────── Your Repo ───────────────────┐
+│  .squadron/config.yaml    ← project config       │
+│  .squadron/agents/*.md    ← agent definitions     │
+│  Dockerfile               ← FROM squadron:latest  │
+│  fly.toml                 ← Fly.io config         │
+│  .github/workflows/       ← auto-deploy on push   │
+└─────────────────────────────────────────────────┘
+        │ push to main
+        ▼
+┌─────────── GitHub Actions ───────────┐
+│  Build image (bake .squadron/ in)     │
+│  flyctl deploy                       │
+└──────────────────────────────────────┘
+        │
+        ▼
+┌─────────── Fly.io ───────────────────┐
+│  Squadron container                   │
+│  ├── FastAPI (webhooks)               │
+│  ├── PM agent (Copilot SDK)           │
+│  ├── Dev/Review agents (on demand)    │
+│  └── SQLite on persistent volume      │
+└───────────────────────────────────────┘
+```
+
+### Quick Start
+
+```bash
+# 1. Initialize Squadron in your repo
+cd your-project
+pip install squadron    # or: uvx squadron
+squadron init
+
+# 2. Create the Fly.io app + volume
+flyctl apps create your-project-squadron
+flyctl volumes create squadron_data --app your-project-squadron --size 1
+
+# 3. Set secrets on Fly.io
+flyctl secrets set \
+  GITHUB_APP_ID=your_app_id \
+  GITHUB_PRIVATE_KEY="$(cat your-key.pem)" \
+  GITHUB_INSTALLATION_ID=your_installation_id \
+  GITHUB_WEBHOOK_SECRET=your_webhook_secret \
+  COPILOT_GITHUB_TOKEN=github_pat_... \
+  --app your-project-squadron
+
+# 4. Add FLY_API_TOKEN to your repo's GitHub secrets
+
+# 5. Push to main — the deploy workflow handles the rest
+git add .squadron/ Dockerfile fly.toml .github/workflows/
+git commit -m "chore: add Squadron"
+git push
+```
+
+### What `squadron init` Creates
+
+| File | Purpose |
+|------|---------|
+| `.squadron/config.yaml` | Project config (labels, agents, circuit breakers) |
+| `.squadron/agents/*.md` | Agent definitions (PM, feat-dev, bug-fix, pr-review, security-review) |
+| `Dockerfile` | `FROM ghcr.io/nbaertsch/squadron:latest` + copies `.squadron/` |
+| `fly.toml` | Fly.io machine config (region, volume mount, health check) |
+| `.github/workflows/deploy-squadron.yml` | Auto-deploy when `.squadron/` changes |
+
+### Updating Squadron
+
+To pick up a new version of the Squadron framework, just re-deploy — your `Dockerfile` pulls `ghcr.io/nbaertsch/squadron:latest`. Pin a specific version with:
+
+```dockerfile
+FROM ghcr.io/nbaertsch/squadron:sha-abc1234
+```
+
+## Development
+
+After installing (see above), set up the git hooks:
+
+```bash
+uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+```
+
+This installs two hooks that run automatically:
+
+- **pre-commit** — `ruff` lint + format check (blocks commits with issues)
+- **pre-push** — full unit test suite (blocks pushes if tests fail)
+
+You can also run them manually:
+
+```bash
+# Lint + format
+uv run ruff check . --fix && uv run ruff format .
+
+# Unit tests
+uv run pytest tests/ --ignore=tests/e2e -x -q
+
+# E2E tests (requires credentials)
+uv run pytest tests/e2e/ -x -q
+```
 
 ## License
 

@@ -32,9 +32,8 @@ COPY --from=builder /app/pyproject.toml /app/
 # Add venv to PATH
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Non-root user
-RUN useradd --create-home --shell /bin/bash squadron
-USER squadron
+# Fix Copilot CLI binary permissions
+RUN chmod +x /app/.venv/lib/python*/site-packages/copilot/bin/copilot || true
 
 # Default port
 EXPOSE 8000
@@ -43,8 +42,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-# Mount the repo at /repo
-VOLUME ["/repo"]
-
-ENTRYPOINT ["squadron", "serve", "--repo-root", "/repo"]
+# Default: serve from /app (user images COPY .squadron/ into /app/)
+# Can be overridden with --repo-root for volume-mount usage
+ENTRYPOINT ["squadron", "serve"]
 CMD ["--host", "0.0.0.0", "--port", "8000"]

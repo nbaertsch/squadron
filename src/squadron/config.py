@@ -98,6 +98,8 @@ class RuntimeConfig(BaseModel):
     models: dict[str, ModelOverride] = Field(default_factory=dict)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     reconciliation_interval: int = 300  # seconds
+    max_concurrent_agents: int = 10  # max agents running simultaneously (0 = unlimited)
+    sparse_checkout: bool = False  # use git sparse-checkout for worktrees
 
 
 class EscalationConfig(BaseModel):

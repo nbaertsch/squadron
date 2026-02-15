@@ -7,6 +7,7 @@ See AD-012 for GitHub App design decisions.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -43,6 +44,8 @@ class GitHubClient:
         # Rate limit tracking
         self._rate_limit_remaining: int = 5000
         self._rate_limit_reset: float = 0
+        self._rate_limit_reserve: int = 50
+        self._rate_limit_lock: asyncio.Lock | None = None
 
         self._client: httpx.AsyncClient | None = None
 
@@ -56,6 +59,7 @@ class GitHubClient:
             },
             timeout=30.0,
         )
+        self._rate_limit_lock = asyncio.Lock()
         logger.info("GitHub client started")
 
     async def close(self) -> None:
@@ -90,8 +94,6 @@ class GitHubClient:
                 "GitHub App credentials not configured. "
                 "Set GITHUB_APP_ID, GITHUB_PRIVATE_KEY, GITHUB_INSTALLATION_ID"
             )
-
-        import asyncio
 
         last_error = None
         max_retries = 5
@@ -189,13 +191,35 @@ class GitHubClient:
             )
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        """Make an authenticated API request with rate limit tracking."""
+        """Make an authenticated API request with rate limit throttling.
+
+        When remaining quota drops below the reserve threshold, requests
+        are serialized through a lock to avoid burning through the budget.
+        If quota is fully exhausted, we sleep until the reset window.
+        """
+        if self._rate_limit_lock and self._rate_limit_remaining <= self._rate_limit_reserve:
+            async with self._rate_limit_lock:
+                await self._wait_for_rate_limit_reset()
+                return await self._do_request(method, path, **kwargs)
+        return await self._do_request(method, path, **kwargs)
+
+    async def _do_request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """Execute an authenticated request and track rate limits."""
         headers = await self._auth_headers()
         headers.update(kwargs.pop("headers", {}))
         resp = await self.client.request(method, path, headers=headers, **kwargs)
         self._update_rate_limit(resp)
         resp.raise_for_status()
         return resp
+
+    async def _wait_for_rate_limit_reset(self) -> None:
+        """Sleep until the rate limit reset window if quota is exhausted."""
+        if self._rate_limit_remaining > 0:
+            return
+        wait = max(0, self._rate_limit_reset - time.time()) + 1  # +1s buffer
+        logger.warning("Rate limit exhausted — sleeping %.1fs until reset", wait)
+        await asyncio.sleep(wait)
+        self._rate_limit_remaining = 100  # optimistic reset
 
     # ── Issue Operations ─────────────────────────────────────────────────
 

@@ -87,7 +87,7 @@ def copilot_authenticated():
         finally:
             await client.stop()
 
-    asyncio.get_event_loop().run_until_complete(_check())
+    asyncio.new_event_loop().run_until_complete(_check())
     return True
 
 
