@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Ghost 3 -->
+  <polygon points="128,116 168,218 128,206 88,218" fill="#F4A876" opacity="0.35"/>
+
+  <!-- Ghost 2 -->
+  <polygon points="128,86 180,218 128,200 76,218" fill="#F08A3A" opacity="0.50"/>
+
+  <!-- Ghost 1 -->
+  <polygon points="128,58 192,218 128,194 64,218" fill="#FE4C25" opacity="0.65"/>
+
+  <!-- Main ship -->
+  <polygon points="128,32 204,218 128,188 52,218" fill="#8534F3" stroke="#3FB950" stroke-width="2.5" stroke-linejoin="miter"/>
+</svg>
