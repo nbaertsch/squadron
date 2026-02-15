@@ -162,4 +162,4 @@ jobs:
         run: docker build -t squadron:latest .
 
       - name: Verify Docker image
-        run: docker run --rm squadron:latest python -c "import squadron; print('ok')"
+        run: docker run --rm --entrypoint python squadron:latest -c "import squadron; print('ok')"
