@@ -401,8 +401,10 @@ class TestPMAgentWithTools:
             assert result is not None
             # The agent should respond (we don't control exact output)
             response = str(result).lower()
-            # Just verify we got a real response back
-            assert len(response) > 0
+            # Verify we got a substantive response (not just whitespace)
+            assert len(response.strip()) > 10, (
+                f"PM agent response too short to be meaningful: '{response[:100]}'"
+            )
 
             await session.destroy()
         finally:
@@ -517,11 +519,11 @@ class TestFullWebhookPipeline:
 
                         await asyncio.sleep(5)
 
-                    # We verify at least one of these happened
-                    # (PM might not label if model doesn't call the tool, but should comment)
-                    assert labels_found or comment_found, (
-                        f"PM did not triage issue #{issue_number} within {max_wait}s. "
-                        f"Labels: {labels}, Comments: {len(comments)}"
+                    # We verify the PM acted — it should at minimum comment
+                    # Labels are best-effort (model may not call label_issue tool)
+                    assert comment_found, (
+                        f"PM did not comment on issue #{issue_number} within {max_wait}s. "
+                        f"Labels found: {labels_found}, Comments: {len(comments)}"
                     )
 
                 finally:

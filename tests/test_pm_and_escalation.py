@@ -176,6 +176,10 @@ class TestPMTools:
         sdk_tools = tools.get_tools()
 
         assert len(sdk_tools) == 6
+        # Verify each tool is callable and has the expected names
+        tool_names = [t.name for t in sdk_tools]
+        expected = {"create_issue", "assign_issue", "label_issue", "comment_on_issue", "check_registry", "read_issue"}
+        assert set(tool_names) == expected, f"Tool names mismatch: {tool_names}"
 
 
 # ── Escalate to Human ───────────────────────────────────────────────────────

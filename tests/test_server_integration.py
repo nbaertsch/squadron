@@ -13,7 +13,6 @@ but run everything else for real: SQLite, FastAPI, EventRouter, config loading.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -249,9 +248,9 @@ class TestCopilotSDKTypes:
         assert config["system_message"]["mode"] == "replace"
         assert "working_directory" in config
         # Provider omitted when no BYOK API key (Copilot-native auth)
-        # assert "provider" in config
+        assert "provider" not in config
         # reasoning_effort only included when explicitly configured per role
-        # assert "reasoning_effort" in config
+        assert "reasoning_effort" not in config
 
         # Infinite sessions config
         assert "infinite_sessions" in config
@@ -274,7 +273,7 @@ class TestCopilotSDKTypes:
         assert "model" in config
         assert "system_message" in config
         # Provider omitted when no BYOK API key (Copilot-native auth)
-        # assert "provider" in config
+        assert "provider" not in config
 
     def test_provider_config_shape(self, monkeypatch):
         """Verify provider dict matches SDK ProviderConfig type when BYOK key set."""
@@ -299,48 +298,92 @@ class TestCopilotSDKTypes:
         provider = _build_provider_dict(runtime_config)
         assert provider is None
 
-    def test_define_tool_decorator_exists(self):
-        """Verify we can import the define_tool decorator from copilot."""
-        from copilot import define_tool
+    def test_squadron_pm_tools_are_define_tool_decorated(self):
+        """Verify Squadron's PMTools.get_tools() returns callable define_tool-decorated tools."""
+        from squadron.tools.pm_tools import PMTools
 
-        assert callable(define_tool)
+        registry_mock = AsyncMock()
+        github_mock = AsyncMock()
+        pm = PMTools(
+            registry=registry_mock,
+            github=github_mock,
+            owner="testowner",
+            repo="testrepo",
+        )
+        tools = pm.get_tools()
+        assert len(tools) == 6
+        for tool in tools:
+            assert hasattr(tool, "name"), f"Tool missing 'name': {tool}"
+            assert hasattr(tool, "handler"), f"Tool missing 'handler': {tool}"
+            assert callable(tool.handler), f"Tool handler not callable: {tool.name}"
 
 
 # ── Config Loading Integration ───────────────────────────────────────────────
 
 
 class TestConfigLoading:
-    """Test config loading with a real .squadron/ directory."""
+    """Test config loading with a synthetic .squadron/ directory."""
 
-    def test_loads_real_squadron_config(self):
-        """Load the actual .squadron/config.yaml from the project root."""
-        project_root = Path(__file__).parent.parent
-        squadron_dir = project_root / ".squadron"
-
-        if not squadron_dir.exists():
-            pytest.skip("No .squadron/ directory in project root")
+    def test_loads_squadron_config(self, tmp_path):
+        """Load a .squadron/config.yaml and verify parsing."""
+        squadron_dir = tmp_path / ".squadron"
+        squadron_dir.mkdir()
+        (squadron_dir / "config.yaml").write_text(
+            "project:\n"
+            "  name: test-project\n"
+            "  owner: test-owner\n"
+            "  repo: test-repo\n"
+            "labels:\n"
+            "  types:\n"
+            "    - bug\n"
+            "    - feature\n"
+            "  priorities:\n"
+            "    - P0\n"
+            "    - P1\n"
+        )
 
         config = load_config(squadron_dir)
-        assert config.project.name == "squadron"
-        assert config.project.owner == "noahbaertsch"
-        assert config.project.repo == "squadron"
-        assert len(config.labels.types) > 0
-        assert len(config.labels.priorities) > 0
+        assert config.project.name == "test-project"
+        assert config.project.owner == "test-owner"
+        assert config.project.repo == "test-repo"
+        assert len(config.labels.types) == 2
+        assert len(config.labels.priorities) == 2
 
-    def test_loads_real_agent_definitions(self):
-        """Load actual agent .md files from the project root."""
+    def test_loads_agent_definitions(self, tmp_path):
+        """Load agent .md files from a synthetic agents/ directory."""
         from squadron.config import load_agent_definitions
 
-        project_root = Path(__file__).parent.parent
-        squadron_dir = project_root / ".squadron"
+        squadron_dir = tmp_path / ".squadron"
+        agents_dir = squadron_dir / "agents"
+        agents_dir.mkdir(parents=True)
 
-        if not squadron_dir.exists():
-            pytest.skip("No .squadron/ directory in project root")
+        (agents_dir / "pm.md").write_text(
+            "---\n"
+            "name: PM Agent\n"
+            "tools:\n"
+            "  - create_issue\n"
+            "  - label_issue\n"
+            "constraints:\n"
+            "  max_tool_calls: 50\n"
+            "---\n"
+            "You are the PM agent.\n"
+        )
+        (agents_dir / "feat-dev.md").write_text(
+            "---\n"
+            "name: Feature Developer\n"
+            "tools:\n"
+            "  - read_file\n"
+            "  - write_file\n"
+            "constraints:\n"
+            "  max_tool_calls: 100\n"
+            "---\n"
+            "You are a feature developer agent.\n"
+        )
 
         defs = load_agent_definitions(squadron_dir)
         assert "pm" in defs
         assert "feat-dev" in defs
         assert defs["pm"].prompt  # Not empty
-        assert defs["pm"].tools  # Should now be populated
-        assert defs["feat-dev"].tools  # Should now be populated
-        assert defs["feat-dev"].constraints  # Should now be populated
+        assert defs["pm"].tools  # Should be populated from frontmatter
+        assert defs["feat-dev"].tools  # Should be populated
+        assert defs["feat-dev"].constraints  # Should be populated
