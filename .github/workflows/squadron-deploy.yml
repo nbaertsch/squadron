@@ -141,20 +141,52 @@ jobs:
           echo "Resource group ready: ${{ steps.params.outputs.resource-group }}"
 
       - name: Deploy infrastructure (Bicep)
-        id: bicep
-        uses: azure/arm-deploy@v2
-        with:
-          resourceGroupName: ${{ steps.params.outputs.resource-group }}
-          template: /tmp/squadron-infra.bicep
-          parameters: >-
-            appName=${{ steps.app.outputs.name }}
-            ghcrImage=${{ steps.params.outputs.image }}
-            location=${{ steps.params.outputs.location }}
-            githubAppId=${{ secrets.SQ_APP_ID }}
-            githubPrivateKey=${{ secrets.SQ_PRIVATE_KEY }}
-            githubInstallationId=${{ secrets.SQ_INSTALLATION_ID }}
-            githubWebhookSecret=${{ secrets.SQ_WEBHOOK_SECRET }}
-            copilotGithubToken=${{ secrets.SQ_COPILOT_TOKEN }}
+        env:
+          APP_NAME: ${{ steps.app.outputs.name }}
+          IMAGE: ${{ steps.params.outputs.image }}
+          LOCATION: ${{ steps.params.outputs.location }}
+          SQ_APP_ID: ${{ secrets.SQ_APP_ID }}
+          SQ_PRIVATE_KEY: ${{ secrets.SQ_PRIVATE_KEY }}
+          SQ_INSTALLATION_ID: ${{ secrets.SQ_INSTALLATION_ID }}
+          SQ_WEBHOOK_SECRET: ${{ secrets.SQ_WEBHOOK_SECRET }}
+          SQ_COPILOT_TOKEN: ${{ secrets.SQ_COPILOT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Write ARM parameters file using JSON escaping (handles multiline PEM keys)
+          python3 - <<'PY' > /tmp/squadron-params.json
+          import json, os
+
+          def must_get(name: str) -> str:
+              v = os.environ.get(name, "")
+              if not v:
+                  raise SystemExit(f"Missing required secret env var: {name}")
+              return v
+
+          doc = {
+              "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+              "contentVersion": "1.0.0.0",
+              "parameters": {
+                  "appName": {"value": os.environ["APP_NAME"]},
+                  "ghcrImage": {"value": os.environ["IMAGE"]},
+                  "location": {"value": os.environ["LOCATION"]},
+                  "githubAppId": {"value": must_get("SQ_APP_ID")},
+                  "githubPrivateKey": {"value": must_get("SQ_PRIVATE_KEY")},
+                  "githubInstallationId": {"value": must_get("SQ_INSTALLATION_ID")},
+                  "githubWebhookSecret": {"value": must_get("SQ_WEBHOOK_SECRET")},
+                  # Optional
+                  "copilotGithubToken": {"value": os.environ.get("SQ_COPILOT_TOKEN", "")},
+              },
+          }
+          print(json.dumps(doc, indent=2))
+          PY
+
+          az deployment group create \
+            --name "squadron-infra" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --template-file /tmp/squadron-infra.bicep \
+            --parameters @/tmp/squadron-params.json \
+            --output none
 
       # ── Config sync (always runs) ─────────────────────────────────
       - name: Resolve storage account
