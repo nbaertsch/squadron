@@ -171,6 +171,87 @@ class SquadronConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     escalation: EscalationConfig = Field(default_factory=EscalationConfig)
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
+    workflows: list[WorkflowDefinition] = Field(default_factory=list)
+
+
+# ── Workflow Definitions ─────────────────────────────────────────────────────
+
+
+class WorkflowStage(BaseModel):
+    """A single stage in a workflow pipeline.
+
+    Stages execute sequentially. Each stage spawns an agent, and the
+    pipeline advances when the agent completes its action (e.g. approves a PR).
+    """
+
+    name: str  # unique within workflow, e.g. "test-coverage"
+    agent: str  # agent role from .squadron/agents/
+    action: str = "review"  # review | review_and_merge | develop | custom
+    on_approve: str = "next"  # next | complete | stage-name
+    on_reject: str = "stop"  # stop | restart | stage-name
+    on_timeout: str = "escalate"  # escalate | stop | stage-name
+
+
+class WorkflowTrigger(BaseModel):
+    """Defines when a workflow activates."""
+
+    event: str  # e.g. "pull_request.opened", "issues.opened", "push"
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    # Supported condition keys:
+    #   base_branch: str — match PR target branch
+    #   head_branch_pattern: str — glob match on PR source branch
+    #   labels: list[str] — require any of these labels
+    #   paths: list[str] — glob match on changed files
+
+    def matches_event(self, event_type: str) -> bool:
+        """Check if the trigger event type matches."""
+        return self.event == event_type
+
+    def matches_conditions(self, payload: dict) -> bool:
+        """Evaluate conditions against a webhook payload."""
+        import fnmatch
+
+        # base_branch condition
+        base = self.conditions.get("base_branch")
+        if base:
+            pr_base = payload.get("pull_request", {}).get("base", {}).get("ref", "")
+            if pr_base != base:
+                return False
+
+        # head_branch_pattern condition
+        head_pattern = self.conditions.get("head_branch_pattern")
+        if head_pattern:
+            pr_head = payload.get("pull_request", {}).get("head", {}).get("ref", "")
+            if not fnmatch.fnmatch(pr_head, head_pattern):
+                return False
+
+        # labels condition (any match)
+        required_labels = self.conditions.get("labels")
+        if required_labels:
+            event_labels = [
+                lbl.get("name", "")
+                for lbl in (
+                    payload.get("pull_request", {}).get("labels", [])
+                    or payload.get("issue", {}).get("labels", [])
+                )
+            ]
+            if not any(lbl in required_labels for lbl in event_labels):
+                return False
+
+        return True
+
+
+class WorkflowDefinition(BaseModel):
+    """A complete workflow definition loaded from .squadron/workflows/*.yaml."""
+
+    name: str
+    description: str = ""
+    trigger: WorkflowTrigger
+    stages: list[WorkflowStage] = Field(min_length=1)
+
+    def matches(self, event_type: str, payload: dict) -> bool:
+        """Check if this workflow should activate for a given event."""
+        return self.trigger.matches_event(event_type) and self.trigger.matches_conditions(payload)
 
 
 # ── Agent Definition Loading ─────────────────────────────────────────────────
@@ -427,5 +508,42 @@ def load_agent_definitions(squadron_dir: Path) -> dict[str, AgentDefinition]:
         content = md_file.read_text()
         definitions[role] = parse_agent_definition(role, content)
         logger.info("Loaded agent definition: %s", role)
+
+    return definitions
+
+
+def load_workflow_definitions(squadron_dir: Path) -> list[WorkflowDefinition]:
+    """Load workflow definitions from .squadron/workflows/*.yaml.
+
+    Each YAML file defines one or more workflows with triggers,
+    conditions, and sequential stage pipelines.
+
+    Returns:
+        List of validated WorkflowDefinition objects.
+    """
+    workflows_dir = squadron_dir / "workflows"
+    definitions: list[WorkflowDefinition] = []
+
+    if not workflows_dir.exists():
+        logger.debug("No workflows directory found at %s", workflows_dir)
+        return definitions
+
+    for yaml_file in sorted(workflows_dir.glob("*.yaml")):
+        try:
+            with open(yaml_file) as f:
+                raw = yaml.safe_load(f) or {}
+
+            # A file can contain a single workflow or a list
+            if isinstance(raw, list):
+                for item in raw:
+                    wf = WorkflowDefinition(**item)
+                    definitions.append(wf)
+                    logger.info("Loaded workflow: %s (from %s)", wf.name, yaml_file.name)
+            else:
+                wf = WorkflowDefinition(**raw)
+                definitions.append(wf)
+                logger.info("Loaded workflow: %s (from %s)", wf.name, yaml_file.name)
+        except Exception:
+            logger.exception("Failed to load workflow from %s", yaml_file)
 
     return definitions

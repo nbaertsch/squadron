@@ -477,6 +477,115 @@ class AgentManager:
 
         logger.info("Woke agent %s (trigger: %s)", agent_id, trigger_event.event_type)
 
+    async def spawn_workflow_agent(
+        self,
+        role: str,
+        pr_number: int,
+        event: SquadronEvent,
+        *,
+        workflow_run_id: str | None = None,
+        stage_name: str | None = None,
+        action: str | None = None,
+    ) -> str | None:
+        """Spawn a review agent for a workflow pipeline stage.
+
+        Called by the WorkflowEngine to create an agent for each stage.
+        The agent_id includes the workflow run ID to distinguish from
+        approval flow agents.
+
+        Args:
+            role: Agent role name (e.g. "test-coverage", "security-review").
+            pr_number: PR number under review.
+            event: The triggering SquadronEvent.
+            workflow_run_id: Workflow run ID for tracking.
+            stage_name: Name of the workflow stage.
+            action: Stage action ("review", "review_and_merge", etc.).
+
+        Returns:
+            The agent_id of the created agent, or None on failure.
+        """
+        # Build unique agent ID for workflow agents
+        suffix = f"wf-{pr_number}"
+        if stage_name:
+            suffix = f"wf-{stage_name}-{pr_number}"
+        agent_id = f"{role}-{suffix}"
+
+        # Check for existing agent with same ID
+        existing = await self.registry.get_agent(agent_id)
+        if existing:
+            logger.info("Workflow agent %s already exists — skipping", agent_id)
+            return agent_id
+
+        # Verify the role has a definition
+        agent_def = self.agent_definitions.get(role)
+        if not agent_def:
+            logger.error("No agent definition for workflow role: %s", role)
+            return None
+
+        try:
+            agent_role = AgentRole(role)
+        except ValueError:
+            logger.warning("Unknown AgentRole: %s — skipping workflow spawn", role)
+            return None
+
+        payload = event.data.get("payload", {})
+        pr_data = payload.get("pull_request", {})
+
+        # Determine issue number (from PR body or fallback to pr_number)
+        source_issue = pr_data.get("body", "") or ""
+        issue_number = self._extract_issue_number(source_issue) or pr_number
+
+        record = AgentRecord(
+            agent_id=agent_id,
+            role=agent_role,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            session_id=f"squadron-{agent_id}",
+            status=AgentStatus.ACTIVE,
+            active_since=datetime.now(timezone.utc),
+            branch=pr_data.get("head", {}).get("ref", "unknown"),
+        )
+        await self.registry.create_agent(record)
+
+        # Create inbox
+        self.agent_inboxes[agent_id] = asyncio.Queue()
+
+        # Create CopilotAgent (reviewers use repo root, no worktree needed)
+        copilot = CopilotAgent(
+            runtime_config=self.config.runtime,
+            working_directory=str(self.repo_root),
+        )
+        await copilot.start()
+        self._copilot_agents[agent_id] = copilot
+
+        # Build review event with workflow metadata
+        review_event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED,
+            pr_number=pr_number,
+            issue_number=issue_number,
+            data={
+                **event.data,
+                "workflow_run_id": workflow_run_id,
+                "workflow_stage": stage_name,
+                "workflow_action": action,
+            },
+        )
+        agent_task = asyncio.create_task(
+            self._run_agent(record, review_event),
+            name=f"agent-{agent_id}",
+        )
+        self._agent_tasks[agent_id] = agent_task
+
+        logger.info(
+            "Created workflow agent %s for PR #%d (stage=%s, action=%s, run=%s)",
+            agent_id,
+            pr_number,
+            stage_name,
+            action,
+            workflow_run_id,
+        )
+        return agent_id
+
     async def _run_agent(
         self,
         record: AgentRecord,
@@ -958,6 +1067,10 @@ class AgentManager:
         1. Extract PR labels and changed files
         2. Match against approval flow rules
         3. Create a review agent for each matched reviewer role
+
+        NOTE: If a workflow engine already triggered a pipeline for this PR,
+        the workflow-spawned agents handle reviews — approval flow is skipped
+        for that PR automatically (workflow engine prevents duplicates).
         """
         if event.pr_number is None:
             return

@@ -44,8 +44,23 @@ CREATE TABLE IF NOT EXISTS seen_events (
     received_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    run_id TEXT PRIMARY KEY,
+    workflow_name TEXT NOT NULL,
+    pr_number INTEGER,
+    issue_number INTEGER,
+    current_stage TEXT NOT NULL,
+    stage_index INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    stage_agent_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_agents_issue ON agents(issue_number);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_pr ON workflow_runs(pr_number);
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
 """
 
 
@@ -281,6 +296,140 @@ class AgentRegistry:
         cursor = await self.db.execute("DELETE FROM seen_events WHERE received_at < ?", (cutoff,))
         await self.db.commit()
         return cursor.rowcount
+
+    # ── Workflow Run Management ──────────────────────────────────────────
+
+    async def create_workflow_run(
+        self,
+        run_id: str,
+        workflow_name: str,
+        current_stage: str,
+        *,
+        pr_number: int | None = None,
+        issue_number: int | None = None,
+        stage_index: int = 0,
+        stage_agent_id: str | None = None,
+    ) -> None:
+        """Create a new workflow pipeline run."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            """INSERT INTO workflow_runs
+               (run_id, workflow_name, pr_number, issue_number,
+                current_stage, stage_index, status, stage_agent_id,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+            (
+                run_id,
+                workflow_name,
+                pr_number,
+                issue_number,
+                current_stage,
+                stage_index,
+                stage_agent_id,
+                now,
+                now,
+            ),
+        )
+        await self.db.commit()
+        logger.info(
+            "Created workflow run: %s (workflow=%s, stage=%s, pr=#%s)",
+            run_id,
+            workflow_name,
+            current_stage,
+            pr_number,
+        )
+
+    async def get_workflow_run(self, run_id: str) -> dict | None:
+        """Get a workflow run by ID."""
+        cursor = await self.db.execute("SELECT * FROM workflow_runs WHERE run_id = ?", (run_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "workflow_name": row["workflow_name"],
+            "pr_number": row["pr_number"],
+            "issue_number": row["issue_number"],
+            "current_stage": row["current_stage"],
+            "stage_index": row["stage_index"],
+            "status": row["status"],
+            "stage_agent_id": row["stage_agent_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    async def get_workflow_runs_for_pr(self, pr_number: int) -> list[dict]:
+        """Get all active workflow runs for a PR."""
+        cursor = await self.db.execute(
+            "SELECT * FROM workflow_runs WHERE pr_number = ? AND status = 'active'",
+            (pr_number,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "run_id": r["run_id"],
+                "workflow_name": r["workflow_name"],
+                "pr_number": r["pr_number"],
+                "issue_number": r["issue_number"],
+                "current_stage": r["current_stage"],
+                "stage_index": r["stage_index"],
+                "status": r["status"],
+                "stage_agent_id": r["stage_agent_id"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    async def get_workflow_run_by_agent(self, agent_id: str) -> dict | None:
+        """Find the workflow run that a given agent belongs to."""
+        cursor = await self.db.execute(
+            "SELECT * FROM workflow_runs WHERE stage_agent_id = ? AND status = 'active'",
+            (agent_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "workflow_name": row["workflow_name"],
+            "pr_number": row["pr_number"],
+            "issue_number": row["issue_number"],
+            "current_stage": row["current_stage"],
+            "stage_index": row["stage_index"],
+            "status": row["status"],
+            "stage_agent_id": row["stage_agent_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    async def advance_workflow_run(
+        self,
+        run_id: str,
+        next_stage: str,
+        stage_index: int,
+        stage_agent_id: str | None = None,
+    ) -> None:
+        """Advance a workflow run to the next stage."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            """UPDATE workflow_runs
+               SET current_stage = ?, stage_index = ?, stage_agent_id = ?, updated_at = ?
+               WHERE run_id = ?""",
+            (next_stage, stage_index, stage_agent_id, now, run_id),
+        )
+        await self.db.commit()
+        logger.info("Advanced workflow %s to stage %s (index=%d)", run_id, next_stage, stage_index)
+
+    async def complete_workflow_run(self, run_id: str, status: str = "completed") -> None:
+        """Mark a workflow run as completed or stopped."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            "UPDATE workflow_runs SET status = ?, updated_at = ? WHERE run_id = ?",
+            (status, now, run_id),
+        )
+        await self.db.commit()
+        logger.info("Workflow run %s → %s", run_id, status)
 
     # ── Helpers ──────────────────────────────────────────────────────────
 

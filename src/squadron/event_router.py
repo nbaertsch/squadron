@@ -21,6 +21,7 @@ from squadron.models import GitHubEvent, SquadronEvent, SquadronEventType
 if TYPE_CHECKING:
     from squadron.config import SquadronConfig
     from squadron.registry import AgentRegistry
+    from squadron.workflow_engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,15 @@ class EventRouter:
         # PM event queue — batched events for PM processing
         self.pm_queue: asyncio.Queue[SquadronEvent] = asyncio.Queue()
 
+        # Workflow engine (optional — set via set_workflow_engine)
+        self._workflow_engine: WorkflowEngine | None = None
+
         self._running = False
         self._task: asyncio.Task | None = None
+
+    def set_workflow_engine(self, engine: WorkflowEngine) -> None:
+        """Attach the workflow engine for event-driven pipeline triggers."""
+        self._workflow_engine = engine
 
     def on(
         self, event_type: SquadronEventType, handler: Callable[[SquadronEvent], Awaitable[None]]
@@ -125,7 +133,36 @@ class EventRouter:
         # 4. Create internal event
         squadron_event = self._to_squadron_event(event, internal_type)
 
-        # 5. Dispatch to handlers
+        # 5. Workflow engine evaluation (triggers pipelines before normal dispatch)
+        if self._workflow_engine:
+            try:
+                triggered = await self._workflow_engine.evaluate_event(
+                    event.full_type,
+                    event.payload,
+                    squadron_event,
+                )
+                if triggered:
+                    logger.info(
+                        "Workflow triggered for %s — skipping approval flow", event.full_type
+                    )
+
+                # For PR review events, check if this advances a workflow stage
+                if (
+                    internal_type == SquadronEventType.PR_REVIEW_SUBMITTED
+                    and squadron_event.pr_number
+                ):
+                    review = event.payload.get("review", {})
+                    await self._workflow_engine.handle_pr_review(
+                        pr_number=squadron_event.pr_number,
+                        reviewer=review.get("user", {}).get("login", ""),
+                        review_state=review.get("state", ""),
+                        payload=event.payload,
+                        squadron_event=squadron_event,
+                    )
+            except Exception:
+                logger.exception("Workflow engine error for %s", event.full_type)
+
+        # 6. Dispatch to handlers
         await self._dispatch(squadron_event)
 
     def _to_squadron_event(

@@ -27,7 +27,12 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from squadron.agent_manager import AgentManager
-from squadron.config import SquadronConfig, load_agent_definitions, load_config
+from squadron.config import (
+    SquadronConfig,
+    load_agent_definitions,
+    load_config,
+    load_workflow_definitions,
+)
 from squadron.event_router import EventRouter
 from squadron.github_client import GitHubClient
 from squadron.models import AgentStatus, GitHubEvent
@@ -36,6 +41,7 @@ from squadron.registry import AgentRegistry
 from squadron.resource_monitor import ResourceMonitor
 from squadron.webhook import configure as configure_webhook
 from squadron.webhook import router as webhook_router
+from squadron.workflow_engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +62,7 @@ class SquadronServer:
         self.agent_manager: AgentManager | None = None
         self.reconciliation: ReconciliationLoop | None = None
         self.resource_monitor: ResourceMonitor | None = None
+        self.workflow_engine: WorkflowEngine | None = None
 
     async def start(self) -> None:
         """Initialize all components and start background loops."""
@@ -64,11 +71,18 @@ class SquadronServer:
         # 1. Load config
         self.config = load_config(self.squadron_dir)
         agent_definitions = load_agent_definitions(self.squadron_dir)
+        workflow_definitions = load_workflow_definitions(self.squadron_dir)
         logger.info(
             "Loaded %d agent definitions: %s",
             len(agent_definitions),
             list(agent_definitions.keys()),
         )
+        if workflow_definitions:
+            logger.info(
+                "Loaded %d workflow definitions: %s",
+                len(workflow_definitions),
+                [w.name for w in workflow_definitions],
+            )
 
         # 2. Initialize database
         data_dir = self.repo_root / ".squadron-data"
@@ -131,6 +145,18 @@ class SquadronServer:
             expected_installation_id=os.environ.get("GITHUB_INSTALLATION_ID"),
             expected_repo_full_name=repo_full_name,
         )
+
+        # 8b. Create workflow engine (if workflows are defined)
+        if workflow_definitions:
+            self.workflow_engine = WorkflowEngine(
+                config=self.config,
+                registry=self.registry,
+                workflows=workflow_definitions,
+            )
+            self.workflow_engine.set_spawn_callback(
+                self.agent_manager.spawn_workflow_agent,
+            )
+            self.router.set_workflow_engine(self.workflow_engine)
 
         # 9. Start background loops
         await self.router.start()

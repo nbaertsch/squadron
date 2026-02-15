@@ -29,6 +29,9 @@ class AgentRole(str, enum.Enum):
     BUG_FIX = "bug-fix"
     PR_REVIEW = "pr-review"
     SECURITY_REVIEW = "security-review"
+    TEST_COVERAGE = "test-coverage"
+    CODE_SEARCH = "code-search"
+    TEST_WRITER = "test-writer"
 
 
 # ── Agent Record ─────────────────────────────────────────────────────────────

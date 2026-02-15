@@ -126,7 +126,16 @@ class TestAgentRecord:
             assert record.status == status
 
     def test_all_roles(self):
-        expected = {"pm", "feat-dev", "bug-fix", "pr-review", "security-review"}
+        expected = {
+            "pm",
+            "feat-dev",
+            "bug-fix",
+            "pr-review",
+            "security-review",
+            "test-coverage",
+            "code-search",
+            "test-writer",
+        }
         assert {r.value for r in AgentRole} == expected
 
 
