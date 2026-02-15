@@ -281,6 +281,7 @@ jobs:
 
       - name: Health check
         run: |
+          set -euo pipefail
           FQDN=$(az containerapp show \
             --name "${{ steps.app.outputs.name }}" \
             --resource-group "${{ steps.params.outputs.resource-group }}" \
@@ -302,7 +303,33 @@ jobs:
             echo "  Attempt $i/12 — HTTP $HTTP_CODE (waiting 10s...)"
             sleep 10
           done
-          echo "::warning::Health check did not pass within 120s. Container may still be starting."
+
+          echo "::error::Health check did not pass within 120s. Dumping Container App diagnostics..."
+          echo "" 
+          echo "## containerapp show" 
+          az containerapp show \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            -o jsonc \
+            || true
+
+          echo "" 
+          echo "## revisions" 
+          az containerapp revision list \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            -o table \
+            || true
+
+          echo "" 
+          echo "## recent logs (tail=200)" 
+          az containerapp logs show \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --tail 200 \
+            || true
+
+          exit 1
 
   # ════════════════════════════════════════════════════════════════════
   # Sync config only (no infrastructure changes)
