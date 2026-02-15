@@ -109,6 +109,30 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Register required Azure resource providers
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
+        run: |
+          set -euo pipefail
+
+          # These providers are required by infra/main.bicep (Log Analytics, Container Apps, Storage).
+          PROVIDERS=(
+            "Microsoft.OperationalInsights"
+            "Microsoft.App"
+            "Microsoft.Storage"
+          )
+
+          echo "Registering Azure resource providers (idempotent): ${PROVIDERS[*]}"
+          for ns in "${PROVIDERS[@]}"; do
+            echo "- az provider register --namespace $ns"
+            az provider register --namespace "$ns" --wait
+          done
+
+          echo "Provider registration states:"
+          for ns in "${PROVIDERS[@]}"; do
+            state=$(az provider show --namespace "$ns" --query registrationState -o tsv)
+            echo "  $ns: $state"
+          done
+
       # ── Infrastructure (only on full deploy) ──────────────────────
       - name: Download Squadron Bicep template
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
