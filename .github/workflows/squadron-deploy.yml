@@ -214,14 +214,22 @@ jobs:
 
       - name: Sync .squadron/ config to Azure Files
         run: |
+          echo "Removing existing .squadron/ from Azure Files share (best-effort)..."
+          az storage file delete-batch \
+            --source "squadron-data" \
+            --pattern ".squadron/*" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --output none \
+            2>/dev/null || true
+
           echo "Uploading .squadron/ to Azure Files share..."
           az storage file upload-batch \
             --destination "squadron-data" \
             --source ".squadron" \
             --destination-path ".squadron" \
             --account-name "${{ steps.storage.outputs.account }}" \
-            --account-key "${{ steps.storage.outputs.key }}" \
-            --overwrite
+            --account-key "${{ steps.storage.outputs.key }}"
           echo "Config synced successfully"
 
       - name: Restart container to load new config
@@ -346,13 +354,20 @@ jobs:
 
       - name: Sync .squadron/ config
         run: |
+          az storage file delete-batch \
+            --source "squadron-data" \
+            --pattern ".squadron/*" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --output none \
+            2>/dev/null || true
+
           az storage file upload-batch \
             --destination "squadron-data" \
             --source ".squadron" \
             --destination-path ".squadron" \
             --account-name "${{ steps.storage.outputs.account }}" \
-            --account-key "${{ steps.storage.outputs.key }}" \
-            --overwrite
+            --account-key "${{ steps.storage.outputs.key }}"
           echo "Config synced"
 
       - name: Restart container
