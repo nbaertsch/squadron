@@ -294,10 +294,18 @@ jobs:
 
           echo "Waiting for https://${FQDN}/health ..."
           for i in $(seq 1 12); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${FQDN}/health" 2>/dev/null || true)
+            # Bound each attempt so a hung TLS connect or stalled response doesn't stretch the loop.
+            HTTP_CODE=$(curl \
+              -s \
+              -o /dev/null \
+              -w "%{http_code}" \
+              --connect-timeout 3 \
+              --max-time 5 \
+              "https://${FQDN}/health" \
+              2>/dev/null || true)
             if [ "$HTTP_CODE" = "200" ]; then
               echo "Health check passed!"
-              curl -s "https://${FQDN}/health" | python3 -m json.tool
+              curl -s --connect-timeout 3 --max-time 5 "https://${FQDN}/health" | python3 -m json.tool
               exit 0
             fi
             echo "  Attempt $i/12 — HTTP $HTTP_CODE (waiting 10s...)"
@@ -307,7 +315,7 @@ jobs:
           echo "::error::Health check did not pass within 120s. Dumping Container App diagnostics..."
           echo "" 
           echo "## containerapp show" 
-          az containerapp show \
+          timeout 30s az containerapp show \
             --name "${{ steps.app.outputs.name }}" \
             --resource-group "${{ steps.params.outputs.resource-group }}" \
             -o jsonc \
@@ -315,7 +323,7 @@ jobs:
 
           echo "" 
           echo "## revisions" 
-          az containerapp revision list \
+          timeout 30s az containerapp revision list \
             --name "${{ steps.app.outputs.name }}" \
             --resource-group "${{ steps.params.outputs.resource-group }}" \
             -o table \
@@ -323,7 +331,7 @@ jobs:
 
           echo "" 
           echo "## recent logs (tail=200)" 
-          az containerapp logs show \
+          timeout 60s az containerapp logs show \
             --name "${{ steps.app.outputs.name }}" \
             --resource-group "${{ steps.params.outputs.resource-group }}" \
             --tail 200 \
