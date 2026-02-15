@@ -372,111 +372,21 @@ uv run pytest tests/e2e/ -v --log-cli-level=INFO
 
 ## Deployment
 
-Squadron runs as a single long-lived container. The recommended deployment uses **Azure Container Apps** with infrastructure-as-code via **Bicep** and CI/CD via **GitHub Actions**.
+Squadron runs as a **standalone service** — you deploy a container instance and point it at your repo via the GitHub App. You don't install Squadron into your repo's codebase.
 
-### Storage Architecture
+**Quick start:**
+1. Install the [Squadron GitHub App](https://github.com/apps/squadron-dev) on your repo
+2. Run `squadron init` to scaffold `.squadron/` config
+3. Copy the deployment workflow template into your repo
+4. Set secrets and deploy
 
-```
-┌────────────────── Azure Container App ──────────────────┐
-│                                                          │
-│  /data/  ← Azure Files (persistent, network-mounted)     │
-│  ├── .squadron/config.yaml     project config            │
-│  ├── .squadron/agents/*.md     agent definitions         │
-│  └── .squadron-data/                                     │
-│      └── registry.db           SQLite database           │
-│                                                          │
-│  /tmp/squadron-worktrees/  ← Local ephemeral disk (fast) │
-│  └── issue-42/             git worktrees (high I/O)      │
-│  └── issue-99/             recreated on demand           │
-│                                                          │
-│  FastAPI server (:8000)                                  │
-│  ├── /webhook/github       GitHub webhook endpoint       │
-│  ├── /health               health + resource metrics     │
-│  └── /agents               active agent list             │
-└──────────────────────────────────────────────────────────┘
-```
+See **[deploy/](deploy/)** for full instructions and workflow templates:
 
-- **Azure Files** holds the SQLite database and `.squadron/` config — persists across container restarts
-- **Local ephemeral disk** holds git worktrees — fast I/O, recreated automatically when agents wake
+| Target | Guide |
+|--------|-------|
+| **Azure Container Apps** | [deploy/azure-container-apps/](deploy/azure-container-apps/) |
 
-### Deploy via CLI
-
-```bash
-# 1. Initialize Squadron in your repo
-cd your-project
-squadron init
-
-# 2. Azure login
-az login
-
-# 3. Set environment variables
-export GITHUB_APP_ID=your_app_id
-export GITHUB_PRIVATE_KEY="$(cat your-key.pem)"
-export GITHUB_INSTALLATION_ID=your_installation_id
-export GITHUB_WEBHOOK_SECRET=your_webhook_secret
-
-# 4. Deploy
-squadron deploy \
-  --app-name my-project-squadron \
-  --resource-group squadron-rg \
-  --location switzerlandnorth
-```
-
-### Deploy via GitHub Actions
-
-The reusable workflow `.github/workflows/deploy-azure.yml` deploys on push to main:
-
-```yaml
-# In your repo's workflow:
-jobs:
-  deploy:
-    uses: nbaertsch/squadron/.github/workflows/deploy-azure.yml@main
-    with:
-      app-name: my-project-squadron
-      resource-group: squadron-rg
-      location: switzerlandnorth
-    secrets:
-      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
-      GITHUB_APP_ID: ${{ secrets.GITHUB_APP_ID }}
-      GITHUB_PRIVATE_KEY: ${{ secrets.GITHUB_PRIVATE_KEY }}
-      GITHUB_INSTALLATION_ID: ${{ secrets.GITHUB_INSTALLATION_ID }}
-      GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
-```
-
-#### Required GitHub Actions secrets for deployment
-
-| Secret | Description |
-|--------|-------------|
-| `AZURE_CREDENTIALS` | Azure service principal JSON (`az ad sp create-for-rbac --sdk-auth`) |
-| `GITHUB_APP_ID` | GitHub App ID |
-| `GITHUB_PRIVATE_KEY` | PEM-encoded private key (full content) |
-| `GITHUB_INSTALLATION_ID` | Installation ID for target repo |
-| `GITHUB_WEBHOOK_SECRET` | Webhook HMAC secret |
-
-### Infrastructure (Bicep)
-
-The `infra/main.bicep` template creates:
-
-| Resource | Purpose |
-|----------|---------|
-| Log Analytics Workspace | Container logs and monitoring |
-| Container App Environment | Managed container runtime |
-| Storage Account + Azure Files | Persistent storage (1 GB) for SQLite DB + config |
-| Container App | Squadron server (1 CPU, 2 GiB RAM) |
-
-### After Deployment
-
-1. Copy the FQDN from the deployment output
-2. Configure your GitHub App's webhook URL: `https://<fqdn>/webhook/github`
-3. Verify health: `curl https://<fqdn>/health`
-
-### Updating Squadron
-
-Push a new image to GHCR (CI does this automatically) and re-deploy:
-
-```bash
-squadron deploy --image ghcr.io/nbaertsch/squadron:sha-abc1234
-```
+The pre-built container image `ghcr.io/nbaertsch/squadron:latest` is published on every push to main — you never need to build your own.
 
 ## Development
 
