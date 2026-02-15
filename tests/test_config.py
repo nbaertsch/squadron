@@ -51,15 +51,12 @@ def squadron_dir(tmp_path: Path) -> Path:
     (agents_dir / "pm.md").write_text(
         "---\nname: pm\ndisplay_name: Project Manager\ndescription: Manages stuff\n"
         "infer: true\ntools:\n  - create_issue\n  - assign_issue\n"
-        "subagents:\n  - feat-dev\n"
-        "constraints:\n  max_time: 600\n  can_write_code: false\n"
         "---\n\nYou are the PM.\n"
     )
     (agents_dir / "feat-dev.md").write_text(
         "---\nname: feat-dev\ndisplay_name: Feature Developer\n"
         "tools:\n  - read_file\n  - write_file\n"
         "mcp_servers:\n  github:\n    type: http\n    url: https://api.githubcopilot.com/mcp/\n"
-        "tool_restrictions:\n  denied_commands:\n    - rm -rf\n"
         "---\n\nYou are a feature developer.\n"
     )
 
@@ -141,8 +138,6 @@ class TestLoadAgentDefinitions:
         assert pm.infer is True
         assert "create_issue" in pm.tools
         assert "assign_issue" in pm.tools
-        assert "feat-dev" in pm.subagents
-        assert pm.constraints == {"max_time": 600, "can_write_code": False}
 
     def test_extracts_mcp_servers(self, squadron_dir: Path):
         defs = load_agent_definitions(squadron_dir)
@@ -150,11 +145,6 @@ class TestLoadAgentDefinitions:
         assert "github" in fd.mcp_servers
         assert fd.mcp_servers["github"].type == "http"
         assert fd.mcp_servers["github"].url == "https://api.githubcopilot.com/mcp/"
-
-    def test_extracts_tool_restrictions(self, squadron_dir: Path):
-        defs = load_agent_definitions(squadron_dir)
-        fd = defs["feat-dev"]
-        assert "rm -rf" in fd.tool_restrictions.denied_commands
 
     def test_raw_content_preserved(self, squadron_dir: Path):
         defs = load_agent_definitions(squadron_dir)
@@ -213,11 +203,15 @@ class TestParseAgentDefinition:
         assert defn.raw_content == content
         assert defn.name == "test"  # Defaults to role
 
-    def test_subagents_and_constraints(self):
-        content = "---\nname: pm\nsubagents:\n  - feat-dev\n  - bug-fix\nconstraints:\n  max_time: 300\n  can_write_code: false\n---\n\nPrompt body."
+    def test_ignores_unknown_frontmatter_fields(self):
+        """Non-SDK fields in frontmatter are silently ignored."""
+        content = "---\nname: pm\nsubagents:\n  - feat-dev\nconstraints:\n  max_time: 300\ntool_restrictions:\n  denied_commands:\n    - rm -rf\n---\n\nPrompt body."
         defn = parse_agent_definition("pm", content)
-        assert defn.subagents == ["feat-dev", "bug-fix"]
-        assert defn.constraints == {"max_time": 300, "can_write_code": False}
+        assert defn.name == "pm"
+        assert "Prompt body." in defn.prompt
+        assert not hasattr(defn, "subagents")
+        assert not hasattr(defn, "constraints")
+        assert not hasattr(defn, "tool_restrictions")
 
     def test_mcp_servers_parsing(self):
         content = "---\nname: dev\nmcp_servers:\n  github:\n    type: http\n    url: https://example.com/mcp/\n    timeout: 60\n---\n\nBody."
@@ -226,12 +220,6 @@ class TestParseAgentDefinition:
         assert defn.mcp_servers["github"].type == "http"
         assert defn.mcp_servers["github"].url == "https://example.com/mcp/"
         assert defn.mcp_servers["github"].timeout == 60
-
-    def test_tool_restrictions_parsing(self):
-        content = "---\nname: agent\ntool_restrictions:\n  allowed_commands:\n    - git log\n  denied_commands:\n    - rm -rf\n    - sudo\n---\n\nBody."
-        defn = parse_agent_definition("agent", content)
-        assert defn.tool_restrictions.allowed_commands == ["git log"]
-        assert defn.tool_restrictions.denied_commands == ["rm -rf", "sudo"]
 
     def test_to_custom_agent_config(self):
         content = "---\nname: reviewer\ndisplay_name: Code Reviewer\ndescription: Reviews code\ninfer: true\ntools:\n  - read_file\n  - grep\nmcp_servers:\n  github:\n    type: http\n    url: https://mcp.example.com\n---\n\nYou review code."

@@ -821,16 +821,19 @@ class AgentManager:
             self._agent_semaphore.release()
 
     def _build_custom_agents(self, agent_def: "AgentDefinition") -> list[dict[str, Any]] | None:
-        """Build SDK CustomAgentConfig list from an agent definition's subagents.
+        """Build SDK CustomAgentConfig list from the role's configured subagents.
 
-        Resolves subagent names to their definitions and converts them
-        to CustomAgentConfig dicts via to_custom_agent_config().
+        Reads subagent names from config.yaml agent_roles (not from agent .md
+        frontmatter) and resolves them to SDK CustomAgentConfig dicts.
         """
-        if not agent_def.subagents:
+        # Look up subagents from config.yaml agent_roles
+        role_config = self.config.agent_roles.get(agent_def.role)
+        subagent_names = role_config.subagents if role_config else []
+        if not subagent_names:
             return None
 
         configs: list[dict[str, Any]] = []
-        for sub_name in agent_def.subagents:
+        for sub_name in subagent_names:
             sub_def = self.agent_definitions.get(sub_name)
             if sub_def:
                 configs.append(sub_def.to_custom_agent_config())
@@ -914,12 +917,23 @@ class AgentManager:
 
         The on_pre_tool_use hook increments tool_call_count on the
         AgentRecord and denies tool use if the limit is exceeded.
+
+        Hook signature matches SDK PreToolUseHandler:
+          (PreToolUseHookInput, dict[str, str]) -> PreToolUseHookOutput | None
         """
         registry = self.registry
         max_tool_calls = cb_limits.max_tool_calls
 
-        async def on_pre_tool_use(tool_name: str, tool_input: Any) -> dict[str, Any]:
-            """Called before each tool invocation — enforces tool call limit."""
+        async def on_pre_tool_use(
+            hook_input: dict[str, Any], context: dict[str, str]
+        ) -> dict[str, Any] | None:
+            """Called before each tool invocation — enforces tool call limit.
+
+            Args:
+                hook_input: PreToolUseHookInput with toolName, toolArgs, timestamp, cwd.
+                context: Session context metadata (key-value pairs).
+            """
+            tool_name = hook_input.get("toolName", "unknown")
             record.tool_call_count += 1
 
             if record.tool_call_count > max_tool_calls:
@@ -934,7 +948,7 @@ class AgentManager:
                 await registry.update_agent(record)
                 return {
                     "permissionDecision": "deny",
-                    "reason": f"Tool call limit exceeded ({max_tool_calls})",
+                    "permissionDecisionReason": f"Tool call limit exceeded ({max_tool_calls})",
                 }
 
             # Persist counter periodically (every 10 calls to avoid DB thrashing)

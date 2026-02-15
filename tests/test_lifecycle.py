@@ -381,7 +381,7 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.subagents = []
+        agent_def.role = agent.role.value
         agent_def.mcp_servers = {}
         manager.agent_definitions[agent.role.value] = agent_def
 
@@ -426,7 +426,7 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.subagents = []
+        agent_def.role = agent.role.value
         agent_def.mcp_servers = {}
         manager.agent_definitions[agent.role.value] = agent_def
 
@@ -468,7 +468,7 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.subagents = []
+        agent_def.role = agent.role.value
         agent_def.mcp_servers = {}
         manager.agent_definitions[agent.role.value] = agent_def
 
@@ -497,7 +497,7 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.subagents = []
+        agent_def.role = agent.role.value
         agent_def.mcp_servers = {}
         manager.agent_definitions[agent.role.value] = agent_def
 

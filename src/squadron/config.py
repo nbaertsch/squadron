@@ -54,6 +54,7 @@ class AgentRoleConfig(BaseModel):
     singleton: bool = False
     assignable_labels: list[str] = Field(default_factory=list)
     trigger: str | None = None  # e.g. "approval_flow"
+    subagents: list[str] = Field(default_factory=list)  # Other agent roles available as subagents
 
 
 class CircuitBreakerDefaults(BaseModel):
@@ -300,36 +301,28 @@ class MCPServerDefinition(BaseModel):
             return result
 
 
-class ToolRestrictions(BaseModel):
-    """Allowed/denied shell commands for an agent."""
-
-    allowed_commands: list[str] = Field(default_factory=list)
-    denied_commands: list[str] = Field(default_factory=list)
-
-
 class AgentDefinition(BaseModel):
     """Parsed agent definition from a .md file with YAML frontmatter.
 
-    Format:
+    The frontmatter fields map 1:1 to SDK CustomAgentConfig:
+
         ---
         name: agent-name
         display_name: Human Name
         description: What this agent does
         infer: true
-        tools: [tool1, tool2]
-        subagents: [sub1, sub2]
+        tools:
+          - read_file
+          - write_file
         mcp_servers:
           server_name:
             type: http
             url: https://...
-        tool_restrictions:
-          allowed_commands: [...]
-          denied_commands: [...]
-        constraints:
-          max_time: 600
-          can_write_code: false
         ---
         Markdown body is the agent's prompt (used as system message).
+
+    Orchestration config (subagents, circuit breakers, etc.) belongs
+    in config.yaml under agent_roles and circuit_breakers, NOT here.
     """
 
     role: str  # From filename (e.g. "pm", "feat-dev")
@@ -343,11 +336,6 @@ class AgentDefinition(BaseModel):
     infer: bool = True
     tools: list[str] = Field(default_factory=list)
     mcp_servers: dict[str, MCPServerDefinition] = Field(default_factory=dict)
-
-    # Squadron extensions (not in SDK CustomAgentConfig)
-    subagents: list[str] = Field(default_factory=list)
-    tool_restrictions: ToolRestrictions = Field(default_factory=ToolRestrictions)
-    constraints: dict[str, Any] = Field(default_factory=dict)
 
     def to_custom_agent_config(self) -> dict[str, Any]:
         """Convert to SDK CustomAgentConfig dict.
@@ -415,9 +403,11 @@ def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
 def parse_agent_definition(role: str, content: str) -> AgentDefinition:
     """Parse an agent markdown definition file with YAML frontmatter.
 
-    The YAML frontmatter maps 1:1 to SDK CustomAgentConfig fields
-    (name, display_name, description, tools, mcp_servers, infer)
-    plus Squadron extensions (subagents, tool_restrictions, constraints).
+    The YAML frontmatter maps 1:1 to SDK CustomAgentConfig fields:
+    name, display_name, description, tools, mcp_servers, infer.
+
+    Orchestration config (subagents, circuit breakers, etc.) belongs
+    in config.yaml, NOT in agent .md frontmatter.
 
     The markdown body after frontmatter becomes the agent's prompt
     (used as the system message for the LLM session).
@@ -432,14 +422,6 @@ def parse_agent_definition(role: str, content: str) -> AgentDefinition:
             if isinstance(srv_data, dict):
                 mcp_servers[name] = MCPServerDefinition(**srv_data)
 
-    # Parse tool restrictions
-    raw_restrictions = fm.get("tool_restrictions", {})
-    tool_restrictions = (
-        ToolRestrictions(**raw_restrictions)
-        if isinstance(raw_restrictions, dict)
-        else ToolRestrictions()
-    )
-
     return AgentDefinition(
         role=role,
         raw_content=content,
@@ -450,9 +432,6 @@ def parse_agent_definition(role: str, content: str) -> AgentDefinition:
         infer=fm.get("infer", True),
         tools=fm.get("tools", []) or [],
         mcp_servers=mcp_servers,
-        subagents=fm.get("subagents", []) or [],
-        tool_restrictions=tool_restrictions,
-        constraints=fm.get("constraints", {}) or {},
     )
 
 

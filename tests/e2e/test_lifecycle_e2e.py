@@ -202,7 +202,6 @@ class TestAgentDefinitionWiring:
         pm_def = definitions.get("pm")
         assert pm_def is not None, "PM definition should exist"
         assert pm_def.name == "pm"
-        assert pm_def.subagents, "PM should have subagents"
         assert pm_def.prompt, "PM should have a prompt"
 
         # Build SDK config from the definition
@@ -212,21 +211,27 @@ class TestAgentDefinitionWiring:
         assert custom_config["infer"] is True
 
     async def test_subagent_resolution(self, copilot_authenticated):
-        """Verify subagent references resolve to real definitions."""
-        definitions = load_agent_definitions(_project_root / ".squadron")
-        pm_def = definitions["pm"]
+        """Verify subagent references in config.yaml resolve to real definitions."""
+        from squadron.config import load_config
 
-        # PM references feat-dev, bug-fix, pr-review, security-review
-        for sub_name in pm_def.subagents:
+        definitions = load_agent_definitions(_project_root / ".squadron")
+        config = load_config(_project_root / ".squadron")
+
+        # PM's subagents are defined in config.yaml agent_roles
+        pm_role_config = config.agent_roles.get("pm")
+        assert pm_role_config is not None
+        assert pm_role_config.subagents, "PM should have subagents in config.yaml"
+
+        for sub_name in pm_role_config.subagents:
             assert sub_name in definitions, f"Subagent '{sub_name}' not found in definitions"
             sub_def = definitions[sub_name]
             sub_config = sub_def.to_custom_agent_config()
             assert sub_config["name"] == sub_name
 
-        # feat-dev references code-search, test-writer
-        feat_dev = definitions.get("feat-dev")
-        if feat_dev and feat_dev.subagents:
-            for sub_name in feat_dev.subagents:
+        # feat-dev's subagents are also in config.yaml
+        fd_role_config = config.agent_roles.get("feat-dev")
+        if fd_role_config and fd_role_config.subagents:
+            for sub_name in fd_role_config.subagents:
                 assert sub_name in definitions, f"feat-dev subagent '{sub_name}' not found"
 
     async def test_custom_agents_build_from_definition(self, copilot_authenticated):

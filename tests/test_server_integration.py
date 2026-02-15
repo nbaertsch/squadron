@@ -363,8 +363,6 @@ class TestConfigLoading:
             "tools:\n"
             "  - create_issue\n"
             "  - label_issue\n"
-            "constraints:\n"
-            "  max_tool_calls: 50\n"
             "---\n"
             "You are the PM agent.\n"
         )
@@ -374,8 +372,6 @@ class TestConfigLoading:
             "tools:\n"
             "  - read_file\n"
             "  - write_file\n"
-            "constraints:\n"
-            "  max_tool_calls: 100\n"
             "---\n"
             "You are a feature developer agent.\n"
         )
@@ -386,4 +382,3 @@ class TestConfigLoading:
         assert defs["pm"].prompt  # Not empty
         assert defs["pm"].tools  # Should be populated from frontmatter
         assert defs["feat-dev"].tools  # Should be populated
-        assert defs["feat-dev"].constraints  # Should be populated

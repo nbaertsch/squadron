@@ -54,10 +54,12 @@ agent_roles:
   pm:
     agent_definition: agents/pm.md
     singleton: true
+    subagents: [feat-dev, bug-fix, pr-review, security-review]
 
   feat-dev:
     agent_definition: agents/feat-dev.md
     assignable_labels: [feature]
+    subagents: [code-search, test-writer]
 
   bug-fix:
     agent_definition: agents/bug-fix.md
@@ -69,6 +71,10 @@ agent_roles:
 
   security-review:
     agent_definition: agents/security-review.md
+    trigger: approval_flow
+
+  test-coverage:
+    agent_definition: agents/test-coverage.md
     trigger: approval_flow
 
 # ─────────────────────────────────────────────
@@ -96,6 +102,10 @@ circuit_breakers:
       max_tool_calls: 100
       max_turns: 20
       max_active_duration: 1800  # 30 minutes
+    test-coverage:
+      max_tool_calls: 100
+      max_turns: 20
+      max_active_duration: 1800  # 30 minutes
 
 # ─────────────────────────────────────────────
 # Runtime / LLM Configuration
@@ -120,6 +130,9 @@ runtime:
     security-review:
       model: "claude-sonnet-4"
       reasoning_effort: "high"
+    test-coverage:
+      model: "claude-sonnet-4"
+      reasoning_effort: "medium"
 
   provider:
     type: "anthropic"
