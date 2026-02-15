@@ -1,0 +1,309 @@
+{
+  "issues_opened": {
+    "action": "opened",
+    "issue": {
+      "number": 42,
+      "title": "Add OAuth2 support",
+      "body": "We need OAuth2 for the API.\n\n## Requirements\n- Support Google, GitHub providers\n- Token refresh\n- PKCE flow",
+      "state": "open",
+      "user": {
+        "login": "noahbaertsch",
+        "id": 12345678,
+        "type": "User"
+      },
+      "labels": [
+        {"id": 1, "name": "feature", "color": "0075ca"},
+        {"id": 2, "name": "high", "color": "d73a4a"}
+      ],
+      "assignees": [],
+      "milestone": null,
+      "created_at": "2025-01-15T10:30:00Z",
+      "updated_at": "2025-01-15T10:30:00Z",
+      "html_url": "https://github.com/noahbaertsch/squadron/issues/42"
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "owner": {
+        "login": "noahbaertsch",
+        "id": 12345678,
+        "type": "User"
+      },
+      "private": false,
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "noahbaertsch",
+      "id": 12345678,
+      "type": "User"
+    },
+    "installation": {
+      "id": 11111111,
+      "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uMTExMTExMTE="
+    }
+  },
+
+  "issues_assigned_bot": {
+    "action": "assigned",
+    "issue": {
+      "number": 42,
+      "title": "Add OAuth2 support",
+      "body": "We need OAuth2 for the API.",
+      "state": "open",
+      "user": {
+        "login": "noahbaertsch",
+        "id": 12345678,
+        "type": "User"
+      },
+      "labels": [
+        {"id": 1, "name": "feature", "color": "0075ca"}
+      ],
+      "assignees": [
+        {"login": "squadron[bot]", "id": 99999999, "type": "Bot"}
+      ],
+      "html_url": "https://github.com/noahbaertsch/squadron/issues/42"
+    },
+    "assignee": {
+      "login": "squadron[bot]",
+      "id": 99999999,
+      "type": "Bot"
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "owner": {"login": "noahbaertsch", "id": 12345678, "type": "User"},
+      "private": false,
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "noahbaertsch",
+      "id": 12345678,
+      "type": "User"
+    }
+  },
+
+  "issues_closed": {
+    "action": "closed",
+    "issue": {
+      "number": 99,
+      "title": "Blocker: missing config parser",
+      "body": "The config parser doesn't handle nested objects.",
+      "state": "closed",
+      "state_reason": "completed",
+      "user": {"login": "squadron[bot]", "id": 99999999, "type": "Bot"},
+      "labels": [{"name": "bug"}],
+      "assignees": [{"login": "squadron[bot]"}],
+      "html_url": "https://github.com/noahbaertsch/squadron/issues/99"
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "noahbaertsch",
+      "id": 12345678,
+      "type": "User"
+    }
+  },
+
+  "pull_request_opened": {
+    "action": "opened",
+    "number": 10,
+    "pull_request": {
+      "number": 10,
+      "title": "feat(#42): add OAuth2 support",
+      "body": "Closes #42\n\n## Changes\n- Added OAuth2 provider interface\n- Implemented Google OAuth flow\n- Added token refresh logic",
+      "state": "open",
+      "merged": false,
+      "draft": false,
+      "user": {
+        "login": "squadron[bot]",
+        "id": 99999999,
+        "type": "Bot"
+      },
+      "head": {
+        "ref": "feat/issue-42",
+        "sha": "abc123def456",
+        "repo": {"full_name": "noahbaertsch/squadron"}
+      },
+      "base": {
+        "ref": "main",
+        "sha": "000111222333",
+        "repo": {"full_name": "noahbaertsch/squadron"}
+      },
+      "labels": [],
+      "requested_reviewers": [],
+      "html_url": "https://github.com/noahbaertsch/squadron/pull/10",
+      "diff_url": "https://github.com/noahbaertsch/squadron/pull/10.diff",
+      "created_at": "2025-01-15T12:00:00Z",
+      "updated_at": "2025-01-15T12:00:00Z"
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "squadron[bot]",
+      "id": 99999999,
+      "type": "Bot"
+    }
+  },
+
+  "pull_request_closed_merged": {
+    "action": "closed",
+    "number": 10,
+    "pull_request": {
+      "number": 10,
+      "title": "feat(#42): add OAuth2 support",
+      "body": "Closes #42",
+      "state": "closed",
+      "merged": true,
+      "merged_by": {
+        "login": "noahbaertsch",
+        "id": 12345678,
+        "type": "User"
+      },
+      "merge_commit_sha": "aabbccdd11223344",
+      "head": {"ref": "feat/issue-42", "sha": "abc123def456"},
+      "base": {"ref": "main", "sha": "000111222333"},
+      "html_url": "https://github.com/noahbaertsch/squadron/pull/10"
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "noahbaertsch",
+      "id": 12345678,
+      "type": "User"
+    }
+  },
+
+  "pull_request_closed_not_merged": {
+    "action": "closed",
+    "number": 10,
+    "pull_request": {
+      "number": 10,
+      "title": "feat(#42): add OAuth2 support",
+      "body": "Closes #42",
+      "state": "closed",
+      "merged": false,
+      "head": {"ref": "feat/issue-42", "sha": "abc123def456"},
+      "base": {"ref": "main", "sha": "000111222333"},
+      "html_url": "https://github.com/noahbaertsch/squadron/pull/10"
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "noahbaertsch",
+      "id": 12345678,
+      "type": "User"
+    }
+  },
+
+  "pull_request_review_changes_requested": {
+    "action": "submitted",
+    "review": {
+      "id": 55555,
+      "user": {
+        "login": "squadron[bot]",
+        "id": 99999999,
+        "type": "Bot"
+      },
+      "body": "Needs changes:\n- Missing error handling in OAuth callback\n- No tests for token refresh",
+      "state": "changes_requested",
+      "html_url": "https://github.com/noahbaertsch/squadron/pull/10#pullrequestreview-55555",
+      "submitted_at": "2025-01-15T14:00:00Z"
+    },
+    "pull_request": {
+      "number": 10,
+      "title": "feat(#42): add OAuth2 support",
+      "body": "Closes #42",
+      "state": "open",
+      "head": {"ref": "feat/issue-42", "sha": "abc123def456"},
+      "base": {"ref": "main"}
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "squadron[bot]",
+      "id": 99999999,
+      "type": "Bot"
+    }
+  },
+
+  "pull_request_synchronize": {
+    "action": "synchronize",
+    "number": 10,
+    "before": "abc123def456",
+    "after": "def456ghi789",
+    "pull_request": {
+      "number": 10,
+      "title": "feat(#42): add OAuth2 support",
+      "body": "Closes #42",
+      "state": "open",
+      "head": {"ref": "feat/issue-42", "sha": "def456ghi789"},
+      "base": {"ref": "main"}
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "squadron[bot]",
+      "id": 99999999,
+      "type": "Bot"
+    }
+  },
+
+  "issue_comment_by_human": {
+    "action": "created",
+    "comment": {
+      "id": 77777,
+      "body": "@squadron can you also add PKCE support?",
+      "user": {
+        "login": "noahbaertsch",
+        "id": 12345678,
+        "type": "User"
+      },
+      "created_at": "2025-01-15T15:00:00Z",
+      "html_url": "https://github.com/noahbaertsch/squadron/issues/42#issuecomment-77777"
+    },
+    "issue": {
+      "number": 42,
+      "title": "Add OAuth2 support",
+      "state": "open",
+      "user": {"login": "noahbaertsch", "type": "User"},
+      "labels": [{"name": "feature"}]
+    },
+    "repository": {
+      "id": 987654321,
+      "name": "squadron",
+      "full_name": "noahbaertsch/squadron",
+      "default_branch": "main"
+    },
+    "sender": {
+      "login": "noahbaertsch",
+      "id": 12345678,
+      "type": "User"
+    }
+  }
+}

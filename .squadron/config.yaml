@@ -1,0 +1,165 @@
+# .squadron/config.yaml — Squadron project configuration
+# See docs/project-plan/research/config-schema.md for full reference.
+
+# ─────────────────────────────────────────────
+# Project Identity
+# ─────────────────────────────────────────────
+project:
+  name: "squadron"
+  owner: "noahbaertsch"
+  repo: "squadron"
+  default_branch: main
+
+# ─────────────────────────────────────────────
+# Label Taxonomy
+# ─────────────────────────────────────────────
+labels:
+  types:
+    - feature
+    - bug
+    - security
+    - docs
+    - infrastructure
+  priorities:
+    - critical
+    - high
+    - medium
+    - low
+  states:
+    - needs-triage
+    - in-progress
+    - blocked
+    - needs-human
+    - needs-clarification
+
+# ─────────────────────────────────────────────
+# Branch Naming Conventions
+# ─────────────────────────────────────────────
+branch_naming:
+  feature: "feat/issue-{issue_number}"
+  bugfix: "fix/issue-{issue_number}"
+  security: "security/issue-{issue_number}"
+  hotfix: "hotfix/issue-{issue_number}"
+
+# ─────────────────────────────────────────────
+# Human Groups
+# ─────────────────────────────────────────────
+human_groups:
+  maintainers: ["@noahbaertsch"]
+
+# ─────────────────────────────────────────────
+# Agent Roles
+# ─────────────────────────────────────────────
+agent_roles:
+  pm:
+    agent_definition: agents/pm.md
+    singleton: true
+
+  feat-dev:
+    agent_definition: agents/feat-dev.md
+    assignable_labels: [feature]
+
+  bug-fix:
+    agent_definition: agents/bug-fix.md
+    assignable_labels: [bug]
+
+  pr-review:
+    agent_definition: agents/pr-review.md
+    trigger: approval_flow
+
+  security-review:
+    agent_definition: agents/security-review.md
+    trigger: approval_flow
+
+# ─────────────────────────────────────────────
+# Circuit Breakers
+# ─────────────────────────────────────────────
+circuit_breakers:
+  defaults:
+    max_iterations: 5
+    max_tool_calls: 200
+    max_turns: 50
+    max_active_duration: 7200    # 2 hours
+    max_sleep_duration: 86400    # 24 hours
+    warning_threshold: 0.80
+
+  roles:
+    pm:
+      max_tool_calls: 50
+      max_turns: 10
+      max_active_duration: 600   # 10 minutes
+    pr-review:
+      max_tool_calls: 100
+      max_turns: 20
+      max_active_duration: 1800  # 30 minutes
+    security-review:
+      max_tool_calls: 100
+      max_turns: 20
+      max_active_duration: 1800  # 30 minutes
+
+# ─────────────────────────────────────────────
+# Runtime / LLM Configuration
+# ─────────────────────────────────────────────
+runtime:
+  default_model: "claude-sonnet-4"
+  default_reasoning_effort: "medium"
+
+  models:
+    pm:
+      model: "claude-sonnet-4"
+      reasoning_effort: "low"
+    feat-dev:
+      model: "claude-sonnet-4"
+      reasoning_effort: "high"
+    bug-fix:
+      model: "claude-sonnet-4"
+      reasoning_effort: "high"
+    pr-review:
+      model: "claude-sonnet-4"
+      reasoning_effort: "medium"
+    security-review:
+      model: "claude-sonnet-4"
+      reasoning_effort: "high"
+
+  provider:
+    type: "anthropic"
+    base_url: "https://api.anthropic.com"
+    api_key_env: "ANTHROPIC_API_KEY"
+
+  reconciliation_interval: 300   # 5 minutes
+
+# ─────────────────────────────────────────────
+# Escalation / Notifications
+# ─────────────────────────────────────────────
+escalation:
+  default_notify: maintainers
+  escalation_labels:
+    - needs-human
+    - escalation
+  max_issue_depth: 3
+
+# ─────────────────────────────────────────────
+# Approval Flows
+# ─────────────────────────────────────────────
+approval_flows:
+  enabled: true
+  default_reviewers:
+    - pr-review
+  rules:
+    - name: security-sensitive
+      match_labels: [security]
+      match_paths:
+        - "src/**/auth/**"
+        - "src/**/crypto/**"
+        - "**/security/**"
+      reviewers: [security-review]
+      required_approvals: 1
+    - name: infrastructure
+      match_labels: [infrastructure]
+      match_paths:
+        - ".squadron/**"
+        - "pyproject.toml"
+        - "Dockerfile"
+        - ".github/**"
+      reviewers: [pr-review]
+      required_approvals: 1
