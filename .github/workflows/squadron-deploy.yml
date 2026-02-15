@@ -122,39 +122,6 @@ jobs:
             echo "- $ns: $state"
           done
 
-      - name: Register required Azure resource providers
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
-        run: |
-          set -euo pipefail
-
-          # These providers are required by infra/main.bicep (Log Analytics, Container Apps, Storage).
-          PROVIDERS=(
-            "Microsoft.OperationalInsights"
-            "Microsoft.App"
-            "Microsoft.Storage"
-          )
-
-          echo "Ensuring Azure resource providers are registered: ${PROVIDERS[*]}"
-          echo "(Note: registering providers requires subscription-scope permissions.)"
-
-          for ns in "${PROVIDERS[@]}"; do
-            state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null || echo "unknown")
-            echo "- $ns: $state"
-            if [ "$state" = "Registered" ]; then
-              continue
-            fi
-
-            echo "  Registering $ns..."
-            if ! az provider register --namespace "$ns" --wait; then
-              echo "::error::Failed to register provider '$ns'."
-              echo "::error::Your AZURE_CREDENTIALS service principal must have a role assignment at subscription scope (e.g. Contributor or Owner), OR an admin must register the provider once."
-              echo "::error::Admin command: az provider register --namespace $ns"
-              exit 1
-            fi
-          done
-
-          echo "Provider registration complete."
-
       # ── Infrastructure (only on full deploy) ──────────────────────
       - name: Download Squadron Bicep template
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
