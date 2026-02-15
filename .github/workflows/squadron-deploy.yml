@@ -1,0 +1,347 @@
+# Squadron Deploy — Azure Container Apps
+#
+# TEMPLATE: Copy this file to your repo at .github/workflows/squadron-deploy.yml
+#
+# This workflow manages the full lifecycle of a Squadron deployment:
+#   - Initial infrastructure deployment (Azure Container Apps via Bicep)
+#   - Config sync when .squadron/ changes
+#   - Infrastructure teardown
+#
+# Prerequisites:
+#   1. GitHub App installed on this repo
+#   2. Repository secrets configured (see deploy/azure-container-apps/README.md)
+#
+# Usage:
+#   - Manual dispatch: Actions → Squadron Deploy → Run workflow
+#   - Auto sync: push changes to .squadron/** on main
+
+name: Squadron Deploy
+
+on:
+  # ── Manual trigger ─────────────────────────────────────────────────
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - sync-config
+          - destroy
+        default: deploy
+      resource-group:
+        description: "Azure resource group"
+        required: false
+        default: "squadron-rg"
+      location:
+        description: "Azure region"
+        required: false
+        default: "eastus"
+      app-name:
+        description: "Container App name (default: <repo>-squadron)"
+        required: false
+      squadron-image:
+        description: "Squadron container image"
+        required: false
+        default: "ghcr.io/nbaertsch/squadron:latest"
+
+  # ── Auto-sync on config changes ───────────────────────────────────
+  push:
+    branches: [main]
+    paths:
+      - ".squadron/**"
+
+# ── Permissions ────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+
+# ── Environment ────────────────────────────────────────────────────────────
+env:
+  # Pin the Squadron infrastructure template version
+  # Change to a release tag for stability (e.g. v0.1.0)
+  SQUADRON_REF: "main"
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════
+  # Deploy infrastructure + sync config
+  # ════════════════════════════════════════════════════════════════════
+  deploy:
+    if: >
+      github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate .squadron/ exists
+        run: |
+          if [ ! -d ".squadron" ]; then
+            echo "::error::.squadron/ directory not found."
+            echo "Run 'squadron init' to create it, then commit and push."
+            exit 1
+          fi
+          if [ ! -f ".squadron/config.yaml" ]; then
+            echo "::error::.squadron/config.yaml not found."
+            exit 1
+          fi
+          echo "Found .squadron/ with config.yaml"
+          ls -la .squadron/
+
+      - name: Determine app name
+        id: app
+        run: |
+          if [ -n "${{ inputs.app-name }}" ]; then
+            echo "name=${{ inputs.app-name }}" >> "$GITHUB_OUTPUT"
+          else
+            REPO_NAME="${{ github.event.repository.name }}"
+            echo "name=${REPO_NAME}-squadron" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set deployment parameters
+        id: params
+        run: |
+          echo "resource-group=${{ inputs.resource-group || 'squadron-rg' }}" >> "$GITHUB_OUTPUT"
+          echo "location=${{ inputs.location || 'eastus' }}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ inputs.squadron-image || 'ghcr.io/nbaertsch/squadron:latest' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── Infrastructure (only on full deploy) ──────────────────────
+      - name: Download Squadron Bicep template
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
+        run: |
+          curl -sfL \
+            "https://raw.githubusercontent.com/nbaertsch/squadron/${{ env.SQUADRON_REF }}/infra/main.bicep" \
+            -o /tmp/squadron-infra.bicep
+          echo "Downloaded Bicep template (ref: ${{ env.SQUADRON_REF }})"
+
+      - name: Create resource group
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
+        run: |
+          az group create \
+            --name "${{ steps.params.outputs.resource-group }}" \
+            --location "${{ steps.params.outputs.location }}" \
+            --output none
+          echo "Resource group ready: ${{ steps.params.outputs.resource-group }}"
+
+      - name: Deploy infrastructure (Bicep)
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
+        id: bicep
+        uses: azure/arm-deploy@v2
+        with:
+          resourceGroupName: ${{ steps.params.outputs.resource-group }}
+          template: /tmp/squadron-infra.bicep
+          parameters: >-
+            appName=${{ steps.app.outputs.name }}
+            ghcrImage=${{ steps.params.outputs.image }}
+            location=${{ steps.params.outputs.location }}
+            githubAppId=${{ secrets.SQ_APP_ID }}
+            githubPrivateKey=${{ secrets.SQ_PRIVATE_KEY }}
+            githubInstallationId=${{ secrets.SQ_INSTALLATION_ID }}
+            githubWebhookSecret=${{ secrets.SQ_WEBHOOK_SECRET }}
+            copilotGithubToken=${{ secrets.SQ_COPILOT_TOKEN }}
+
+      # ── Config sync (always runs) ─────────────────────────────────
+      - name: Resolve storage account
+        id: storage
+        run: |
+          # Find the storage account in the resource group
+          STORAGE_ACCOUNT=$(az storage account list \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --query "[0].name" --output tsv)
+
+          if [ -z "$STORAGE_ACCOUNT" ]; then
+            echo "::error::No storage account found in resource group."
+            echo "Run with action=deploy first to create infrastructure."
+            exit 1
+          fi
+
+          STORAGE_KEY=$(az storage account keys list \
+            --account-name "$STORAGE_ACCOUNT" \
+            --query "[0].value" --output tsv)
+
+          echo "account=$STORAGE_ACCOUNT" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$STORAGE_KEY"
+          echo "key=$STORAGE_KEY" >> "$GITHUB_OUTPUT"
+          echo "Resolved storage account: $STORAGE_ACCOUNT"
+
+      - name: Sync .squadron/ config to Azure Files
+        run: |
+          echo "Uploading .squadron/ to Azure Files share..."
+          az storage file upload-batch \
+            --destination "squadron-data" \
+            --source ".squadron" \
+            --destination-path ".squadron" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --overwrite
+          echo "Config synced successfully"
+
+      - name: Restart container to load new config
+        run: |
+          echo "Restarting container to pick up config changes..."
+          REVISION=$(az containerapp revision list \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --query "[0].name" --output tsv 2>/dev/null || true)
+
+          if [ -n "$REVISION" ]; then
+            az containerapp revision restart \
+              --name "${{ steps.app.outputs.name }}" \
+              --resource-group "${{ steps.params.outputs.resource-group }}" \
+              --revision "$REVISION" \
+              --output none
+            echo "Container restarted"
+          else
+            echo "::warning::No active revision found — container may not be running yet."
+            echo "If this is your first deploy, run again with action=deploy."
+          fi
+
+      # ── Output ────────────────────────────────────────────────────
+      - name: Output deployment info
+        run: |
+          FQDN=$(az containerapp show \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --query "properties.configuration.ingress.fqdn" --output tsv 2>/dev/null || true)
+
+          if [ -n "$FQDN" ]; then
+            echo "## Squadron Deployed" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **App** | \`${{ steps.app.outputs.name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **FQDN** | https://${FQDN} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Webhook URL** | \`https://${FQDN}/webhook\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| **Health** | https://${FQDN}/health |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Next Steps" >> "$GITHUB_STEP_SUMMARY"
+            echo "1. Set the **Webhook URL** in your [GitHub App settings](https://github.com/settings/apps):" >> "$GITHUB_STEP_SUMMARY"
+            echo "   \`https://${FQDN}/webhook\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "2. Verify health: \`curl https://${FQDN}/health\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "3. Open an issue to test!" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not determine FQDN. Check if the container app exists."
+          fi
+
+      - name: Health check
+        run: |
+          FQDN=$(az containerapp show \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --query "properties.configuration.ingress.fqdn" --output tsv 2>/dev/null || true)
+
+          if [ -z "$FQDN" ]; then
+            echo "::warning::Cannot health-check — FQDN not available"
+            exit 0
+          fi
+
+          echo "Waiting for https://${FQDN}/health ..."
+          for i in $(seq 1 12); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${FQDN}/health" 2>/dev/null || true)
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Health check passed!"
+              curl -s "https://${FQDN}/health" | python3 -m json.tool
+              exit 0
+            fi
+            echo "  Attempt $i/12 — HTTP $HTTP_CODE (waiting 10s...)"
+            sleep 10
+          done
+          echo "::warning::Health check did not pass within 120s. Container may still be starting."
+
+  # ════════════════════════════════════════════════════════════════════
+  # Sync config only (no infrastructure changes)
+  # ════════════════════════════════════════════════════════════════════
+  sync-config:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Determine app name
+        id: app
+        run: |
+          if [ -n "${{ inputs.app-name }}" ]; then
+            echo "name=${{ inputs.app-name }}" >> "$GITHUB_OUTPUT"
+          else
+            REPO_NAME="${{ github.event.repository.name }}"
+            echo "name=${REPO_NAME}-squadron" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve storage account
+        id: storage
+        run: |
+          RG="${{ inputs.resource-group || 'squadron-rg' }}"
+          STORAGE_ACCOUNT=$(az storage account list \
+            --resource-group "$RG" \
+            --query "[0].name" --output tsv)
+          STORAGE_KEY=$(az storage account keys list \
+            --account-name "$STORAGE_ACCOUNT" \
+            --query "[0].value" --output tsv)
+          echo "account=$STORAGE_ACCOUNT" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$STORAGE_KEY"
+          echo "key=$STORAGE_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Sync .squadron/ config
+        run: |
+          az storage file upload-batch \
+            --destination "squadron-data" \
+            --source ".squadron" \
+            --destination-path ".squadron" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --overwrite
+          echo "Config synced"
+
+      - name: Restart container
+        run: |
+          RG="${{ inputs.resource-group || 'squadron-rg' }}"
+          REVISION=$(az containerapp revision list \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "$RG" \
+            --query "[0].name" --output tsv)
+          az containerapp revision restart \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "$RG" \
+            --revision "$REVISION" \
+            --output none
+          echo "Container restarted with new config"
+
+  # ════════════════════════════════════════════════════════════════════
+  # Destroy all infrastructure
+  # ════════════════════════════════════════════════════════════════════
+  destroy:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Confirm destruction
+        run: |
+          echo "::warning::Destroying all Squadron resources in ${{ inputs.resource-group }}"
+          echo "This will delete the Container App, storage, and all data."
+
+      - name: Delete resource group
+        run: |
+          az group delete \
+            --name "${{ inputs.resource-group || 'squadron-rg' }}" \
+            --yes --no-wait
+          echo "Resource group deletion initiated (async)"
+          echo "## Squadron Destroyed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Resource group \`${{ inputs.resource-group || 'squadron-rg' }}\` is being deleted." >> "$GITHUB_STEP_SUMMARY"
