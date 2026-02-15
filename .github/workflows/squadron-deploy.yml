@@ -148,7 +148,7 @@ jobs:
           SQ_APP_ID: ${{ secrets.SQ_APP_ID_DEV }}
           SQ_PRIVATE_KEY: ${{ secrets.SQ_APP_PRIVATE_KEY }}
           SQ_INSTALLATION_ID: ${{ secrets.SQ_INSTALLATION_ID_DEV }}
-          SQ_WEBHOOK_SECRET: ${{ secrets.SQ_WEBHOOK_SECRET_DEV }}
+          SQ_WEBHOOK_SECRET: ${{ secrets.SQ_WEBHOOK_SECRET }}
           SQ_COPILOT_TOKEN: ${{ secrets.SQ_COPILOT_TOKEN }}
         run: |
           set -euo pipefail
