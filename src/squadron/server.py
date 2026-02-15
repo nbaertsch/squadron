@@ -120,8 +120,17 @@ class SquadronServer:
             on_wake_agent=self.agent_manager.wake_agent,
         )
 
-        # 8. Wire webhook endpoint
-        configure_webhook(self.event_queue, self.github)
+        # 8. Wire webhook endpoint (single-tenant security validation)
+        repo_full_name = None
+        if self.config.project.owner and self.config.project.repo:
+            repo_full_name = f"{self.config.project.owner}/{self.config.project.repo}"
+
+        configure_webhook(
+            self.event_queue,
+            self.github,
+            expected_installation_id=os.environ.get("GITHUB_INSTALLATION_ID"),
+            expected_repo_full_name=repo_full_name,
+        )
 
         # 9. Start background loops
         await self.router.start()

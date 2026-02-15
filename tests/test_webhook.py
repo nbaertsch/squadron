@@ -171,3 +171,220 @@ class TestSignatureVerification:
             },
         )
         assert response.status_code == 200
+
+
+class TestInstallationValidation:
+    """Test single-tenant installation ID validation."""
+
+    def test_correct_installation_accepted(self, app, event_queue, github_client):
+        configure(
+            event_queue,
+            github_client,
+            expected_installation_id="12345",
+        )
+        tc = TestClient(app)
+        payload = {
+            "action": "opened",
+            "issue": {"number": 1},
+            "sender": {"login": "alice"},
+            "installation": {"id": 12345},
+        }
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "install-ok",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_wrong_installation_rejected(self, app, event_queue, github_client):
+        configure(
+            event_queue,
+            github_client,
+            expected_installation_id="12345",
+        )
+        tc = TestClient(app)
+        payload = {
+            "action": "opened",
+            "issue": {"number": 1},
+            "sender": {"login": "attacker"},
+            "installation": {"id": 99999},
+        }
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "install-bad",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 403
+        assert event_queue.empty()
+
+    def test_missing_installation_rejected(self, app, event_queue, github_client):
+        configure(
+            event_queue,
+            github_client,
+            expected_installation_id="12345",
+        )
+        tc = TestClient(app)
+        payload = {
+            "action": "opened",
+            "sender": {"login": "unknown"},
+        }
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "install-missing",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 403
+
+    def test_no_expected_installation_skips_check(self, app, event_queue, github_client):
+        """When expected_installation_id is None, any installation is accepted."""
+        configure(event_queue, github_client, expected_installation_id=None)
+        tc = TestClient(app)
+        payload = {
+            "action": "opened",
+            "sender": {"login": "alice"},
+            "installation": {"id": 99999},
+        }
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "install-skip",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 200
+
+
+class TestRepoScopeValidation:
+    """Test single-tenant repository scope validation."""
+
+    def test_correct_repo_accepted(self, app, event_queue, github_client):
+        configure(
+            event_queue,
+            github_client,
+            expected_repo_full_name="owner/my-repo",
+        )
+        tc = TestClient(app)
+        payload = {
+            "action": "opened",
+            "sender": {"login": "alice"},
+            "repository": {"full_name": "owner/my-repo"},
+        }
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "repo-ok",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_wrong_repo_rejected(self, app, event_queue, github_client):
+        configure(
+            event_queue,
+            github_client,
+            expected_repo_full_name="owner/my-repo",
+        )
+        tc = TestClient(app)
+        payload = {
+            "action": "opened",
+            "sender": {"login": "attacker"},
+            "repository": {"full_name": "attacker/evil-repo"},
+        }
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "repo-bad",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 403
+        assert event_queue.empty()
+
+    def test_no_expected_repo_skips_check(self, app, event_queue, github_client):
+        """When expected_repo_full_name is None, any repo is accepted."""
+        configure(event_queue, github_client, expected_repo_full_name=None)
+        tc = TestClient(app)
+        payload = {
+            "action": "opened",
+            "sender": {"login": "alice"},
+            "repository": {"full_name": "anyone/anything"},
+        }
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "repo-skip",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 200
+
+
+class TestWebhookRateLimiting:
+    """Test webhook rate limiting."""
+
+    def test_rate_limit_blocks_excess_requests(self, app, event_queue, github_client):
+        configure(event_queue, github_client, rate_limit_max=3)
+        tc = TestClient(app)
+        payload = {"action": "opened", "sender": {"login": "alice"}}
+
+        for i in range(3):
+            resp = tc.post(
+                "/webhook",
+                json=payload,
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": f"rl-{i}",
+                    "X-Hub-Signature-256": "sha256=dummy",
+                },
+            )
+            assert resp.status_code == 200
+
+        # 4th request within the window should be rejected
+        resp = tc.post(
+            "/webhook",
+            json=payload,
+            headers={
+                "X-GitHub-Event": "issues",
+                "X-GitHub-Delivery": "rl-excess",
+                "X-Hub-Signature-256": "sha256=dummy",
+            },
+        )
+        assert resp.status_code == 429
+
+    def test_rate_limit_disabled_with_zero(self, app, event_queue, github_client):
+        configure(event_queue, github_client, rate_limit_max=0)
+        tc = TestClient(app)
+        payload = {"action": "opened", "sender": {"login": "alice"}}
+
+        # Should never be rate limited
+        for i in range(100):
+            resp = tc.post(
+                "/webhook",
+                json=payload,
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": f"rl-no-{i}",
+                    "X-Hub-Signature-256": "sha256=dummy",
+                },
+            )
+            assert resp.status_code == 200
