@@ -116,9 +116,10 @@ class ResourceMonitor:
     event loop.  Logs warnings when resources are under pressure.
     """
 
-    def __init__(self, repo_root: Path, interval: int = 60):
+    def __init__(self, repo_root: Path, interval: int = 60, worktree_dir: Path | None = None):
         self.repo_root = repo_root
         self.interval = interval
+        self._worktree_dir = worktree_dir
         self._task: asyncio.Task | None = None
         self._latest: ResourceSnapshot = ResourceSnapshot()
         self._running = False
@@ -170,7 +171,7 @@ class ResourceMonitor:
             pass
 
         # Per-agent worktree sizes
-        worktrees_dir = data_dir / "worktrees"
+        worktrees_dir = self._worktree_dir or (data_dir / "worktrees")
         if worktrees_dir.exists():
             try:
                 for entry in os.scandir(worktrees_dir):

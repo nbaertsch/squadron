@@ -100,6 +100,9 @@ class RuntimeConfig(BaseModel):
     reconciliation_interval: int = 300  # seconds
     max_concurrent_agents: int = 10  # max agents running simultaneously (0 = unlimited)
     sparse_checkout: bool = False  # use git sparse-checkout for worktrees
+    worktree_dir: str | None = (
+        None  # override worktree base path (default: .squadron-data/worktrees)
+    )
 
 
 class EscalationConfig(BaseModel):
@@ -396,6 +399,12 @@ def load_config(squadron_dir: Path) -> SquadronConfig:
         raw = yaml.safe_load(f) or {}
 
     config = SquadronConfig(**raw)
+
+    # Environment variable overrides for deployment
+    worktree_dir = os.environ.get("SQUADRON_WORKTREE_DIR")
+    if worktree_dir:
+        config.runtime.worktree_dir = worktree_dir
+
     logger.info("Loaded Squadron config: project=%s", config.project.name)
     return config
 

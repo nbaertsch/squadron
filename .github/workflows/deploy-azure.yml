@@ -1,0 +1,178 @@
+# Deploy Squadron to Azure Container Apps
+#
+# Reusable workflow: user repos call this from their own workflow.
+#
+# Usage in your repo:
+#   jobs:
+#     deploy:
+#       uses: nbaertsch/squadron/.github/workflows/deploy-azure.yml@main
+#       secrets:
+#         AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+#         GITHUB_APP_ID: ${{ secrets.SQ_APP_ID }}
+#         GITHUB_PRIVATE_KEY: ${{ secrets.SQ_PRIVATE_KEY }}
+#         GITHUB_INSTALLATION_ID: ${{ secrets.SQ_INSTALLATION_ID }}
+#         GITHUB_WEBHOOK_SECRET: ${{ secrets.SQ_WEBHOOK_SECRET }}
+#
+# The AZURE_CREDENTIALS secret should be a service principal JSON:
+#   az ad sp create-for-rbac --name squadron-deploy --role contributor \
+#     --scopes /subscriptions/<sub-id>/resourceGroups/<rg> --sdk-auth
+
+name: Deploy to Azure Container Apps
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: "Container App name (defaults to repo-squadron)"
+        required: false
+        type: string
+      resource-group:
+        description: "Azure resource group"
+        required: true
+        type: string
+      location:
+        description: "Azure region (default: eastus)"
+        required: false
+        type: string
+        default: "eastus"
+      image:
+        description: "Container image (default: ghcr.io/<repo>:latest)"
+        required: false
+        type: string
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+      GITHUB_APP_ID:
+        required: true
+      GITHUB_PRIVATE_KEY:
+        required: true
+      GITHUB_INSTALLATION_ID:
+        required: true
+      GITHUB_WEBHOOK_SECRET:
+        required: true
+      COPILOT_GITHUB_TOKEN:
+        required: false
+
+  # Also allow manual dispatch for the Squadron repo itself
+  workflow_dispatch:
+    inputs:
+      app-name:
+        description: "Container App name"
+        required: true
+        type: string
+      resource-group:
+        description: "Azure resource group"
+        required: true
+        type: string
+      location:
+        description: "Azure region"
+        required: false
+        type: string
+        default: "eastus"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine app name
+        id: app
+        run: |
+          if [ -n "${{ inputs.app-name }}" ]; then
+            echo "name=${{ inputs.app-name }}" >> "$GITHUB_OUTPUT"
+          else
+            REPO_NAME="${{ github.event.repository.name }}"
+            echo "name=${REPO_NAME}-squadron" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine image
+        id: image
+        run: |
+          if [ -n "${{ inputs.image }}" ]; then
+            echo "uri=${{ inputs.image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "uri=ghcr.io/${{ github.repository }}:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Verify .squadron/ exists
+        run: |
+          if [ ! -d ".squadron" ]; then
+            echo "::error::.squadron/ directory not found. Run 'squadron init' first."
+            exit 1
+          fi
+
+      - name: Deploy infrastructure (Bicep)
+        id: deploy
+        uses: azure/arm-deploy@v2
+        with:
+          resourceGroupName: ${{ inputs.resource-group }}
+          template: infra/main.bicep
+          parameters: >-
+            appName=${{ steps.app.outputs.name }}
+            ghcrImage=${{ steps.image.outputs.uri }}
+            location=${{ inputs.location }}
+            githubAppId=${{ secrets.GITHUB_APP_ID }}
+            githubPrivateKey=${{ secrets.GITHUB_PRIVATE_KEY }}
+            githubInstallationId=${{ secrets.GITHUB_INSTALLATION_ID }}
+            githubWebhookSecret=${{ secrets.GITHUB_WEBHOOK_SECRET }}
+            copilotGithubToken=${{ secrets.COPILOT_GITHUB_TOKEN }}
+
+      - name: Copy .squadron/ config to persistent volume
+        run: |
+          # Get storage account credentials
+          STORAGE_ACCOUNT=$(az storage account list \
+            --resource-group ${{ inputs.resource-group }} \
+            --query "[?contains(name, '$(echo ${{ steps.app.outputs.name }} | tr -d '-')stor')].name" \
+            --output tsv | head -1)
+
+          STORAGE_KEY=$(az storage account keys list \
+            --account-name "$STORAGE_ACCOUNT" \
+            --query "[0].value" --output tsv)
+
+          # Upload .squadron/ directory to the file share
+          az storage file upload-batch \
+            --destination squadron-data \
+            --source .squadron \
+            --destination-path .squadron \
+            --account-name "$STORAGE_ACCOUNT" \
+            --account-key "$STORAGE_KEY"
+
+          echo "Uploaded .squadron/ config to Azure Files share"
+
+      - name: Output deployment info
+        run: |
+          FQDN="${{ steps.deploy.outputs.fqdn }}"
+          WEBHOOK="${{ steps.deploy.outputs.webhookUrl }}"
+          echo "## Squadron Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **App**: ${{ steps.app.outputs.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **FQDN**: https://${FQDN}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Webhook URL**: ${WEBHOOK}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Health**: https://${FQDN}/health" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Next Steps" >> "$GITHUB_STEP_SUMMARY"
+          echo "1. Set the webhook URL in your GitHub App settings:" >> "$GITHUB_STEP_SUMMARY"
+          echo "   \`${WEBHOOK}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "2. Verify health: \`curl https://${FQDN}/health\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify deployment health
+        run: |
+          FQDN="${{ steps.deploy.outputs.fqdn }}"
+          echo "Waiting for deployment to become healthy..."
+          for i in $(seq 1 12); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://${FQDN}/health" || true)
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Health check passed!"
+              curl -s "https://${FQDN}/health" | python3 -m json.tool
+              exit 0
+            fi
+            echo "Attempt $i/12: HTTP $HTTP_CODE — waiting 10s..."
+            sleep 10
+          done
+          echo "::warning::Health check did not pass within 2 minutes. The app may still be starting."

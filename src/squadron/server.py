@@ -33,6 +33,7 @@ from squadron.github_client import GitHubClient
 from squadron.models import AgentStatus, GitHubEvent
 from squadron.reconciliation import ReconciliationLoop
 from squadron.registry import AgentRegistry
+from squadron.resource_monitor import ResourceMonitor
 from squadron.webhook import configure as configure_webhook
 from squadron.webhook import router as webhook_router
 
@@ -54,6 +55,7 @@ class SquadronServer:
         self.router: EventRouter | None = None
         self.agent_manager: AgentManager | None = None
         self.reconciliation: ReconciliationLoop | None = None
+        self.resource_monitor: ResourceMonitor | None = None
 
     async def start(self) -> None:
         """Initialize all components and start background loops."""
@@ -126,12 +128,23 @@ class SquadronServer:
         await self.agent_manager.start()
         await self.reconciliation.start()
 
+        # 10. Start resource monitor
+        worktree_dir = (
+            Path(self.config.runtime.worktree_dir) if self.config.runtime.worktree_dir else None
+        )
+        self.resource_monitor = ResourceMonitor(
+            self.repo_root, interval=60, worktree_dir=worktree_dir
+        )
+        await self.resource_monitor.start()
+
         logger.info("Squadron server started successfully")
 
     async def stop(self) -> None:
         """Graceful shutdown — stop all components."""
         logger.info("Squadron server shutting down")
 
+        if self.resource_monitor:
+            await self.resource_monitor.stop()
         if self.reconciliation:
             await self.reconciliation.stop()
         if self.agent_manager:
@@ -229,10 +242,21 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 if agents:
                     agent_counts[status.value] = len(agents)
 
+        resources = None
+        if _server.resource_monitor:
+            snap = _server.resource_monitor.latest
+            resources = {
+                "memory_percent": snap.memory_percent,
+                "disk_percent": snap.disk_percent,
+                "disk_free_mb": snap.disk_free_mb,
+                "active_agent_count": snap.active_agent_count,
+            }
+
         return {
             "status": "ok",
             "project": _server.config.project.name if _server.config else None,
             "agents": agent_counts,
+            "resources": resources,
         }
 
     @app.get("/agents")

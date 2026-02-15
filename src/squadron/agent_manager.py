@@ -1226,9 +1226,12 @@ class AgentManager:
         large repos.  The agent will ``git sparse-checkout add <dir>``
         on-demand as it navigates the codebase.
         """
-        worktree_dir = (
-            self.repo_root / ".squadron-data" / "worktrees" / f"issue-{record.issue_number}"
+        worktree_base = (
+            Path(self.config.runtime.worktree_dir)
+            if self.config.runtime.worktree_dir
+            else self.repo_root / ".squadron-data" / "worktrees"
         )
+        worktree_dir = worktree_base / f"issue-{record.issue_number}"
         worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
         if worktree_dir.exists():

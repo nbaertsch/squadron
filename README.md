@@ -366,85 +366,116 @@ uv run pytest tests/e2e/ -v --log-cli-level=INFO
 | `GITHUB_INSTALLATION_ID` | Yes | Installation ID for target repo |
 | `GITHUB_WEBHOOK_SECRET` | Yes | Webhook HMAC secret |
 | `COPILOT_GITHUB_TOKEN` | Yes | Fine-grained PAT from a Copilot-licensed account |
+| `SQUADRON_WORKTREE_DIR` | No | Override worktree base path (default: `.squadron-data/worktrees`) |
 | `ANTHROPIC_API_KEY` | BYOK only | API key for Anthropic provider |
 | `OPENAI_API_KEY` | BYOK only | API key for OpenAI provider |
 
 ## Deployment
 
-Squadron runs as a single long-lived container. The recommended deployment uses **Fly.io** with CI/CD from your repo.
+Squadron runs as a single long-lived container. The recommended deployment uses **Azure Container Apps** with infrastructure-as-code via **Bicep** and CI/CD via **GitHub Actions**.
 
-### Architecture
+### Storage Architecture
 
 ```
-┌─────────────────── Your Repo ───────────────────┐
-│  .squadron/config.yaml    ← project config       │
-│  .squadron/agents/*.md    ← agent definitions     │
-│  Dockerfile               ← FROM squadron:latest  │
-│  fly.toml                 ← Fly.io config         │
-│  .github/workflows/       ← auto-deploy on push   │
-└─────────────────────────────────────────────────┘
-        │ push to main
-        ▼
-┌─────────── GitHub Actions ───────────┐
-│  Build image (bake .squadron/ in)     │
-│  flyctl deploy                       │
-└──────────────────────────────────────┘
-        │
-        ▼
-┌─────────── Fly.io ───────────────────┐
-│  Squadron container                   │
-│  ├── FastAPI (webhooks)               │
-│  ├── PM agent (Copilot SDK)           │
-│  ├── Dev/Review agents (on demand)    │
-│  └── SQLite on persistent volume      │
-└───────────────────────────────────────┘
+┌────────────────── Azure Container App ──────────────────┐
+│                                                          │
+│  /data/  ← Azure Files (persistent, network-mounted)     │
+│  ├── .squadron/config.yaml     project config            │
+│  ├── .squadron/agents/*.md     agent definitions         │
+│  └── .squadron-data/                                     │
+│      └── registry.db           SQLite database           │
+│                                                          │
+│  /tmp/squadron-worktrees/  ← Local ephemeral disk (fast) │
+│  └── issue-42/             git worktrees (high I/O)      │
+│  └── issue-99/             recreated on demand           │
+│                                                          │
+│  FastAPI server (:8000)                                  │
+│  ├── /webhook/github       GitHub webhook endpoint       │
+│  ├── /health               health + resource metrics     │
+│  └── /agents               active agent list             │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Quick Start
+- **Azure Files** holds the SQLite database and `.squadron/` config — persists across container restarts
+- **Local ephemeral disk** holds git worktrees — fast I/O, recreated automatically when agents wake
+
+### Deploy via CLI
 
 ```bash
 # 1. Initialize Squadron in your repo
 cd your-project
-pip install squadron    # or: uvx squadron
 squadron init
 
-# 2. Create the Fly.io app + volume
-flyctl apps create your-project-squadron
-flyctl volumes create squadron_data --app your-project-squadron --size 1
+# 2. Azure login
+az login
 
-# 3. Set secrets on Fly.io
-flyctl secrets set \
-  GITHUB_APP_ID=your_app_id \
-  GITHUB_PRIVATE_KEY="$(cat your-key.pem)" \
-  GITHUB_INSTALLATION_ID=your_installation_id \
-  GITHUB_WEBHOOK_SECRET=your_webhook_secret \
-  COPILOT_GITHUB_TOKEN=github_pat_... \
-  --app your-project-squadron
+# 3. Set environment variables
+export GITHUB_APP_ID=your_app_id
+export GITHUB_PRIVATE_KEY="$(cat your-key.pem)"
+export GITHUB_INSTALLATION_ID=your_installation_id
+export GITHUB_WEBHOOK_SECRET=your_webhook_secret
 
-# 4. Add FLY_API_TOKEN to your repo's GitHub secrets
-
-# 5. Push to main — the deploy workflow handles the rest
-git add .squadron/ Dockerfile fly.toml .github/workflows/
-git commit -m "chore: add Squadron"
-git push
+# 4. Deploy
+squadron deploy \
+  --app-name my-project-squadron \
+  --resource-group squadron-rg \
+  --location switzerlandnorth
 ```
 
-### What `squadron init` Creates
+### Deploy via GitHub Actions
 
-| File | Purpose |
-|------|---------|
-| `.squadron/config.yaml` | Project config (labels, agents, circuit breakers) |
-| `.squadron/agents/*.md` | Agent definitions (PM, feat-dev, bug-fix, pr-review, security-review) |
-| `Dockerfile` | `FROM ghcr.io/nbaertsch/squadron:latest` + copies `.squadron/` |
-| `fly.toml` | Fly.io machine config (region, volume mount, health check) |
-| `.github/workflows/deploy-squadron.yml` | Auto-deploy when `.squadron/` changes |
+The reusable workflow `.github/workflows/deploy-azure.yml` deploys on push to main:
+
+```yaml
+# In your repo's workflow:
+jobs:
+  deploy:
+    uses: nbaertsch/squadron/.github/workflows/deploy-azure.yml@main
+    with:
+      app-name: my-project-squadron
+      resource-group: squadron-rg
+      location: switzerlandnorth
+    secrets:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      GITHUB_APP_ID: ${{ secrets.GITHUB_APP_ID }}
+      GITHUB_PRIVATE_KEY: ${{ secrets.GITHUB_PRIVATE_KEY }}
+      GITHUB_INSTALLATION_ID: ${{ secrets.GITHUB_INSTALLATION_ID }}
+      GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+```
+
+#### Required GitHub Actions secrets for deployment
+
+| Secret | Description |
+|--------|-------------|
+| `AZURE_CREDENTIALS` | Azure service principal JSON (`az ad sp create-for-rbac --sdk-auth`) |
+| `GITHUB_APP_ID` | GitHub App ID |
+| `GITHUB_PRIVATE_KEY` | PEM-encoded private key (full content) |
+| `GITHUB_INSTALLATION_ID` | Installation ID for target repo |
+| `GITHUB_WEBHOOK_SECRET` | Webhook HMAC secret |
+
+### Infrastructure (Bicep)
+
+The `infra/main.bicep` template creates:
+
+| Resource | Purpose |
+|----------|---------|
+| Log Analytics Workspace | Container logs and monitoring |
+| Container App Environment | Managed container runtime |
+| Storage Account + Azure Files | Persistent storage (1 GB) for SQLite DB + config |
+| Container App | Squadron server (1 CPU, 2 GiB RAM) |
+
+### After Deployment
+
+1. Copy the FQDN from the deployment output
+2. Configure your GitHub App's webhook URL: `https://<fqdn>/webhook/github`
+3. Verify health: `curl https://<fqdn>/health`
 
 ### Updating Squadron
 
-To pick up a new version of the Squadron framework, just re-deploy — your `Dockerfile` pulls `ghcr.io/nbaertsch/squadron:latest`. Pin a specific version with:
+Push a new image to GHCR (CI does this automatically) and re-deploy:
 
-```dockerfile
-FROM ghcr.io/nbaertsch/squadron:sha-abc1234
+```bash
+squadron deploy --image ghcr.io/nbaertsch/squadron:sha-abc1234
 ```
 
 ## Development
