@@ -8,7 +8,7 @@ This guide walks through deploying a Squadron instance on Azure Container Apps f
 |---|---|
 | **Azure subscription** | [Free tier works](https://azure.microsoft.com/free/) |
 | **Azure CLI** | `brew install azure-cli` or [install docs](https://aka.ms/install-az) |
-| **GitHub App** | Install [Squadron GitHub App](https://github.com/apps/squadron-dev) on your repo |
+| **GitHub App** | [Create your own GitHub App](../github-app-setup.md) (one per repo) |
 | **Squadron CLI** | `uv pip install squadron` (or `pip install squadron`) |
 
 ## What Gets Deployed
@@ -32,20 +32,16 @@ Estimated cost: **~$5–15/month** on a single 1-CPU / 2GB container with scale-
 
 ## Step-by-Step Setup
 
-### 1. Install the GitHub App
+### 1. Create and Install a GitHub App
 
-Go to your GitHub App settings and install it on the target repository:
+Follow the **[GitHub App setup guide](../github-app-setup.md)** to:
 
-```
-https://github.com/apps/squadron-dev
-```
+1. Create a new GitHub App with the required permissions
+2. Generate a private key
+3. Install it on your target repository
+4. Note the App ID, Installation ID, and webhook secret
 
-Select **"Only select repositories"** and choose your target repo.
-
-After installation, note the **Installation ID** from the URL:
-```
-https://github.com/settings/installations/<INSTALLATION_ID>
-```
+You'll need these values for Step 5 (repository secrets).
 
 ### 2. Initialize Squadron config in your repo
 
@@ -148,13 +144,11 @@ The workflow will:
 
 ### 8. Configure the webhook URL
 
-Once the deployment completes, check the workflow's **"Output deployment info"** step for the FQDN. Then configure the GitHub App:
+Once the deployment completes, check the workflow's **"Output deployment info"** step for the FQDN. Then go back to your GitHub App settings and set the webhook URL as described in the ["After Deployment" section of the GitHub App guide](../github-app-setup.md#after-deployment-set-the-webhook-url):
 
-1. Go to your GitHub App settings → **Webhook**
-2. Set **Webhook URL** to: `https://<FQDN>/webhook`
-3. Set **Content type** to `application/json`
-4. Set **Secret** to the same value as `SQ_WEBHOOK_SECRET`
-5. Subscribe to events: **Issues**, **Pull requests**, **Pull request reviews**, **Issue comments**, **Push**
+- **Webhook URL**: `https://<FQDN>/webhook`
+- **Content type**: `application/json`
+- **Secret**: same value as `SQ_WEBHOOK_SECRET`
 
 ### 9. Verify
 

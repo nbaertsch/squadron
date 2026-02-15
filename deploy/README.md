@@ -28,12 +28,14 @@ flowchart LR
 
 ## Onboarding a New Repo
 
-1. **Install the Squadron GitHub App** on your repo
+1. **[Create a GitHub App](github-app-setup.md)** for your repo (one app per repo)
 2. **Run `squadron init`** to scaffold `.squadron/` configuration
 3. **Copy the deployment workflow template** into `.github/workflows/`
 4. **Set repository secrets** (Azure credentials, GitHub App credentials)
 5. **Run the workflow** to deploy
 6. **Configure the webhook URL** in the GitHub App settings
+
+Start with the [GitHub App setup guide](github-app-setup.md) — it walks through creating the app, generating credentials, and what secrets you'll need.
 
 ## Deployment Targets
 
