@@ -68,6 +68,7 @@ jobs:
   # ════════════════════════════════════════════════════════════════════
   deploy:
     if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
+    environment: dev
     runs-on: ubuntu-latest
 
     steps:
@@ -303,6 +304,7 @@ jobs:
     if: >
       (github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config')
       || github.event_name == 'push'
+    environment: dev
     runs-on: ubuntu-latest
 
     steps:
@@ -374,6 +376,7 @@ jobs:
   # ════════════════════════════════════════════════════════════════════
   destroy:
     if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    environment: dev
     runs-on: ubuntu-latest
 
     steps:
