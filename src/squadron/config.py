@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ProjectConfig(BaseModel):
     name: str
     owner: str = ""  # GitHub org/user, e.g. "noahbaertsch"
-    repo: str = ""   # GitHub repo name, e.g. "squadron"
+    repo: str = ""  # GitHub repo name, e.g. "squadron"
     default_branch: str = "main"
     bot_username: str = "squadron[bot]"  # GitHub App bot username for self-event filtering
 
@@ -121,15 +121,13 @@ class ApprovalFlowRule(BaseModel):
 
         # Label match: any overlap
         if self.match_labels:
-            if not any(l in self.match_labels for l in labels):
+            if not any(lbl in self.match_labels for lbl in labels):
                 return False
 
         # Path match: any changed file matches any glob
         if self.match_paths and changed_files is not None:
             if not any(
-                fnmatch.fnmatch(f, pattern)
-                for f in changed_files
-                for pattern in self.match_paths
+                fnmatch.fnmatch(f, pattern) for f in changed_files for pattern in self.match_paths
             ):
                 return False
 
@@ -350,7 +348,11 @@ def parse_agent_definition(role: str, content: str) -> AgentDefinition:
 
     # Parse tool restrictions
     raw_restrictions = fm.get("tool_restrictions", {})
-    tool_restrictions = ToolRestrictions(**raw_restrictions) if isinstance(raw_restrictions, dict) else ToolRestrictions()
+    tool_restrictions = (
+        ToolRestrictions(**raw_restrictions)
+        if isinstance(raw_restrictions, dict)
+        else ToolRestrictions()
+    )
 
     return AgentDefinition(
         role=role,

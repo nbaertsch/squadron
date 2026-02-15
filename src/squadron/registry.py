@@ -112,7 +112,12 @@ class AgentRegistry:
             ),
         )
         await self.db.commit()
-        logger.info("Created agent: %s (role=%s, issue=#%s)", record.agent_id, record.role, record.issue_number)
+        logger.info(
+            "Created agent: %s (role=%s, issue=#%s)",
+            record.agent_id,
+            record.role,
+            record.issue_number,
+        )
         return record
 
     async def get_agent(self, agent_id: str) -> AgentRecord | None:
@@ -273,9 +278,7 @@ class AgentRegistry:
     async def prune_old_events(self, max_age_hours: int = 72) -> int:
         """Delete seen_events older than max_age_hours. Returns rows deleted."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
-        cursor = await self.db.execute(
-            "DELETE FROM seen_events WHERE received_at < ?", (cutoff,)
-        )
+        cursor = await self.db.execute("DELETE FROM seen_events WHERE received_at < ?", (cutoff,))
         await self.db.commit()
         return cursor.rowcount
 
@@ -299,6 +302,10 @@ class AgentRegistry:
             turn_count=row["turn_count"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
-            active_since=datetime.fromisoformat(row["active_since"]) if row["active_since"] else None,
-            sleeping_since=datetime.fromisoformat(row["sleeping_since"]) if row["sleeping_since"] else None,
+            active_since=datetime.fromisoformat(row["active_since"])
+            if row["active_since"]
+            else None,
+            sleeping_since=datetime.fromisoformat(row["sleeping_since"])
+            if row["sleeping_since"]
+            else None,
         )

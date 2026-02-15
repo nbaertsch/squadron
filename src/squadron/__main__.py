@@ -196,9 +196,7 @@ def _init_project(repo_root: Path) -> None:
     agents_dir.mkdir(parents=True)
 
     # Write config
-    config_content = _DEFAULT_CONFIG.format(
-        project_name=project_name, owner=owner, repo=repo
-    )
+    config_content = _DEFAULT_CONFIG.format(project_name=project_name, owner=owner, repo=repo)
     (squadron_dir / "config.yaml").write_text(config_content)
 
     # Write agent definitions
@@ -210,9 +208,15 @@ def _init_project(repo_root: Path) -> None:
         ("security-review.md", _DEFAULT_SECURITY_REVIEW),
     ]:
         (agents_dir / filename).write_text(
-            template.format(project_name=project_name, issue_number="", issue_title="",
-                            branch_name="", base_branch="main", max_iterations="5",
-                            max_tool_calls="200")
+            template.format(
+                project_name=project_name,
+                issue_number="",
+                issue_title="",
+                branch_name="",
+                base_branch="main",
+                max_iterations="5",
+                max_tool_calls="200",
+            )
         )
 
     print(f"Initialized Squadron project at {squadron_dir}")
@@ -223,7 +227,9 @@ def _init_project(repo_root: Path) -> None:
     print()
     print("Next steps:")
     print(f"  1. Review {squadron_dir / 'config.yaml'}")
-    print(f"  2. Set environment variables (GITHUB_APP_ID, GITHUB_PRIVATE_KEY_PATH, ANTHROPIC_API_KEY)")
+    print(
+        "  2. Set environment variables (GITHUB_APP_ID, GITHUB_PRIVATE_KEY_PATH, ANTHROPIC_API_KEY)"
+    )
     print(f"  3. Run: squadron --repo-root {repo_root}")
 
 

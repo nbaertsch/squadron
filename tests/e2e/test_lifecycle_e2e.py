@@ -20,9 +20,6 @@ Marks:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
-import json
 import os
 import time
 import uuid
@@ -33,13 +30,9 @@ import pytest
 from dotenv import load_dotenv
 
 from squadron.config import (
-    AgentDefinition,
-    SquadronConfig,
     load_agent_definitions,
-    parse_agent_definition,
 )
 from squadron.copilot import CopilotAgent, build_session_config
-from squadron.models import AgentRecord, AgentRole, AgentStatus, SquadronEvent, SquadronEventType
 
 _project_root = Path(__file__).parent.parent.parent
 load_dotenv(_project_root / ".env")
@@ -67,9 +60,7 @@ def _get_private_key() -> str:
 
     key_file = os.environ.get("SQ_APP_PRIVATE_KEY_FILE", "").strip()
     if not key_file:
-        pytest.skip(
-            "Missing SQ_APP_PRIVATE_KEY or SQ_APP_PRIVATE_KEY_FILE"
-        )
+        pytest.skip("Missing SQ_APP_PRIVATE_KEY or SQ_APP_PRIVATE_KEY_FILE")
     key_path = Path(key_file)
     if not key_path.is_absolute():
         key_path = _project_root / key_path
@@ -206,7 +197,6 @@ class TestAgentDefinitionWiring:
 
     async def test_pm_definition_produces_valid_sdk_config(self, copilot_authenticated):
         """Load the real PM agent definition and verify it creates a valid session."""
-        from copilot import CopilotClient
 
         definitions = load_agent_definitions(_project_root / ".squadron")
         pm_def = definitions.get("pm")
@@ -363,13 +353,15 @@ class TestPMAgentWithTools:
 
         # Build real PM tools (with mock github — we just want the schemas)
         github_mock = AsyncMock()
-        github_mock.get_issue = AsyncMock(return_value={
-            "number": 1,
-            "title": "Test issue",
-            "body": "A test body",
-            "state": "open",
-            "labels": [],
-        })
+        github_mock.get_issue = AsyncMock(
+            return_value={
+                "number": 1,
+                "title": "Test issue",
+                "body": "A test body",
+                "state": "open",
+                "labels": [],
+            }
+        )
         github_mock.add_labels_to_issue = AsyncMock()
         github_mock.comment_on_issue = AsyncMock()
 
@@ -434,7 +426,6 @@ class TestFullWebhookPipeline:
         self, copilot_authenticated, e2e_config_dir, e2e_env
     ):
         """Create real issue → send webhook → PM triages → verify labels/comments."""
-        from squadron.github_client import GitHubClient
         from squadron.server import SquadronServer
 
         owner = _require_env("E2E_TEST_OWNER")
@@ -445,7 +436,8 @@ class TestFullWebhookPipeline:
         github = await _create_github_client()
         try:
             issue = await github.create_issue(
-                owner, repo,
+                owner,
+                repo,
                 title=f"[E2E-{uid}] Add dark mode support",
                 body=(
                     "As a user, I want dark mode so I can work at night.\n\n"
@@ -507,7 +499,7 @@ class TestFullWebhookPipeline:
                     while time.time() - start < max_wait:
                         # Check for labels
                         issue_data = await github.get_issue(owner, repo, issue_number)
-                        labels = [l["name"] for l in issue_data.get("labels", [])]
+                        labels = [lbl["name"] for lbl in issue_data.get("labels", [])]
                         if labels:
                             labels_found = True
 

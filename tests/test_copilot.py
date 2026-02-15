@@ -6,8 +6,6 @@ CopilotAgent lifecycle tests require a running Copilot CLI
 and are covered by integration tests.
 """
 
-import pytest
-
 from squadron.config import ProviderConfig, RuntimeConfig, ModelOverride
 from squadron.copilot import build_session_config, build_resume_config
 
@@ -29,7 +27,10 @@ class TestBuildSessionConfig:
         assert config["session_id"] == "squadron-feat-dev-issue-42"
         assert config["model"] == "claude-sonnet-4"
         assert config["reasoning_effort"] == "high"
-        assert config["system_message"] == {"mode": "replace", "content": "You are a feature developer."}
+        assert config["system_message"] == {
+            "mode": "replace",
+            "content": "You are a feature developer.",
+        }
         assert config["working_directory"] == "/tmp/worktree"
         # Provider omitted when no API key available (Copilot-native auth)
         assert "provider" not in config
@@ -249,7 +250,11 @@ class TestBuildResumeConfig:
     def test_resume_config_has_provider_with_key(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
         runtime = RuntimeConfig(
-            provider=ProviderConfig(type="anthropic", base_url="https://api.anthropic.com", api_key_env="ANTHROPIC_API_KEY"),
+            provider=ProviderConfig(
+                type="anthropic",
+                base_url="https://api.anthropic.com",
+                api_key_env="ANTHROPIC_API_KEY",
+            ),
         )
         config = build_resume_config(
             role="feat-dev",
@@ -262,7 +267,11 @@ class TestBuildResumeConfig:
 
     def test_resume_config_no_provider_without_key(self):
         runtime = RuntimeConfig(
-            provider=ProviderConfig(type="anthropic", base_url="https://api.anthropic.com", api_key_env="NONEXISTENT_ANT_KEY"),
+            provider=ProviderConfig(
+                type="anthropic",
+                base_url="https://api.anthropic.com",
+                api_key_env="NONEXISTENT_ANT_KEY",
+            ),
         )
         config = build_resume_config(
             role="feat-dev",

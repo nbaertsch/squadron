@@ -14,7 +14,6 @@ only where it would block server startup — all GitHub operations are real.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -87,9 +86,7 @@ def _get_private_key() -> str:
 
     key_file = os.environ.get("SQ_APP_PRIVATE_KEY_FILE", "").strip()
     if not key_file:
-        pytest.skip(
-            "Missing SQ_APP_PRIVATE_KEY or SQ_APP_PRIVATE_KEY_FILE"
-        )
+        pytest.skip("Missing SQ_APP_PRIVATE_KEY or SQ_APP_PRIVATE_KEY_FILE")
     key_path = Path(key_file)
     if not key_path.is_absolute():
         key_path = _project_root / key_path
@@ -144,9 +141,10 @@ class TestServerBootE2E:
                     owner = server.config.project.owner
                     repo = server.config.project.repo
                     resp = await server.github._request(
-                        "GET", f"/repos/{owner}/{repo}/labels",
+                        "GET",
+                        f"/repos/{owner}/{repo}/labels",
                     )
-                    label_names = [l["name"] for l in resp.json()]
+                    label_names = [lbl["name"] for lbl in resp.json()]
                     assert "e2e-feature" in label_names
                     assert "e2e-bug" in label_names
                     assert "e2e-high" in label_names
@@ -164,10 +162,17 @@ class TestServerBootE2E:
                     await cleanup.start()
                     owner = _require_env("E2E_TEST_OWNER")
                     repo = _require_env("E2E_TEST_REPO")
-                    for label in ["e2e-feature", "e2e-bug", "e2e-high", "e2e-low", "e2e-in-progress"]:
+                    for label in [
+                        "e2e-feature",
+                        "e2e-bug",
+                        "e2e-high",
+                        "e2e-low",
+                        "e2e-in-progress",
+                    ]:
                         try:
                             await cleanup._request(
-                                "DELETE", f"/repos/{owner}/{repo}/labels/{label}",
+                                "DELETE",
+                                f"/repos/{owner}/{repo}/labels/{label}",
                             )
                         except Exception:
                             pass
@@ -182,12 +187,14 @@ class TestServerBootE2E:
         data_dir.mkdir()
         reg = AgentRegistry(str(data_dir / "registry.db"))
         await reg.initialize()
-        await reg.create_agent(AgentRecord(
-            agent_id="e2e-stale-agent",
-            role=AgentRole.FEAT_DEV,
-            issue_number=999,
-            status=AgentStatus.ACTIVE,
-        ))
+        await reg.create_agent(
+            AgentRecord(
+                agent_id="e2e-stale-agent",
+                role=AgentRole.FEAT_DEV,
+                issue_number=999,
+                status=AgentStatus.ACTIVE,
+            )
+        )
         await reg.close()
 
         env = _env_with_creds()
@@ -261,9 +268,14 @@ class TestServerEndpointsE2E:
                     body = json.dumps(payload).encode()
 
                     # Compute real HMAC signature
-                    sig = "sha256=" + hmac.new(
-                        webhook_secret.encode(), body, hashlib.sha256,
-                    ).hexdigest()
+                    sig = (
+                        "sha256="
+                        + hmac.new(
+                            webhook_secret.encode(),
+                            body,
+                            hashlib.sha256,
+                        ).hexdigest()
+                    )
 
                     resp = client.post(
                         "/webhook",

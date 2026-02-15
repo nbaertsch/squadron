@@ -1,7 +1,5 @@
 """Tests for Squadron core data models."""
 
-import pytest
-
 from squadron.models import (
     AgentRecord,
     AgentRole,

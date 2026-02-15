@@ -128,9 +128,7 @@ class ReconciliationLoop:
             # (catches webhooks missed while server was down — EC-008)
             for blocker_issue in list(agent.blocked_by):
                 try:
-                    issue_data = await self.github.get_issue(
-                        self.owner, self.repo, blocker_issue
-                    )
+                    issue_data = await self.github.get_issue(self.owner, self.repo, blocker_issue)
                     if issue_data.get("state") == "closed":
                         logger.info(
                             "Reconciliation found closed blocker #%d for agent %s",

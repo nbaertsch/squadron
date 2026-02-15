@@ -1,7 +1,5 @@
 """Tests for approval flow config matching and PR handling logic."""
 
-import pytest
-
 from squadron.config import ApprovalFlowConfig, ApprovalFlowRule
 from squadron.agent_manager import AgentManager
 

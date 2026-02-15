@@ -56,7 +56,7 @@ class AgentManager:
         # Per-agent inboxes for event delivery
         self.agent_inboxes: dict[str, asyncio.Queue[SquadronEvent]] = {}
 
-        # Framework tools bridge (agent ↔ framework)  
+        # Framework tools bridge (agent ↔ framework)
         self._framework_tools = FrameworkTools(
             registry=registry,
             github=github,
@@ -194,7 +194,11 @@ class AgentManager:
         active_agents = await self.registry.get_all_active_agents()
         context = self._build_pm_context(events, active_agents)
 
-        logger.info("Invoking PM agent with context (%d events, %d active agents)", len(events), len(active_agents))
+        logger.info(
+            "Invoking PM agent with context (%d events, %d active agents)",
+            len(events),
+            len(active_agents),
+        )
 
         await self._run_pm_session(pm_def, context, events)
 
@@ -264,7 +268,7 @@ class AgentManager:
                 issue_data = payload.get("issue", {})
                 if issue_data:
                     lines.append(f"  Title: {issue_data.get('title', 'N/A')}")
-                    labels = [l.get("name", "") for l in issue_data.get("labels", [])]
+                    labels = [lbl.get("name", "") for lbl in issue_data.get("labels", [])]
                     if labels:
                         lines.append(f"  Labels: {', '.join(labels)}")
                     body = issue_data.get("body", "")
@@ -363,7 +367,9 @@ class AgentManager:
         # Check for existing agent on this issue
         existing = await self.registry.get_agent_by_issue(issue_number)
         if existing:
-            logger.warning("Agent already exists for issue #%d: %s", issue_number, existing.agent_id)
+            logger.warning(
+                "Agent already exists for issue #%d: %s", issue_number, existing.agent_id
+            )
             return existing
 
         # Determine branch name
@@ -549,7 +555,12 @@ class AgentManager:
                 )
                 record.status = AgentStatus.ESCALATED
                 await self.registry.update_agent(record)
-                await self._cleanup_agent(record.agent_id, destroy_session=True, copilot=copilot, session_id=record.session_id)
+                await self._cleanup_agent(
+                    record.agent_id,
+                    destroy_session=True,
+                    copilot=copilot,
+                    session_id=record.session_id,
+                )
                 return
 
             logger.info(
@@ -594,7 +605,9 @@ class AgentManager:
             else:
                 # Agent finished turn without calling a lifecycle tool.
                 # This is normal — the agent completed its work for this prompt.
-                logger.info("AGENT TURN DONE — %s (status=%s)", record.agent_id, updated.status.value)
+                logger.info(
+                    "AGENT TURN DONE — %s (status=%s)", record.agent_id, updated.status.value
+                )
 
         except asyncio.CancelledError:
             logger.info("Agent %s cancelled", record.agent_id)
@@ -605,7 +618,12 @@ class AgentManager:
             await self.registry.update_agent(record)
             # Best-effort cleanup on failure
             try:
-                await self._cleanup_agent(record.agent_id, destroy_session=True, copilot=copilot, session_id=record.session_id)
+                await self._cleanup_agent(
+                    record.agent_id,
+                    destroy_session=True,
+                    copilot=copilot,
+                    session_id=record.session_id,
+                )
             except Exception:
                 logger.exception("Cleanup failed for escalated agent %s", record.agent_id)
 
@@ -723,22 +741,27 @@ class AgentManager:
         # Get circuit breaker limits for default values
         cb_limits = self.config.circuit_breakers.for_role(record.role.value)
 
-        values = defaultdict(str, {
-            "project_name": self.config.project.name,
-            "issue_number": str(record.issue_number or ""),
-            "issue_title": issue_title,
-            "issue_body": issue_body,
-            "branch_name": record.branch or "",
-            "base_branch": self.config.project.default_branch,
-            "max_iterations": str(cb_limits.max_iterations),
-            "max_tool_calls": str(cb_limits.max_tool_calls),
-            "max_turns": str(cb_limits.max_turns),
-        })
+        values = defaultdict(
+            str,
+            {
+                "project_name": self.config.project.name,
+                "issue_number": str(record.issue_number or ""),
+                "issue_title": issue_title,
+                "issue_body": issue_body,
+                "branch_name": record.branch or "",
+                "base_branch": self.config.project.default_branch,
+                "max_iterations": str(cb_limits.max_iterations),
+                "max_tool_calls": str(cb_limits.max_tool_calls),
+                "max_turns": str(cb_limits.max_turns),
+            },
+        )
 
         try:
             return raw_content.format_map(values)
         except (KeyError, ValueError, IndexError):
-            logger.warning("Failed to interpolate agent def for %s — using raw content", record.agent_id)
+            logger.warning(
+                "Failed to interpolate agent def for %s — using raw content", record.agent_id
+            )
             return raw_content
 
     def _build_hooks(
@@ -768,7 +791,10 @@ class AgentManager:
                 )
                 record.status = AgentStatus.ESCALATED
                 await registry.update_agent(record)
-                return {"permissionDecision": "deny", "reason": f"Tool call limit exceeded ({max_tool_calls})"}
+                return {
+                    "permissionDecision": "deny",
+                    "reason": f"Tool call limit exceeded ({max_tool_calls})",
+                }
 
             # Persist counter periodically (every 10 calls to avoid DB thrashing)
             if record.tool_call_count % 10 == 0:
@@ -805,13 +831,13 @@ class AgentManager:
                 body = issue_data.get("body", "")
                 if body:
                     lines.append(f"\n**Description:**\n{body}")
-                labels = [l.get("name", "") for l in issue_data.get("labels", [])]
+                labels = [lbl.get("name", "") for lbl in issue_data.get("labels", [])]
                 if labels:
                     lines.append(f"\n**Labels:** {', '.join(labels)}")
 
         lines.append(f"\n**Your role:** {record.role.value}")
         lines.append(f"**Branch:** {record.branch}")
-        lines.append(f"\nBegin working on this issue. Use the available tools to read code,")
+        lines.append("\nBegin working on this issue. Use the available tools to read code,")
         lines.append("make changes, run tests, and report progress.")
         lines.append("Call `check_for_events` periodically to check for new instructions.")
         lines.append("Call `report_complete` when finished, or `report_blocked` if stuck.")
@@ -825,7 +851,9 @@ class AgentManager:
     ) -> str:
         """Build the wake-up prompt for a resumed session."""
         lines = [f"## Session Resumed: {record.agent_id}\n"]
-        lines.append("Your session has been resumed. Here's what happened while you were sleeping:\n")
+        lines.append(
+            "Your session has been resumed. Here's what happened while you were sleeping:\n"
+        )
 
         if trigger_event:
             lines.append(f"**Trigger:** {trigger_event.event_type.value}")
@@ -848,7 +876,9 @@ class AgentManager:
             if resolved:
                 lines.append(f"\n**Resolved blocker:** Issue #{resolved} has been closed.")
 
-        lines.append("\nContinue your work. Check for any additional events with `check_for_events`.")
+        lines.append(
+            "\nContinue your work. Check for any additional events with `check_for_events`."
+        )
 
         return "\n".join(lines)
 
@@ -864,7 +894,7 @@ class AgentManager:
             return
 
         # Check if assigned to an agent role (via labels)
-        labels = [l.get("name", "") for l in issue.get("labels", [])]
+        labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
         role = self._label_to_role(labels)
 
         if role:
@@ -906,7 +936,7 @@ class AgentManager:
 
         payload = event.data.get("payload", {})
         pr_data = payload.get("pull_request", {})
-        labels = [l.get("name", "") for l in pr_data.get("labels", [])]
+        labels = [lbl.get("name", "") for lbl in pr_data.get("labels", [])]
 
         # Determine which reviewer roles to spawn
         reviewer_roles = self.config.approval_flows.get_reviewers_for_pr(labels)
@@ -993,9 +1023,7 @@ class AgentManager:
         """Extract an issue number from PR body (e.g., 'Closes #42')."""
         import re
 
-        match = re.search(
-            r"(?:closes|fixes|resolves)\s+#(\d+)", body, re.IGNORECASE
-        )
+        match = re.search(r"(?:closes|fixes|resolves)\s+#(\d+)", body, re.IGNORECASE)
         return int(match.group(1)) if match else None
 
     async def _handle_pr_closed(self, event: SquadronEvent) -> None:
@@ -1134,7 +1162,9 @@ class AgentManager:
 
     async def _create_worktree(self, record: AgentRecord) -> Path:
         """Create a git worktree for an agent's branch."""
-        worktree_dir = self.repo_root / ".squadron-data" / "worktrees" / f"issue-{record.issue_number}"
+        worktree_dir = (
+            self.repo_root / ".squadron-data" / "worktrees" / f"issue-{record.issue_number}"
+        )
         worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
         if worktree_dir.exists():

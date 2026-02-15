@@ -12,16 +12,14 @@ but run everything else for real: SQLite, FastAPI, EventRouter, config loading.
 
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytest_asyncio
 from fastapi.testclient import TestClient
 
-from squadron.config import ProjectConfig, RuntimeConfig, SquadronConfig, load_config
+from squadron.config import RuntimeConfig, load_config
 from squadron.models import AgentRecord, AgentRole, AgentStatus
 from squadron.registry import AgentRegistry
 
@@ -51,12 +49,15 @@ class TestServerBoot:
         server = SquadronServer(repo_root=squadron_dir)
 
         # Mock external dependencies
-        with patch.dict(os.environ, {
-            "GITHUB_APP_ID": "12345",
-            "GITHUB_PRIVATE_KEY": "fake-key",
-            "GITHUB_WEBHOOK_SECRET": "test-secret",
-            "GITHUB_INSTALLATION_ID": "67890",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_APP_ID": "12345",
+                "GITHUB_PRIVATE_KEY": "fake-key",
+                "GITHUB_WEBHOOK_SECRET": "test-secret",
+                "GITHUB_INSTALLATION_ID": "67890",
+            },
+        ):
             # Mock GitHub client (no real API calls)
             with patch("squadron.server.GitHubClient") as MockGH:
                 mock_github = AsyncMock()
@@ -110,11 +111,14 @@ class TestServerBoot:
 
         # Boot server
         server = SquadronServer(repo_root=squadron_dir)
-        with patch.dict(os.environ, {
-            "GITHUB_APP_ID": "12345",
-            "GITHUB_PRIVATE_KEY": "fake-key",
-            "GITHUB_INSTALLATION_ID": "67890",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_APP_ID": "12345",
+                "GITHUB_PRIVATE_KEY": "fake-key",
+                "GITHUB_INSTALLATION_ID": "67890",
+            },
+        ):
             with patch("squadron.server.GitHubClient") as MockGH:
                 mock_github = AsyncMock()
                 mock_github.ensure_labels_exist = AsyncMock()
@@ -155,11 +159,14 @@ class TestServerEndpoints:
     def test_health_endpoint(self, squadron_dir):
         from squadron.server import create_app
 
-        with patch.dict(os.environ, {
-            "GITHUB_APP_ID": "12345",
-            "GITHUB_PRIVATE_KEY": "fake-key",
-            "GITHUB_INSTALLATION_ID": "67890",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_APP_ID": "12345",
+                "GITHUB_PRIVATE_KEY": "fake-key",
+                "GITHUB_INSTALLATION_ID": "67890",
+            },
+        ):
             with patch("squadron.server.GitHubClient") as MockGH:
                 mock_github = AsyncMock()
                 mock_github.ensure_labels_exist = AsyncMock()
@@ -184,11 +191,14 @@ class TestServerEndpoints:
     def test_agents_endpoint_empty(self, squadron_dir):
         from squadron.server import create_app
 
-        with patch.dict(os.environ, {
-            "GITHUB_APP_ID": "12345",
-            "GITHUB_PRIVATE_KEY": "fake-key",
-            "GITHUB_INSTALLATION_ID": "67890",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_APP_ID": "12345",
+                "GITHUB_PRIVATE_KEY": "fake-key",
+                "GITHUB_INSTALLATION_ID": "67890",
+            },
+        ):
             with patch("squadron.server.GitHubClient") as MockGH:
                 mock_github = AsyncMock()
                 mock_github.ensure_labels_exist = AsyncMock()
@@ -221,7 +231,6 @@ class TestCopilotSDKTypes:
 
     def test_session_config_matches_sdk_type(self):
         """Verify build_session_config output has all required SDK fields."""
-        from copilot.types import SessionConfig as SDKSessionConfig
 
         from squadron.copilot import build_session_config
 
@@ -250,7 +259,6 @@ class TestCopilotSDKTypes:
 
     def test_resume_config_matches_sdk_type(self):
         """Verify build_resume_config output has all required SDK fields."""
-        from copilot.types import ResumeSessionConfig as SDKResumeConfig
 
         from squadron.copilot import build_resume_config
 
@@ -270,7 +278,6 @@ class TestCopilotSDKTypes:
 
     def test_provider_config_shape(self, monkeypatch):
         """Verify provider dict matches SDK ProviderConfig type when BYOK key set."""
-        from copilot.types import ProviderConfig as SDKProviderConfig
 
         from squadron.copilot import _build_provider_dict
 

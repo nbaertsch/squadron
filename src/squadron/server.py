@@ -62,7 +62,11 @@ class SquadronServer:
         # 1. Load config
         self.config = load_config(self.squadron_dir)
         agent_definitions = load_agent_definitions(self.squadron_dir)
-        logger.info("Loaded %d agent definitions: %s", len(agent_definitions), list(agent_definitions.keys()))
+        logger.info(
+            "Loaded %d agent definitions: %s",
+            len(agent_definitions),
+            list(agent_definitions.keys()),
+        )
 
         # 2. Initialize database
         data_dir = self.repo_root / ".squadron-data"
@@ -153,7 +157,9 @@ class SquadronServer:
 
         active = await self.registry.get_agents_by_status(AgentStatus.ACTIVE)
         if active:
-            logger.warning("Found %d stale ACTIVE agents from previous run — marking SLEEPING", len(active))
+            logger.warning(
+                "Found %d stale ACTIVE agents from previous run — marking SLEEPING", len(active)
+            )
             for agent in active:
                 agent.status = AgentStatus.SLEEPING
                 await self.registry.update_agent(agent)
@@ -173,9 +179,7 @@ class SquadronServer:
             return
 
         all_labels = (
-            self.config.labels.types
-            + self.config.labels.priorities
-            + self.config.labels.states
+            self.config.labels.types + self.config.labels.priorities + self.config.labels.states
         )
         if not all_labels:
             return

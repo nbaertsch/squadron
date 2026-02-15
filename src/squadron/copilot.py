@@ -26,7 +26,6 @@ from typing import Any, Callable
 
 from copilot import CopilotClient
 from copilot import CopilotSession as SDKSession
-from copilot import SessionEvent as SDKSessionEvent
 from copilot.types import (
     ProviderConfig as SDKProviderConfig,
     ResumeSessionConfig as SDKResumeConfig,

@@ -10,7 +10,6 @@ These tests require:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import uuid
 from pathlib import Path
@@ -140,18 +139,23 @@ class TestCopilotSessions:
                 pytest.skip("Copilot not authenticated — can't create sessions")
 
             uid = _uid()
-            session = await client.create_session({
-                "session_id": f"e2e-test-{uid}",
-                "model": "claude-sonnet-4",
-                "system_message": {"mode": "replace", "content": "You are a test agent. Reply with exactly: PONG"},
-                "working_directory": "/tmp",
-            })
+            session = await client.create_session(
+                {
+                    "session_id": f"e2e-test-{uid}",
+                    "model": "claude-sonnet-4",
+                    "system_message": {
+                        "mode": "replace",
+                        "content": "You are a test agent. Reply with exactly: PONG",
+                    },
+                    "working_directory": "/tmp",
+                }
+            )
 
             assert session is not None
 
             # Verify session appears in list
             sessions = await client.list_sessions()
-            session_ids = [s.session_id for s in sessions if hasattr(s, "session_id")]
+            [s.session_id for s in sessions if hasattr(s, "session_id")]
             # Session may or may not appear in list depending on SDK version
 
             # Destroy
@@ -171,15 +175,17 @@ class TestCopilotSessions:
                 pytest.skip("Copilot not authenticated — can't send messages")
 
             uid = _uid()
-            session = await client.create_session({
-                "session_id": f"e2e-msg-{uid}",
-                "model": "gpt-4o",
-                "system_message": {
-                    "mode": "replace",
-                    "content": "You are a test agent. When asked 'ping', reply with exactly one word: 'pong'. Nothing else.",
-                },
-                "working_directory": "/tmp",
-            })
+            session = await client.create_session(
+                {
+                    "session_id": f"e2e-msg-{uid}",
+                    "model": "gpt-4o",
+                    "system_message": {
+                        "mode": "replace",
+                        "content": "You are a test agent. When asked 'ping', reply with exactly one word: 'pong'. Nothing else.",
+                    },
+                    "working_directory": "/tmp",
+                }
+            )
 
             # Send a message and wait for response (60s timeout)
             result = await session.send_and_wait(

@@ -138,10 +138,8 @@ class PMTools:
 
     async def read_issue(self, params: ReadIssueParams) -> str:
         """Read a GitHub issue's full details."""
-        issue = await self.github.get_issue(
-            self.owner, self.repo, params.issue_number
-        )
-        labels = ", ".join(l.get("name", "") for l in issue.get("labels", []))
+        issue = await self.github.get_issue(self.owner, self.repo, params.issue_number)
+        labels = ", ".join(lbl.get("name", "") for lbl in issue.get("labels", []))
         assignees = ", ".join(a.get("login", "") for a in issue.get("assignees", []))
         return (
             f"**#{issue['number']}:** {issue.get('title', 'N/A')}\n"
@@ -155,11 +153,15 @@ class PMTools:
         """Return SDK-compatible Tool objects for the PM agent."""
         pm = self  # capture for closures
 
-        @define_tool(description="Create a new GitHub issue for a blocker, sub-task, or new work item.")
+        @define_tool(
+            description="Create a new GitHub issue for a blocker, sub-task, or new work item."
+        )
         async def create_issue(params: CreateIssueParams) -> str:
             return await pm.create_issue(params)
 
-        @define_tool(description="Assign a GitHub issue to squadron[bot] so the framework creates the appropriate agent.")
+        @define_tool(
+            description="Assign a GitHub issue to squadron[bot] so the framework creates the appropriate agent."
+        )
         async def assign_issue(params: AssignIssueParams) -> str:
             return await pm.assign_issue(params)
 
@@ -167,16 +169,29 @@ class PMTools:
         async def label_issue(params: LabelIssueParams) -> str:
             return await pm.label_issue(params)
 
-        @define_tool(description="Post a triage comment on a GitHub issue with your analysis and decisions.")
+        @define_tool(
+            description="Post a triage comment on a GitHub issue with your analysis and decisions."
+        )
         async def comment_on_issue(params: CommentOnIssueParams) -> str:
             return await pm.comment_on_issue(params)
 
-        @define_tool(description="Query the agent registry to see all active agents and their current status.")
+        @define_tool(
+            description="Query the agent registry to see all active agents and their current status."
+        )
         async def check_registry(params: CheckRegistryParams) -> str:
             return await pm.check_registry(params)
 
-        @define_tool(description="Read a GitHub issue's full details including title, body, labels, and assignees.")
+        @define_tool(
+            description="Read a GitHub issue's full details including title, body, labels, and assignees."
+        )
         async def read_issue(params: ReadIssueParams) -> str:
             return await pm.read_issue(params)
 
-        return [create_issue, assign_issue, label_issue, comment_on_issue, check_registry, read_issue]
+        return [
+            create_issue,
+            assign_issue,
+            label_issue,
+            comment_on_issue,
+            check_registry,
+            read_issue,
+        ]

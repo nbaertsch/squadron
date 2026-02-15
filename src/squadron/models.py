@@ -39,19 +39,25 @@ class AgentRecord(BaseModel):
 
     agent_id: str = Field(description="Unique agent identifier, e.g. 'feat-dev-issue-42'")
     role: AgentRole
-    issue_number: int | None = Field(default=None, description="GitHub issue this agent is assigned to")
+    issue_number: int | None = Field(
+        default=None, description="GitHub issue this agent is assigned to"
+    )
     pr_number: int | None = Field(default=None, description="PR opened by this agent")
     session_id: str | None = Field(default=None, description="Copilot SDK session ID")
     status: AgentStatus = AgentStatus.CREATED
     branch: str | None = Field(default=None, description="Git branch this agent works on")
     worktree_path: str | None = Field(default=None, description="Path to agent's git worktree")
-    blocked_by: list[int] = Field(default_factory=list, description="Issue numbers blocking this agent")
+    blocked_by: list[int] = Field(
+        default_factory=list, description="Issue numbers blocking this agent"
+    )
     iteration_count: int = Field(default=0, description="Number of test-fix iterations")
     tool_call_count: int = Field(default=0, description="Total tool invocations")
     turn_count: int = Field(default=0, description="LLM conversation turns")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    active_since: datetime | None = Field(default=None, description="When agent last entered ACTIVE")
+    active_since: datetime | None = Field(
+        default=None, description="When agent last entered ACTIVE"
+    )
     sleeping_since: datetime | None = Field(default=None, description="When agent entered SLEEPING")
 
 

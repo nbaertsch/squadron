@@ -101,7 +101,9 @@ def _send_webhook(client, event_type: str, payload: dict, delivery_id: str = "te
 class TestIssuePayloads:
     """Verify that real GitHub issue payloads parse correctly through the full chain."""
 
-    async def test_issue_opened_extracts_fields(self, client, event_queue, registry, config, payloads):
+    async def test_issue_opened_extracts_fields(
+        self, client, event_queue, registry, config, payloads
+    ):
         payload = payloads["issues_opened"]
         status = _send_webhook(client, "issues", payload)
         assert status == 200
@@ -134,7 +136,9 @@ class TestIssuePayloads:
         assert squadron_event.data["sender"] == "noahbaertsch"
         assert squadron_event.data["payload"]["issue"]["title"] == "Add OAuth2 support"
 
-    async def test_issue_assigned_bot_extracts_assignee(self, client, event_queue, registry, config, payloads):
+    async def test_issue_assigned_bot_extracts_assignee(
+        self, client, event_queue, registry, config, payloads
+    ):
         payload = payloads["issues_assigned_bot"]
         _send_webhook(client, "issues", payload)
 
@@ -154,7 +158,9 @@ class TestIssuePayloads:
         # Agent manager reads assignee from payload
         assert evt.data["payload"]["assignee"]["login"] == "squadron[bot]"
 
-    async def test_issue_closed_routes_correctly(self, client, event_queue, registry, config, payloads):
+    async def test_issue_closed_routes_correctly(
+        self, client, event_queue, registry, config, payloads
+    ):
         payload = payloads["issues_closed"]
         _send_webhook(client, "issues", payload)
 
@@ -193,7 +199,9 @@ class TestIssuePayloads:
 class TestPullRequestPayloads:
     """Verify real PR payloads parse correctly."""
 
-    async def test_pr_opened_extracts_head_base(self, client, event_queue, registry, config, payloads):
+    async def test_pr_opened_extracts_head_base(
+        self, client, event_queue, registry, config, payloads
+    ):
         # Use a modified payload with human sender
         payload = json.loads(json.dumps(payloads["pull_request_opened"]))
         payload["sender"]["login"] = "noahbaertsch"
@@ -216,7 +224,9 @@ class TestPullRequestPayloads:
         assert pr_data["head"]["ref"] == "feat/issue-42"
         assert pr_data["base"]["ref"] == "main"
 
-    async def test_pr_merged_has_merge_fields(self, client, event_queue, registry, config, payloads):
+    async def test_pr_merged_has_merge_fields(
+        self, client, event_queue, registry, config, payloads
+    ):
         payload = payloads["pull_request_closed_merged"]
         _send_webhook(client, "pull_request", payload, delivery_id="pr-merge-1")
 
@@ -250,7 +260,9 @@ class TestPullRequestPayloads:
         pr_data = evt.data["payload"]["pull_request"]
         assert pr_data["merged"] is False
 
-    async def test_pr_synchronize_has_before_after(self, client, event_queue, registry, config, payloads):
+    async def test_pr_synchronize_has_before_after(
+        self, client, event_queue, registry, config, payloads
+    ):
         payload = json.loads(json.dumps(payloads["pull_request_synchronize"]))
         payload["sender"]["login"] = "noahbaertsch"
         payload["sender"]["type"] = "User"
@@ -349,7 +361,9 @@ class TestPMQueueRouting:
 
 
 class TestDeduplicationWithRealPayloads:
-    async def test_duplicate_delivery_filtered(self, client, event_queue, registry, config, payloads):
+    async def test_duplicate_delivery_filtered(
+        self, client, event_queue, registry, config, payloads
+    ):
         payload = payloads["issues_opened"]
         _send_webhook(client, "issues", payload, delivery_id="same-id")
         _send_webhook(client, "issues", payload, delivery_id="same-id")

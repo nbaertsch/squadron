@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 import pytest_asyncio
 
 from squadron.config import (
-    CircuitBreakerConfig,
-    LabelsConfig,
     ProjectConfig,
-    RuntimeConfig,
     SquadronConfig,
 )
 from squadron.models import AgentRecord, AgentRole, AgentStatus, SquadronEvent, SquadronEventType
@@ -67,14 +61,16 @@ def _make_github_mock() -> AsyncMock:
     github.create_issue = AsyncMock(return_value={"number": 99})
     github.add_labels = AsyncMock()
     github.assign_issue = AsyncMock()
-    github.get_issue = AsyncMock(return_value={
-        "number": 42,
-        "title": "Test Issue",
-        "body": "Issue body",
-        "state": "open",
-        "labels": [{"name": "feature"}],
-        "assignees": [{"login": "squadron[bot]"}],
-    })
+    github.get_issue = AsyncMock(
+        return_value={
+            "number": 42,
+            "title": "Test Issue",
+            "body": "Issue body",
+            "state": "open",
+            "labels": [{"name": "feature"}],
+            "assignees": [{"login": "squadron[bot]"}],
+        }
+    )
     return github
 
 
@@ -94,9 +90,13 @@ class TestPMTools:
         github = _make_github_mock()
         tools = self._make_pm_tools(registry, github)
 
-        result = await tools.create_issue(CreateIssueParams(
-            title="New bug", body="Something broke", labels=["bug"],
-        ))
+        result = await tools.create_issue(
+            CreateIssueParams(
+                title="New bug",
+                body="Something broke",
+                labels=["bug"],
+            )
+        )
 
         github.create_issue.assert_called_once()
         assert "#99" in result
@@ -105,9 +105,12 @@ class TestPMTools:
         github = _make_github_mock()
         tools = self._make_pm_tools(registry, github)
 
-        result = await tools.assign_issue(AssignIssueParams(
-            issue_number=42, assignees=["squadron[bot]"],
-        ))
+        result = await tools.assign_issue(
+            AssignIssueParams(
+                issue_number=42,
+                assignees=["squadron[bot]"],
+            )
+        )
 
         github.assign_issue.assert_called_once_with("testowner", "testrepo", 42, ["squadron[bot]"])
         assert "#42" in result
@@ -116,9 +119,12 @@ class TestPMTools:
         github = _make_github_mock()
         tools = self._make_pm_tools(registry, github)
 
-        result = await tools.label_issue(LabelIssueParams(
-            issue_number=42, labels=["bug", "high"],
-        ))
+        result = await tools.label_issue(
+            LabelIssueParams(
+                issue_number=42,
+                labels=["bug", "high"],
+            )
+        )
 
         github.add_labels.assert_called_once()
         assert "bug" in result
@@ -127,9 +133,12 @@ class TestPMTools:
         github = _make_github_mock()
         tools = self._make_pm_tools(registry, github)
 
-        result = await tools.comment_on_issue(CommentOnIssueParams(
-            issue_number=42, body="Triage complete",
-        ))
+        result = await tools.comment_on_issue(
+            CommentOnIssueParams(
+                issue_number=42,
+                body="Triage complete",
+            )
+        )
 
         github.comment_on_issue.assert_called_once()
         assert "#42" in result
@@ -178,8 +187,11 @@ class TestEscalateToHuman:
         await registry.create_agent(agent)
         github = _make_github_mock()
         tools = FrameworkTools(
-            registry=registry, github=github, agent_inboxes={},
-            owner="testowner", repo="testrepo",
+            registry=registry,
+            github=github,
+            agent_inboxes={},
+            owner="testowner",
+            repo="testrepo",
         )
 
         result = await tools.escalate_to_human(
@@ -197,8 +209,11 @@ class TestEscalateToHuman:
         await registry.create_agent(agent)
         github = _make_github_mock()
         tools = FrameworkTools(
-            registry=registry, github=github, agent_inboxes={},
-            owner="testowner", repo="testrepo",
+            registry=registry,
+            github=github,
+            agent_inboxes={},
+            owner="testowner",
+            repo="testrepo",
         )
 
         await tools.escalate_to_human(
@@ -215,8 +230,11 @@ class TestEscalateToHuman:
         await registry.create_agent(agent)
         github = _make_github_mock()
         tools = FrameworkTools(
-            registry=registry, github=github, agent_inboxes={},
-            owner="testowner", repo="testrepo",
+            registry=registry,
+            github=github,
+            agent_inboxes={},
+            owner="testowner",
+            repo="testrepo",
         )
 
         await tools.escalate_to_human(
@@ -255,7 +273,6 @@ def _make_manager(registry, config=None, github=None):
 
 
 class TestTemplateInterpolation:
-
     def test_interpolates_basic_variables(self, registry):
         manager = _make_manager(registry)
         agent = _make_agent(branch="feat/issue-42")
@@ -304,7 +321,6 @@ class TestTemplateInterpolation:
 
 
 class TestHandlePRClosed:
-
     async def test_pr_merged_completes_dev_agent(self, registry):
         agent = _make_agent(pr_number=10, session_id="ses-1")
         await registry.create_agent(agent)

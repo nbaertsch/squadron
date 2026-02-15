@@ -5,10 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
-import pytest
 import pytest_asyncio
 
-from squadron.config import CircuitBreakerConfig, CircuitBreakerDefaults, ProjectConfig, SquadronConfig
+from squadron.config import ProjectConfig, SquadronConfig
 from squadron.models import AgentRecord, AgentRole, AgentStatus
 from squadron.reconciliation import ReconciliationLoop
 from squadron.registry import AgentRegistry
@@ -234,7 +233,9 @@ class TestCheckStaleActiveAgents:
 
         github.create_issue.assert_called_once()
         call_kwargs = github.create_issue.call_args
-        assert "exceeded" in call_kwargs[1].get("title", call_kwargs[0][2] if len(call_kwargs[0]) > 2 else "")
+        assert "exceeded" in call_kwargs[1].get(
+            "title", call_kwargs[0][2] if len(call_kwargs[0]) > 2 else ""
+        )
 
     async def test_agent_without_active_since_skipped(self, registry):
         agent = _make_agent(status=AgentStatus.ACTIVE, active_since=None)

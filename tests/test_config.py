@@ -6,10 +6,6 @@ import pytest
 import yaml
 
 from squadron.config import (
-    AgentDefinition,
-    MCPServerDefinition,
-    SquadronConfig,
-    ToolRestrictions,
     _split_frontmatter,
     load_agent_definitions,
     load_config,

@@ -55,7 +55,9 @@ class EventRouter:
         self.bot_username = bot_username
 
         # Handler callbacks, registered by the Agent Manager
-        self._handlers: dict[SquadronEventType, list[Callable[[SquadronEvent], Awaitable[None]]]] = {}
+        self._handlers: dict[
+            SquadronEventType, list[Callable[[SquadronEvent], Awaitable[None]]]
+        ] = {}
 
         # PM event queue — batched events for PM processing
         self.pm_queue: asyncio.Queue[SquadronEvent] = asyncio.Queue()
@@ -63,7 +65,9 @@ class EventRouter:
         self._running = False
         self._task: asyncio.Task | None = None
 
-    def on(self, event_type: SquadronEventType, handler: Callable[[SquadronEvent], Awaitable[None]]) -> None:
+    def on(
+        self, event_type: SquadronEventType, handler: Callable[[SquadronEvent], Awaitable[None]]
+    ) -> None:
         """Register an event handler."""
         self._handlers.setdefault(event_type, []).append(handler)
 
@@ -124,7 +128,9 @@ class EventRouter:
         # 5. Dispatch to handlers
         await self._dispatch(squadron_event)
 
-    def _to_squadron_event(self, event: GitHubEvent, event_type: SquadronEventType) -> SquadronEvent:
+    def _to_squadron_event(
+        self, event: GitHubEvent, event_type: SquadronEventType
+    ) -> SquadronEvent:
         """Convert a GitHub event to an internal SquadronEvent."""
         issue_number = None
         pr_number = None
@@ -151,7 +157,12 @@ class EventRouter:
 
     async def _dispatch(self, event: SquadronEvent) -> None:
         """Dispatch an event to registered handlers and route to PM/agent inboxes."""
-        logger.info("Dispatching event: %s (issue=#%s, pr=#%s)", event.event_type, event.issue_number, event.pr_number)
+        logger.info(
+            "Dispatching event: %s (issue=#%s, pr=#%s)",
+            event.event_type,
+            event.issue_number,
+            event.pr_number,
+        )
 
         # PM-bound events: issue triage, comments with @-pings, blocker resolution
         pm_events = {

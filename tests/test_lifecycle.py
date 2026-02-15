@@ -13,9 +13,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 import pytest_asyncio
 
 from squadron.config import CircuitBreakerDefaults
@@ -248,12 +247,11 @@ class TestCreateBlockerIssue:
 class TestCircuitBreakerLayer1:
     def _make_hooks(self, record, max_tool_calls=10, warning_threshold=0.8):
         """Build hooks using the same logic as AgentManager._build_hooks."""
-        from squadron.agent_manager import AgentManager
 
         # We test the hook function in isolation — instantiate a minimal manager
         # Alternative: extract _build_hooks as a static/standalone function
         # For now, test the hook logic directly
-        cb_limits = CircuitBreakerDefaults(
+        CircuitBreakerDefaults(
             max_tool_calls=max_tool_calls,
             warning_threshold=warning_threshold,
         )
@@ -265,7 +263,10 @@ class TestCircuitBreakerLayer1:
             if record.tool_call_count > max_tool_calls:
                 record.status = AgentStatus.ESCALATED
                 await registry_mock.update_agent(record)
-                return {"permissionDecision": "deny", "reason": f"Limit exceeded ({max_tool_calls})"}
+                return {
+                    "permissionDecision": "deny",
+                    "reason": f"Limit exceeded ({max_tool_calls})",
+                }
             if record.tool_call_count % 10 == 0:
                 await registry_mock.update_agent(record)
             return {"permissionDecision": "allow"}
@@ -594,6 +595,7 @@ class TestCommentOnIssue:
         tools = _make_framework_tools(registry, github)
 
         from squadron.tools.framework import CommentOnIssueParams
+
         result = await tools.comment_on_issue(
             agent.agent_id,
             CommentOnIssueParams(issue_number=42, body="Working on this"),
@@ -615,6 +617,7 @@ class TestSubmitPRReview:
         tools = _make_framework_tools(registry, github)
 
         from squadron.tools.framework import SubmitPRReviewParams
+
         result = await tools.submit_pr_review(
             agent.agent_id,
             SubmitPRReviewParams(pr_number=10, body="LGTM", event="APPROVE"),
@@ -623,8 +626,12 @@ class TestSubmitPRReview:
         assert "APPROVE" in result
         assert "123" in result
         github.submit_pr_review.assert_called_once_with(
-            "testowner", "testrepo", 10,
-            body="LGTM", event="APPROVE", comments=None,
+            "testowner",
+            "testrepo",
+            10,
+            body="LGTM",
+            event="APPROVE",
+            comments=None,
         )
 
     async def test_submits_request_changes_with_inline_comments(self, registry: AgentRegistry):
@@ -635,19 +642,26 @@ class TestSubmitPRReview:
         tools = _make_framework_tools(registry, github)
 
         from squadron.tools.framework import SubmitPRReviewParams
+
         comments = [{"path": "src/auth.py", "position": 5, "body": "Missing null check"}]
         result = await tools.submit_pr_review(
             agent.agent_id,
             SubmitPRReviewParams(
-                pr_number=10, body="Needs changes",
-                event="REQUEST_CHANGES", comments=comments,
+                pr_number=10,
+                body="Needs changes",
+                event="REQUEST_CHANGES",
+                comments=comments,
             ),
         )
 
         assert "REQUEST_CHANGES" in result
         github.submit_pr_review.assert_called_once_with(
-            "testowner", "testrepo", 10,
-            body="Needs changes", event="REQUEST_CHANGES", comments=comments,
+            "testowner",
+            "testrepo",
+            10,
+            body="Needs changes",
+            event="REQUEST_CHANGES",
+            comments=comments,
         )
 
 
@@ -660,6 +674,7 @@ class TestOpenPR:
         tools = _make_framework_tools(registry, github)
 
         from squadron.tools.framework import OpenPRParams
+
         result = await tools.open_pr(
             agent.agent_id,
             OpenPRParams(
@@ -673,7 +688,8 @@ class TestOpenPR:
         assert "15" in result
         assert "Add auth flow" in result
         github.create_pull_request.assert_called_once_with(
-            "testowner", "testrepo",
+            "testowner",
+            "testrepo",
             title="Add auth flow",
             body="Fixes #42. Implements OAuth.",
             head="feat/issue-42",

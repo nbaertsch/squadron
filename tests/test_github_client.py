@@ -54,10 +54,17 @@ class TestGetIssue:
     @respx.mock
     async def test_request_shape(self, started_github):
         route = respx.get("https://api.github.com/repos/acme/widgets/issues/42").mock(
-            return_value=httpx.Response(200, json={
-                "number": 42, "title": "Fix bug", "state": "open",
-                "labels": [], "assignees": [], "body": "Details here",
-            })
+            return_value=httpx.Response(
+                200,
+                json={
+                    "number": 42,
+                    "title": "Fix bug",
+                    "state": "open",
+                    "labels": [],
+                    "assignees": [],
+                    "body": "Details here",
+                },
+            )
         )
 
         result = await started_github.get_issue("acme", "widgets", 42)
@@ -78,7 +85,8 @@ class TestCreateIssue:
         )
 
         result = await started_github.create_issue(
-            "acme", "widgets",
+            "acme",
+            "widgets",
             title="New issue",
             body="Description here",
             labels=["bug", "high"],
@@ -88,6 +96,7 @@ class TestCreateIssue:
         assert route.called
         request = route.calls[0].request
         import json
+
         body = json.loads(request.content)
         assert body["title"] == "New issue"
         assert body["body"] == "Description here"
@@ -104,6 +113,7 @@ class TestCreateIssue:
         await started_github.create_issue("acme", "widgets", title="Minimal", body="")
 
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["labels"] == []
         assert body["assignees"] == []
@@ -112,14 +122,15 @@ class TestCreateIssue:
 class TestAddLabels:
     @respx.mock
     async def test_request_shape(self, started_github):
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/issues/42/labels"
-        ).mock(return_value=httpx.Response(200, json=[]))
+        route = respx.post("https://api.github.com/repos/acme/widgets/issues/42/labels").mock(
+            return_value=httpx.Response(200, json=[])
+        )
 
         await started_github.add_labels("acme", "widgets", 42, ["bug", "critical"])
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["labels"] == ["bug", "critical"]
 
@@ -127,14 +138,15 @@ class TestAddLabels:
 class TestCommentOnIssue:
     @respx.mock
     async def test_request_shape(self, started_github):
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/issues/42/comments"
-        ).mock(return_value=httpx.Response(201, json={"id": 1}))
+        route = respx.post("https://api.github.com/repos/acme/widgets/issues/42/comments").mock(
+            return_value=httpx.Response(201, json={"id": 1})
+        )
 
         result = await started_github.comment_on_issue("acme", "widgets", 42, "Hello world")
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["body"] == "Hello world"
         assert result["id"] == 1
@@ -143,14 +155,15 @@ class TestCommentOnIssue:
 class TestAssignIssue:
     @respx.mock
     async def test_request_shape(self, started_github):
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/issues/42/assignees"
-        ).mock(return_value=httpx.Response(201, json={}))
+        route = respx.post("https://api.github.com/repos/acme/widgets/issues/42/assignees").mock(
+            return_value=httpx.Response(201, json={})
+        )
 
         await started_github.assign_issue("acme", "widgets", 42, ["squadron[bot]"])
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["assignees"] == ["squadron[bot]"]
 
@@ -161,9 +174,9 @@ class TestAssignIssue:
 class TestGetPullRequest:
     @respx.mock
     async def test_request_shape(self, started_github):
-        route = respx.get(
-            "https://api.github.com/repos/acme/widgets/pulls/10"
-        ).mock(return_value=httpx.Response(200, json={"number": 10, "merged": False}))
+        route = respx.get("https://api.github.com/repos/acme/widgets/pulls/10").mock(
+            return_value=httpx.Response(200, json={"number": 10, "merged": False})
+        )
 
         result = await started_github.get_pull_request("acme", "widgets", 10)
 
@@ -174,12 +187,13 @@ class TestGetPullRequest:
 class TestCreatePullRequest:
     @respx.mock
     async def test_request_shape(self, started_github):
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/pulls"
-        ).mock(return_value=httpx.Response(201, json={"number": 11}))
+        route = respx.post("https://api.github.com/repos/acme/widgets/pulls").mock(
+            return_value=httpx.Response(201, json={"number": 11})
+        )
 
         result = await started_github.create_pull_request(
-            "acme", "widgets",
+            "acme",
+            "widgets",
             title="Add auth",
             body="Implements OAuth flow",
             head="feat/issue-42",
@@ -188,6 +202,7 @@ class TestCreatePullRequest:
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["title"] == "Add auth"
         assert body["body"] == "Implements OAuth flow"
@@ -199,37 +214,43 @@ class TestCreatePullRequest:
 class TestSubmitPRReview:
     @respx.mock
     async def test_request_shape(self, started_github):
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/pulls/10/reviews"
-        ).mock(return_value=httpx.Response(200, json={"id": 1}))
+        route = respx.post("https://api.github.com/repos/acme/widgets/pulls/10/reviews").mock(
+            return_value=httpx.Response(200, json={"id": 1})
+        )
 
         await started_github.submit_pr_review(
-            "acme", "widgets", 10,
+            "acme",
+            "widgets",
+            10,
             body="LGTM",
             event="APPROVE",
         )
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["body"] == "LGTM"
         assert body["event"] == "APPROVE"
 
     @respx.mock
     async def test_with_line_comments(self, started_github):
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/pulls/10/reviews"
-        ).mock(return_value=httpx.Response(200, json={"id": 2}))
+        route = respx.post("https://api.github.com/repos/acme/widgets/pulls/10/reviews").mock(
+            return_value=httpx.Response(200, json={"id": 2})
+        )
 
         line_comments = [{"path": "src/auth.py", "position": 5, "body": "Missing null check"}]
         await started_github.submit_pr_review(
-            "acme", "widgets", 10,
+            "acme",
+            "widgets",
+            10,
             body="Needs changes",
             event="REQUEST_CHANGES",
             comments=line_comments,
         )
 
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["comments"] == line_comments
         assert body["event"] == "REQUEST_CHANGES"
@@ -241,9 +262,9 @@ class TestSubmitPRReview:
 class TestEnsureLabels:
     @respx.mock
     async def test_creates_new_labels(self, started_github):
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/labels"
-        ).mock(return_value=httpx.Response(201, json={}))
+        route = respx.post("https://api.github.com/repos/acme/widgets/labels").mock(
+            return_value=httpx.Response(201, json={})
+        )
 
         await started_github.ensure_labels_exist("acme", "widgets", ["bug", "feature"])
 
@@ -252,12 +273,12 @@ class TestEnsureLabels:
     @respx.mock
     async def test_ignores_422_already_exists(self, started_github):
         # First label already exists (422), second is new (201)
-        route = respx.post(
-            "https://api.github.com/repos/acme/widgets/labels"
-        ).mock(side_effect=[
-            httpx.Response(422, json={"message": "Validation Failed"}),
-            httpx.Response(201, json={}),
-        ])
+        route = respx.post("https://api.github.com/repos/acme/widgets/labels").mock(
+            side_effect=[
+                httpx.Response(422, json={"message": "Validation Failed"}),
+                httpx.Response(201, json={}),
+            ]
+        )
 
         # Should not raise
         await started_github.ensure_labels_exist("acme", "widgets", ["existing", "new"])
@@ -271,14 +292,15 @@ class TestEnsureLabels:
 class TestCloseIssue:
     @respx.mock
     async def test_request_shape(self, started_github):
-        route = respx.patch(
-            "https://api.github.com/repos/acme/widgets/issues/42"
-        ).mock(return_value=httpx.Response(200, json={"number": 42, "state": "closed"}))
+        route = respx.patch("https://api.github.com/repos/acme/widgets/issues/42").mock(
+            return_value=httpx.Response(200, json={"number": 42, "state": "closed"})
+        )
 
         result = await started_github.close_issue("acme", "widgets", 42)
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["state"] == "closed"
         assert result["state"] == "closed"
@@ -287,18 +309,21 @@ class TestCloseIssue:
 class TestUpdateIssue:
     @respx.mock
     async def test_updates_title_and_labels(self, started_github):
-        route = respx.patch(
-            "https://api.github.com/repos/acme/widgets/issues/42"
-        ).mock(return_value=httpx.Response(200, json={"number": 42}))
+        route = respx.patch("https://api.github.com/repos/acme/widgets/issues/42").mock(
+            return_value=httpx.Response(200, json={"number": 42})
+        )
 
-        result = await started_github.update_issue(
-            "acme", "widgets", 42,
+        await started_github.update_issue(
+            "acme",
+            "widgets",
+            42,
             title="New title",
             labels=["bug", "critical"],
         )
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["title"] == "New title"
         assert body["labels"] == ["bug", "critical"]
@@ -308,13 +333,14 @@ class TestUpdateIssue:
 
     @respx.mock
     async def test_updates_state(self, started_github):
-        route = respx.patch(
-            "https://api.github.com/repos/acme/widgets/issues/10"
-        ).mock(return_value=httpx.Response(200, json={"number": 10, "state": "closed"}))
+        route = respx.patch("https://api.github.com/repos/acme/widgets/issues/10").mock(
+            return_value=httpx.Response(200, json={"number": 10, "state": "closed"})
+        )
 
         await started_github.update_issue("acme", "widgets", 10, state="closed")
 
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["state"] == "closed"
 
@@ -322,18 +348,21 @@ class TestUpdateIssue:
 class TestMergePullRequest:
     @respx.mock
     async def test_squash_merge(self, started_github):
-        route = respx.put(
-            "https://api.github.com/repos/acme/widgets/pulls/10/merge"
-        ).mock(return_value=httpx.Response(200, json={"merged": True, "sha": "abc123"}))
+        route = respx.put("https://api.github.com/repos/acme/widgets/pulls/10/merge").mock(
+            return_value=httpx.Response(200, json={"merged": True, "sha": "abc123"})
+        )
 
         result = await started_github.merge_pull_request(
-            "acme", "widgets", 10,
+            "acme",
+            "widgets",
+            10,
             merge_method="squash",
             commit_title="feat: add auth (#10)",
         )
 
         assert route.called
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["merge_method"] == "squash"
         assert body["commit_title"] == "feat: add auth (#10)"
@@ -341,13 +370,14 @@ class TestMergePullRequest:
 
     @respx.mock
     async def test_default_merge_method(self, started_github):
-        route = respx.put(
-            "https://api.github.com/repos/acme/widgets/pulls/5/merge"
-        ).mock(return_value=httpx.Response(200, json={"merged": True}))
+        route = respx.put("https://api.github.com/repos/acme/widgets/pulls/5/merge").mock(
+            return_value=httpx.Response(200, json={"merged": True})
+        )
 
         await started_github.merge_pull_request("acme", "widgets", 5)
 
         import json
+
         body = json.loads(route.calls[0].request.content)
         assert body["merge_method"] == "squash"
 
@@ -359,9 +389,9 @@ class TestListPullRequestFiles:
             {"filename": "src/auth.py", "status": "modified", "additions": 10, "deletions": 2},
             {"filename": "tests/test_auth.py", "status": "added", "additions": 50, "deletions": 0},
         ]
-        route = respx.get(
-            "https://api.github.com/repos/acme/widgets/pulls/10/files"
-        ).mock(return_value=httpx.Response(200, json=files))
+        route = respx.get("https://api.github.com/repos/acme/widgets/pulls/10/files").mock(
+            return_value=httpx.Response(200, json=files)
+        )
 
         result = await started_github.list_pull_request_files("acme", "widgets", 10)
 
@@ -377,9 +407,9 @@ class TestListPullRequestFiles:
 class TestAuthHeaders:
     @respx.mock
     async def test_includes_accept_header(self, started_github):
-        route = respx.get(
-            "https://api.github.com/repos/acme/widgets"
-        ).mock(return_value=httpx.Response(200, json={}))
+        route = respx.get("https://api.github.com/repos/acme/widgets").mock(
+            return_value=httpx.Response(200, json={})
+        )
 
         await started_github.get_repo("acme", "widgets")
 
@@ -394,15 +424,16 @@ class TestAuthHeaders:
 class TestRateLimitTracking:
     @respx.mock
     async def test_updates_from_response_headers(self, started_github):
-        route = respx.get(
-            "https://api.github.com/repos/acme/widgets"
-        ).mock(return_value=httpx.Response(
-            200, json={},
-            headers={
-                "X-RateLimit-Remaining": "4500",
-                "X-RateLimit-Reset": "1700000000",
-            },
-        ))
+        respx.get("https://api.github.com/repos/acme/widgets").mock(
+            return_value=httpx.Response(
+                200,
+                json={},
+                headers={
+                    "X-RateLimit-Remaining": "4500",
+                    "X-RateLimit-Reset": "1700000000",
+                },
+            )
+        )
 
         await started_github.get_repo("acme", "widgets")
 
@@ -421,20 +452,26 @@ class TestTokenRefresh:
 
         # Mock JWT generation (needs PyJWT + real private key, so skip it)
         import unittest.mock
+
         started_github._generate_jwt = unittest.mock.MagicMock(return_value="fake.jwt.token")
 
         # Mock the token exchange endpoint
         token_route = respx.post(
             "https://api.github.com/app/installations/67890/access_tokens"
-        ).mock(return_value=httpx.Response(201, json={
-            "token": "ghs_new_token_abc123",
-            "expires_at": "2025-01-01T00:00:00Z",
-        }))
+        ).mock(
+            return_value=httpx.Response(
+                201,
+                json={
+                    "token": "ghs_new_token_abc123",
+                    "expires_at": "2025-01-01T00:00:00Z",
+                },
+            )
+        )
 
         # Mock the actual API call
-        api_route = respx.get(
-            "https://api.github.com/repos/acme/widgets"
-        ).mock(return_value=httpx.Response(200, json={}))
+        api_route = respx.get("https://api.github.com/repos/acme/widgets").mock(
+            return_value=httpx.Response(200, json={})
+        )
 
         await started_github.get_repo("acme", "widgets")
 
@@ -458,7 +495,9 @@ class TestTokenRefresh:
 class TestWebhookSignature:
     def test_valid_signature(self):
         client = GitHubClient(webhook_secret="secret123")
-        import hashlib, hmac as hmac_mod
+        import hashlib
+        import hmac as hmac_mod
+
         payload = b'{"action": "opened"}'
         sig = "sha256=" + hmac_mod.new(b"secret123", payload, hashlib.sha256).hexdigest()
 
@@ -479,9 +518,9 @@ class TestWebhookSignature:
 class TestErrorHandling:
     @respx.mock
     async def test_404_raises_status_error(self, started_github):
-        respx.get(
-            "https://api.github.com/repos/acme/nonexistent/issues/1"
-        ).mock(return_value=httpx.Response(404, json={"message": "Not Found"}))
+        respx.get("https://api.github.com/repos/acme/nonexistent/issues/1").mock(
+            return_value=httpx.Response(404, json={"message": "Not Found"})
+        )
 
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
             await started_github.get_issue("acme", "nonexistent", 1)
@@ -489,9 +528,9 @@ class TestErrorHandling:
 
     @respx.mock
     async def test_500_raises_status_error(self, started_github):
-        respx.post(
-            "https://api.github.com/repos/acme/widgets/issues"
-        ).mock(return_value=httpx.Response(500, json={"message": "Internal Server Error"}))
+        respx.post("https://api.github.com/repos/acme/widgets/issues").mock(
+            return_value=httpx.Response(500, json={"message": "Internal Server Error"})
+        )
 
         with pytest.raises(httpx.HTTPStatusError):
             await started_github.create_issue("acme", "widgets", title="Test", body="Body")

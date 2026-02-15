@@ -109,10 +109,14 @@ class GitHubClient:
                 return self._token
             else:
                 last_error = resp
-                wait = min(2 ** attempt, 16)  # 1s, 2s, 4s, 8s, 16s
+                wait = min(2**attempt, 16)  # 1s, 2s, 4s, 8s, 16s
                 logger.warning(
                     "Token exchange attempt %d/%d failed (%d): %s — retrying in %ds",
-                    attempt + 1, max_retries, resp.status_code, resp.text[:100], wait,
+                    attempt + 1,
+                    max_retries,
+                    resp.status_code,
+                    resp.text[:100],
+                    wait,
                 )
                 await asyncio.sleep(wait)
 
@@ -155,11 +159,14 @@ class GitHubClient:
             logger.warning("No webhook secret configured — skipping signature verification")
             return True
 
-        expected = "sha256=" + hmac.new(
-            self.webhook_secret.encode(),
-            payload,
-            hashlib.sha256,
-        ).hexdigest()
+        expected = (
+            "sha256="
+            + hmac.new(
+                self.webhook_secret.encode(),
+                payload,
+                hashlib.sha256,
+            ).hexdigest()
+        )
 
         return hmac.compare_digest(expected, signature)
 
@@ -224,9 +231,7 @@ class GitHubClient:
             json={"labels": labels},
         )
 
-    async def comment_on_issue(
-        self, owner: str, repo: str, issue_number: int, body: str
-    ) -> dict:
+    async def comment_on_issue(self, owner: str, repo: str, issue_number: int, body: str) -> dict:
         resp = await self._request(
             "POST",
             f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -357,9 +362,7 @@ class GitHubClient:
         )
         return resp.json()
 
-    async def list_pull_request_files(
-        self, owner: str, repo: str, pr_number: int
-    ) -> list[dict]:
+    async def list_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict]:
         """List files changed in a pull request.
 
         Returns a list of file dicts with 'filename', 'status', 'additions',
@@ -371,9 +374,7 @@ class GitHubClient:
         )
         return resp.json()
 
-    async def ensure_labels_exist(
-        self, owner: str, repo: str, labels: list[str]
-    ) -> None:
+    async def ensure_labels_exist(self, owner: str, repo: str, labels: list[str]) -> None:
         """Create labels if they don't exist (idempotent)."""
         for label_name in labels:
             try:

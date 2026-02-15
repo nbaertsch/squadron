@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from copilot import Tool, define_tool
+from copilot import define_tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -80,7 +80,9 @@ class SubmitPRReviewParams(BaseModel):
 
 class OpenPRParams(BaseModel):
     title: str = Field(description="Pull request title")
-    body: str = Field(description="Pull request body (markdown). Reference the issue with 'Fixes #N'.")
+    body: str = Field(
+        description="Pull request body (markdown). Reference the issue with 'Fixes #N'."
+    )
     head: str = Field(description="Source branch name (the branch with your changes)")
     base: str = Field(description="Target branch name (usually 'main')")
 
@@ -125,7 +127,9 @@ class FrameworkTools:
         events = []
         while not inbox.empty():
             event = inbox.get_nowait()
-            events.append(f"- [{event.event_type.value}] issue=#{event.issue_number} pr=#{event.pr_number}")
+            events.append(
+                f"- [{event.event_type.value}] issue=#{event.issue_number} pr=#{event.pr_number}"
+            )
 
         return "Pending events:\n" + "\n".join(events)
 
@@ -258,6 +262,7 @@ class FrameworkTools:
             f"Created issue #{new_issue_number}. You are now blocked on it. "
             "Your session will be saved. Stop working now — your session is being suspended."
         )
+
     async def escalate_to_human(self, agent_id: str, params: EscalateToHumanParams) -> str:
         """Escalate the current task to a human maintainer.
 
@@ -364,35 +369,51 @@ class FrameworkTools:
 
         framework = self  # capture for closures
 
-        @define_tool(description="Check for pending framework events (PR feedback, blocker resolutions, human messages). Call between major work phases.")
+        @define_tool(
+            description="Check for pending framework events (PR feedback, blocker resolutions, human messages). Call between major work phases."
+        )
         async def check_for_events(params: CheckEventsParams) -> str:
             return await framework.check_for_events(agent_id, params)
 
-        @define_tool(description="Report that you are blocked on another GitHub issue. Your session will be saved and you will be resumed when the blocker is resolved.")
+        @define_tool(
+            description="Report that you are blocked on another GitHub issue. Your session will be saved and you will be resumed when the blocker is resolved."
+        )
         async def report_blocked(params: ReportBlockedParams) -> str:
             return await framework.report_blocked(agent_id, params)
 
-        @define_tool(description="Report that your assigned task is complete. Provide a summary of what was accomplished.")
+        @define_tool(
+            description="Report that your assigned task is complete. Provide a summary of what was accomplished."
+        )
         async def report_complete(params: ReportCompleteParams) -> str:
             return await framework.report_complete(agent_id, params)
 
-        @define_tool(description="Create a new GitHub issue for a blocker you discovered. You will be blocked on the new issue until it is resolved.")
+        @define_tool(
+            description="Create a new GitHub issue for a blocker you discovered. You will be blocked on the new issue until it is resolved."
+        )
         async def create_blocker_issue(params: CreateBlockerIssueParams) -> str:
             return await framework.create_blocker_issue(agent_id, params)
 
-        @define_tool(description="Escalate the current task to a human maintainer. Use when you encounter architectural decisions, policy questions, ambiguous requirements, or security concerns that need human judgment.")
+        @define_tool(
+            description="Escalate the current task to a human maintainer. Use when you encounter architectural decisions, policy questions, ambiguous requirements, or security concerns that need human judgment."
+        )
         async def escalate_to_human(params: EscalateToHumanParams) -> str:
             return await framework.escalate_to_human(agent_id, params)
 
-        @define_tool(description="Post a comment on a GitHub issue. Use to communicate progress, ask clarifying questions, or post status updates.")
+        @define_tool(
+            description="Post a comment on a GitHub issue. Use to communicate progress, ask clarifying questions, or post status updates."
+        )
         async def comment_on_issue(params: CommentOnIssueParams) -> str:
             return await framework.comment_on_issue(agent_id, params)
 
-        @define_tool(description="Submit a review on a pull request. Use 'APPROVE' to approve, 'REQUEST_CHANGES' to request changes, or 'COMMENT' for general feedback.")
+        @define_tool(
+            description="Submit a review on a pull request. Use 'APPROVE' to approve, 'REQUEST_CHANGES' to request changes, or 'COMMENT' for general feedback."
+        )
         async def submit_pr_review(params: SubmitPRReviewParams) -> str:
             return await framework.submit_pr_review(agent_id, params)
 
-        @define_tool(description="Open a new pull request from your working branch. Include a descriptive title, body referencing the issue (e.g. 'Fixes #42'), source branch, and target branch.")
+        @define_tool(
+            description="Open a new pull request from your working branch. Include a descriptive title, body referencing the issue (e.g. 'Fixes #42'), source branch, and target branch."
+        )
         async def open_pr(params: OpenPRParams) -> str:
             return await framework.open_pr(agent_id, params)
 

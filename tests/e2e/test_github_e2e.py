@@ -11,8 +11,6 @@ from __future__ import annotations
 import time
 import uuid
 
-import pytest
-
 
 def _uid() -> str:
     """Short unique ID for test isolation."""
@@ -75,7 +73,10 @@ class TestIssueOperations:
 
         # Create
         created = await github_client.create_issue(
-            e2e_owner, e2e_repo, title=title, body=body,
+            e2e_owner,
+            e2e_repo,
+            title=title,
+            body=body,
         )
         issue_number = created["number"]
 
@@ -103,7 +104,10 @@ class TestIssueOperations:
 
         # Create issue
         created = await github_client.create_issue(
-            e2e_owner, e2e_repo, title=f"[E2E-{uid}] Label test", body="test",
+            e2e_owner,
+            e2e_repo,
+            title=f"[E2E-{uid}] Label test",
+            body="test",
         )
         issue_number = created["number"]
 
@@ -113,7 +117,7 @@ class TestIssueOperations:
 
             # Verify
             issue = await github_client.get_issue(e2e_owner, e2e_repo, issue_number)
-            label_names = [l["name"] for l in issue["labels"]]
+            label_names = [lbl["name"] for lbl in issue["labels"]]
             assert f"e2e-{uid}" in label_names
         finally:
             await github_client._request(
@@ -134,13 +138,19 @@ class TestIssueOperations:
         uid = _uid()
 
         created = await github_client.create_issue(
-            e2e_owner, e2e_repo, title=f"[E2E-{uid}] Comment test", body="test",
+            e2e_owner,
+            e2e_repo,
+            title=f"[E2E-{uid}] Comment test",
+            body="test",
         )
         issue_number = created["number"]
 
         try:
             comment = await github_client.comment_on_issue(
-                e2e_owner, e2e_repo, issue_number, body=f"E2E comment {uid}",
+                e2e_owner,
+                e2e_repo,
+                issue_number,
+                body=f"E2E comment {uid}",
             )
             assert comment["body"] == f"E2E comment {uid}"
             assert comment["id"] > 0
@@ -155,14 +165,20 @@ class TestIssueOperations:
         uid = _uid()
 
         created = await github_client.create_issue(
-            e2e_owner, e2e_repo, title=f"[E2E-{uid}] Assign test", body="test",
+            e2e_owner,
+            e2e_repo,
+            title=f"[E2E-{uid}] Assign test",
+            body="test",
         )
         issue_number = created["number"]
 
         try:
             # Assign to the repo owner (the user who installed the app)
             await github_client.assign_issue(
-                e2e_owner, e2e_repo, issue_number, assignees=[e2e_owner],
+                e2e_owner,
+                e2e_repo,
+                issue_number,
+                assignees=[e2e_owner],
             )
 
             issue = await github_client.get_issue(e2e_owner, e2e_repo, issue_number)
@@ -193,7 +209,8 @@ class TestLabelOperations:
         # Cleanup
         try:
             await github_client._request(
-                "DELETE", f"/repos/{e2e_owner}/{e2e_repo}/labels/{label}",
+                "DELETE",
+                f"/repos/{e2e_owner}/{e2e_repo}/labels/{label}",
             )
         except Exception:
             pass
@@ -206,13 +223,14 @@ class TestLabelOperations:
 
         # Verify they exist by trying to use them
         created = await github_client.create_issue(
-            e2e_owner, e2e_repo,
+            e2e_owner,
+            e2e_repo,
             title=f"[E2E-{uid}] Multi-label test",
             body="test",
             labels=labels,
         )
 
-        label_names = [l["name"] for l in created["labels"]]
+        label_names = [lbl["name"] for lbl in created["labels"]]
         for label in labels:
             assert label in label_names
 
@@ -225,7 +243,8 @@ class TestLabelOperations:
         for label in labels:
             try:
                 await github_client._request(
-                    "DELETE", f"/repos/{e2e_owner}/{e2e_repo}/labels/{label}",
+                    "DELETE",
+                    f"/repos/{e2e_owner}/{e2e_repo}/labels/{label}",
                 )
             except Exception:
                 pass
@@ -252,9 +271,14 @@ class TestWebhookSignature:
         )
 
         payload = b'{"action": "opened", "issue": {"number": 1}}'
-        sig = "sha256=" + hmac.new(
-            secret.encode(), payload, hashlib.sha256,
-        ).hexdigest()
+        sig = (
+            "sha256="
+            + hmac.new(
+                secret.encode(),
+                payload,
+                hashlib.sha256,
+            ).hexdigest()
+        )
 
         assert client.verify_webhook_signature(payload, sig) is True
 
