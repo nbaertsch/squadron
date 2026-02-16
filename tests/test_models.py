@@ -137,6 +137,7 @@ class TestSquadronEvent:
         """Ensure we have internal types for key GitHub events."""
         github_types = {
             SquadronEventType.ISSUE_OPENED,
+            SquadronEventType.ISSUE_REOPENED,
             SquadronEventType.ISSUE_CLOSED,
             SquadronEventType.ISSUE_ASSIGNED,
             SquadronEventType.ISSUE_LABELED,

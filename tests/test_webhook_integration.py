@@ -340,27 +340,36 @@ class TestCommentPayloads:
         assert evt.data["payload"]["comment"]["body"] == "@squadron can you also add PKCE support?"
 
 
-# ── PM Queue Routing ─────────────────────────────────────────────────────────
+# ── Handler Routing ──────────────────────────────────────────────────────────
 
 
-class TestPMQueueRouting:
-    """Verify that the right events land in the PM queue."""
+class TestHandlerRouting:
+    """Verify that events reach registered handlers."""
 
-    async def test_issue_events_routed_to_pm(self, client, event_queue, registry, config, payloads):
+    async def test_issue_events_reach_handlers(
+        self, client, event_queue, registry, config, payloads
+    ):
         for event_name in ["issues_opened", "issues_closed"]:
             payload = payloads[event_name]
             gh_event_type = "issues"
-            _send_webhook(client, gh_event_type, payload, delivery_id=f"pm-{event_name}")
+            _send_webhook(client, gh_event_type, payload, delivery_id=f"h-{event_name}")
 
         raw1: GitHubEvent = event_queue.get_nowait()
         raw2: GitHubEvent = event_queue.get_nowait()
 
         router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
+        received = []
+
+        async def handler(event):
+            received.append(event)
+
+        router.on(SquadronEventType.ISSUE_OPENED, handler)
+        router.on(SquadronEventType.ISSUE_CLOSED, handler)
         await router._route_event(raw1)
         await router._route_event(raw2)
 
-        # Both should be in PM queue
-        assert router.pm_queue.qsize() == 2
+        # Both should reach handlers
+        assert len(received) == 2
 
 
 # ── Deduplication ────────────────────────────────────────────────────────────

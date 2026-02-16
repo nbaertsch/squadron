@@ -3,9 +3,11 @@
 Runs as an async consumer loop. Handles:
 - Bot self-event filtering (squadron[bot] events)
 - Webhook deduplication (X-GitHub-Delivery UUID)
-- Event type → handler dispatch
-- PM queue routing for triage events
-- Agent inbox routing for targeted events
+- Event type → handler dispatch (config-driven triggers)
+
+All event→agent routing is defined in config.yaml agent_roles.triggers.
+The router itself has NO hardcoded routing logic — it maps GitHub events
+to SquadronEventType and calls registered handlers.
 
 See event-routing.md and AD-013 for design details.
 """
@@ -38,6 +40,7 @@ _BOT_ALLOWED_EVENTS: set[str] = {
 # Map GitHub event types to internal event types
 EVENT_MAP: dict[str, SquadronEventType] = {
     "issues.opened": SquadronEventType.ISSUE_OPENED,
+    "issues.reopened": SquadronEventType.ISSUE_REOPENED,
     "issues.closed": SquadronEventType.ISSUE_CLOSED,
     "issues.assigned": SquadronEventType.ISSUE_ASSIGNED,
     "issues.labeled": SquadronEventType.ISSUE_LABELED,
@@ -48,6 +51,10 @@ EVENT_MAP: dict[str, SquadronEventType] = {
     "pull_request_review.submitted": SquadronEventType.PR_REVIEW_SUBMITTED,
     "push": SquadronEventType.PUSH,
 }
+
+# Reverse map: SquadronEventType → GitHub event type string.
+# Used by trigger matching to compare config triggers against internal events.
+REVERSE_EVENT_MAP: dict[SquadronEventType, str] = {v: k for k, v in EVENT_MAP.items()}
 
 
 class EventRouter:
@@ -69,9 +76,6 @@ class EventRouter:
         self._handlers: dict[
             SquadronEventType, list[Callable[[SquadronEvent], Awaitable[None]]]
         ] = {}
-
-        # PM event queue — batched events for PM processing
-        self.pm_queue: asyncio.Queue[SquadronEvent] = asyncio.Queue()
 
         # Workflow engine (optional — set via set_workflow_engine)
         self._workflow_engine: WorkflowEngine | None = None
@@ -209,41 +213,18 @@ class EventRouter:
         )
 
     async def _dispatch(self, event: SquadronEvent) -> None:
-        """Dispatch an event to registered handlers and route to PM/agent inboxes."""
+        """Dispatch an event to registered handlers.
+
+        All routing logic is config-driven — handlers are registered by the
+        AgentManager based on config.yaml trigger definitions.  The router
+        itself has no opinion about which events go where.
+        """
         logger.info(
             "Dispatching event: %s (issue=#%s, pr=#%s)",
             event.event_type,
             event.issue_number,
             event.pr_number,
         )
-
-        # Check if this is a bot-originated event (skip PM queue to avoid
-        # the PM re-triaging its own actions)
-        sender = event.data.get("sender", "")
-        is_bot_event = sender == self.bot_username
-
-        # PM-bound events: issue triage, comments with @-pings, blocker resolution
-        pm_events = {
-            SquadronEventType.ISSUE_OPENED,
-            SquadronEventType.ISSUE_CLOSED,
-            SquadronEventType.ISSUE_COMMENT,
-            SquadronEventType.ISSUE_LABELED,
-        }
-
-        if event.event_type in pm_events and not is_bot_event:
-            await self.pm_queue.put(event)
-
-        # PR events: route to approval flow / review agents
-        pr_events = {
-            SquadronEventType.PR_OPENED,
-            SquadronEventType.PR_REVIEW_SUBMITTED,
-            SquadronEventType.PR_SYNCHRONIZED,
-        }
-
-        if event.event_type in pr_events:
-            # Also send to PM for awareness (but not bot's own PRs)
-            if not is_bot_event:
-                await self.pm_queue.put(event)
 
         # Call registered handlers
         handlers = self._handlers.get(event.event_type, [])

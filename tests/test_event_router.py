@@ -36,6 +36,7 @@ class TestEventMapping:
     def test_all_expected_mappings_exist(self):
         expected = {
             "issues.opened",
+            "issues.reopened",
             "issues.closed",
             "issues.assigned",
             "issues.labeled",
@@ -56,6 +57,13 @@ class TestEventMapping:
 class TestBotFilter:
     async def test_filters_bot_events(self, router):
         r, _ = router
+        handler_called = asyncio.Event()
+
+        async def mock_handler(event: SquadronEvent):
+            handler_called.set()
+
+        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
+
         event = GitHubEvent(
             delivery_id="d1",
             event_type="issues",
@@ -64,10 +72,17 @@ class TestBotFilter:
         )
         # Should silently return (filtered)
         await r._route_event(event)
-        assert r.pm_queue.empty()
+        assert not handler_called.is_set()
 
     async def test_passes_human_events(self, router, registry):
         r, _ = router
+        handler_called = asyncio.Event()
+
+        async def mock_handler(event: SquadronEvent):
+            handler_called.set()
+
+        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
+
         event = GitHubEvent(
             delivery_id="d2",
             event_type="issues",
@@ -78,7 +93,7 @@ class TestBotFilter:
             },
         )
         await r._route_event(event)
-        assert not r.pm_queue.empty()
+        assert handler_called.is_set()
 
     async def test_allows_bot_label_events(self, router, registry):
         """Bot-originated issues.labeled must pass through to handlers
@@ -106,9 +121,6 @@ class TestBotFilter:
         # Handler MUST be called (agent spawn depends on this)
         assert handler_called.is_set(), "Bot label event must reach handlers"
 
-        # PM queue must stay empty (avoid PM re-triaging its own label)
-        assert r.pm_queue.empty(), "Bot label event must not go to PM queue"
-
     async def test_allows_bot_pr_opened_events(self, router, registry):
         """Bot-originated pull_request.opened must pass through to handlers
         (dev agents open PRs which trigger review agents)."""
@@ -132,12 +144,18 @@ class TestBotFilter:
         await r._route_event(event)
 
         assert handler_called.is_set(), "Bot PR opened event must reach handlers"
-        assert r.pm_queue.empty(), "Bot PR opened event must not go to PM queue"
 
 
 class TestDeduplication:
     async def test_duplicate_event_filtered(self, router, registry):
         r, _ = router
+        received = []
+
+        async def mock_handler(event: SquadronEvent):
+            received.append(event)
+
+        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
+
         event = GitHubEvent(
             delivery_id="dup-1",
             event_type="issues",
@@ -149,12 +167,11 @@ class TestDeduplication:
         )
         # First time — should be processed
         await r._route_event(event)
-        assert not r.pm_queue.empty()
-        r.pm_queue.get_nowait()
+        assert len(received) == 1
 
         # Second time with same delivery_id — should be filtered
         await r._route_event(event)
-        assert r.pm_queue.empty()
+        assert len(received) == 1
 
 
 class TestEventConversion:
@@ -192,37 +209,6 @@ class TestEventConversion:
 
 
 class TestDispatch:
-    async def test_pm_receives_issue_events(self, router, registry):
-        r, _ = router
-        event = GitHubEvent(
-            delivery_id="pm-1",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "alice"},
-                "issue": {"number": 1, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert not r.pm_queue.empty()
-        pm_event = r.pm_queue.get_nowait()
-        assert pm_event.event_type == SquadronEventType.ISSUE_OPENED
-
-    async def test_pm_receives_pr_events(self, router, registry):
-        r, _ = router
-        event = GitHubEvent(
-            delivery_id="pm-2",
-            event_type="pull_request",
-            action="opened",
-            payload={
-                "sender": {"login": "alice"},
-                "pull_request": {"number": 3},
-            },
-        )
-        await r._route_event(event)
-        # PR events go to PM too
-        assert not r.pm_queue.empty()
-
     async def test_handler_called(self, router, registry):
         r, _ = router
         received = []
@@ -247,6 +233,14 @@ class TestDispatch:
 
     async def test_unknown_event_ignored(self, router, registry):
         r, _ = router
+        received = []
+
+        async def handler(event: SquadronEvent):
+            received.append(event)
+
+        # Register handler for all types — none should fire for unknown
+        r.on(SquadronEventType.ISSUE_OPENED, handler)
+
         event = GitHubEvent(
             delivery_id="u1",
             event_type="unknown",
@@ -254,4 +248,30 @@ class TestDispatch:
             payload={"sender": {"login": "alice"}},
         )
         await r._route_event(event)
-        assert r.pm_queue.empty()
+        assert len(received) == 0
+
+    async def test_multiple_handlers_called(self, router, registry):
+        """Multiple handlers for the same event type should all be called."""
+        r, _ = router
+        calls = []
+
+        async def handler_a(event: SquadronEvent):
+            calls.append("a")
+
+        async def handler_b(event: SquadronEvent):
+            calls.append("b")
+
+        r.on(SquadronEventType.ISSUE_OPENED, handler_a)
+        r.on(SquadronEventType.ISSUE_OPENED, handler_b)
+
+        event = GitHubEvent(
+            delivery_id="multi-1",
+            event_type="issues",
+            action="opened",
+            payload={
+                "sender": {"login": "alice"},
+                "issue": {"number": 1, "labels": []},
+            },
+        )
+        await r._route_event(event)
+        assert calls == ["a", "b"]

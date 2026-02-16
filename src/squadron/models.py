@@ -113,6 +113,7 @@ class SquadronEventType(str, enum.Enum):
 
     # Webhook-originated
     ISSUE_OPENED = "issue.opened"
+    ISSUE_REOPENED = "issue.reopened"
     ISSUE_CLOSED = "issue.closed"
     ISSUE_ASSIGNED = "issue.assigned"
     ISSUE_LABELED = "issue.labeled"

@@ -64,7 +64,7 @@ class AgentManager:
             repo=config.project.repo,
         )
 
-        # PM-specific tools (issue CRUD, registry queries)
+        # Issue-management tools (used by stateless agents like PM)
         self._pm_tools = PMTools(
             registry=registry,
             github=github,
@@ -78,11 +78,6 @@ class AgentManager:
         # Track active agent tasks
         self._agent_tasks: dict[str, asyncio.Task] = {}
 
-        # PM CopilotAgent (fresh sessions per batch)
-        self._pm_copilot: CopilotAgent | None = None
-
-        # PM processing task
-        self._pm_task: asyncio.Task | None = None
         self._running = False
 
         # Agent concurrency limiter
@@ -92,21 +87,14 @@ class AgentManager:
         )
 
     async def start(self) -> None:
-        """Start the agent manager — begin PM consumer loop."""
+        """Start the agent manager — register config-driven event handlers."""
         self._running = True
 
-        # Start PM CopilotAgent (always running, creates fresh sessions per batch)
-        self._pm_copilot = CopilotAgent(
-            runtime_config=self.config.runtime,
-            working_directory=str(self.repo_root),
-        )
-        await self._pm_copilot.start()
+        # Register config-driven trigger handler for all event types
+        # that appear in agent_roles.triggers
+        self._register_trigger_handlers()
 
-        self._pm_task = asyncio.create_task(self._pm_consumer_loop(), name="pm-consumer")
-
-        # Register event handlers
-        self.router.on(SquadronEventType.ISSUE_ASSIGNED, self._handle_issue_assigned)
-        self.router.on(SquadronEventType.ISSUE_LABELED, self._handle_issue_labeled)
+        # Register lifecycle handlers (not trigger-based)
         self.router.on(SquadronEventType.ISSUE_CLOSED, self._handle_issue_closed)
         self.router.on(SquadronEventType.PR_OPENED, self._handle_pr_opened)
         self.router.on(SquadronEventType.PR_CLOSED, self._handle_pr_closed)
@@ -118,14 +106,6 @@ class AgentManager:
     async def stop(self) -> None:
         """Stop all agents gracefully."""
         self._running = False
-
-        # Cancel PM consumer
-        if self._pm_task:
-            self._pm_task.cancel()
-            try:
-                await self._pm_task
-            except asyncio.CancelledError:
-                pass
 
         # Stop all running agent tasks
         for agent_id, task in self._agent_tasks.items():
@@ -148,216 +128,108 @@ class AgentManager:
             await copilot.stop()
         self._copilot_agents.clear()
 
-        if self._pm_copilot:
-            await self._pm_copilot.stop()
-
         self._agent_tasks.clear()
         logger.info("Agent manager stopped")
 
-    # ── PM Consumer ──────────────────────────────────────────────────────
+    # ── Config-Driven Trigger Matching ───────────────────────────────────
 
-    async def _pm_consumer_loop(self) -> None:
-        """Consume events from the PM queue and invoke PM agent.
+    def _register_trigger_handlers(self) -> None:
+        """Register event handlers based on config.yaml agent_roles.triggers.
 
-        Batches events with a short delay for related events.
+        Scans all agent roles for trigger definitions and registers
+        _handle_config_trigger for each unique event type that appears.
         """
-        while self._running:
-            try:
-                # Wait for first event
-                event = await asyncio.wait_for(self.router.pm_queue.get(), timeout=1.0)
-                batch = [event]
+        from squadron.event_router import EVENT_MAP
 
-                # Collect more events that arrive within 2 seconds (batching window)
-                try:
-                    while True:
-                        event = await asyncio.wait_for(self.router.pm_queue.get(), timeout=2.0)
-                        batch.append(event)
-                except asyncio.TimeoutError:
-                    pass
+        # Collect all unique SquadronEventTypes referenced by triggers
+        trigger_event_types: set[SquadronEventType] = set()
+        for _role_name, role_config in self.config.agent_roles.items():
+            for trigger in role_config.triggers:
+                internal_type = EVENT_MAP.get(trigger.event)
+                if internal_type:
+                    trigger_event_types.add(internal_type)
+                else:
+                    logger.warning(
+                        "Unknown trigger event type '%s' — not in EVENT_MAP", trigger.event
+                    )
 
-                logger.info("PM processing batch of %d events", len(batch))
-                await self._invoke_pm(batch)
-
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("Error in PM consumer loop")
-                await asyncio.sleep(5)  # Back off on error
-
-    async def _invoke_pm(self, events: list[SquadronEvent]) -> None:
-        """Invoke the PM agent with a batch of events.
-
-        Creates a fresh session per batch (AD-017 — PM is stateless).
-        """
-        pm_def = self.agent_definitions.get("pm")
-        if not pm_def:
-            logger.error("PM agent definition not found")
-            return
-
-        # Build context for PM
-        active_agents = await self.registry.get_all_active_agents()
-        context = self._build_pm_context(events, active_agents)
+        # Register the universal trigger handler for each event type
+        for event_type in trigger_event_types:
+            self.router.on(event_type, self._handle_config_trigger)
 
         logger.info(
-            "Invoking PM agent with context (%d events, %d active agents)",
-            len(events),
-            len(active_agents),
+            "Registered config triggers for %d event types: %s",
+            len(trigger_event_types),
+            ", ".join(t.value for t in trigger_event_types),
         )
 
-        await self._run_pm_session(pm_def, context, events)
+    async def _handle_config_trigger(self, event: SquadronEvent) -> None:
+        """Match an event against all config triggers and spawn matching agents.
 
-    def _build_pm_context(
-        self,
-        events: list[SquadronEvent],
-        active_agents: list[AgentRecord],
-    ) -> dict:
-        """Build the context dictionary injected into each PM session."""
-        return {
-            "project_name": self.config.project.name,
-            "label_taxonomy": {
-                "types": self.config.labels.types,
-                "priorities": self.config.labels.priorities,
-                "states": self.config.labels.states,
-            },
-            "agent_roles": list(self.config.agent_roles.keys()),
-            "active_agents": [
-                {
-                    "agent_id": a.agent_id,
-                    "role": a.role,
-                    "issue": a.issue_number,
-                    "status": a.status.value,
-                    "blocked_by": a.blocked_by,
-                }
-                for a in active_agents
-            ],
-            "events": [
-                {
-                    "type": e.event_type.value,
-                    "issue": e.issue_number,
-                    "pr": e.pr_number,
-                    "data": {
-                        "action": e.data.get("action"),
-                        "sender": e.data.get("sender"),
-                    },
-                }
-                for e in events
-            ],
-            "human_groups": self.config.human_groups,
-            "escalation": {
-                "default_notify": self.config.escalation.default_notify,
-                "max_issue_depth": self.config.escalation.max_issue_depth,
-            },
-        }
-
-    def _format_pm_prompt(self, events: list[SquadronEvent], context: dict) -> str:
-        """Format the user prompt for a PM session with injected context."""
-        lines = ["## Current Project State\n"]
-        lines.append(f"Project: {context['project_name']}")
-        lines.append(f"Active agents: {len(context['active_agents'])}")
-        if context["active_agents"]:
-            lines.append("\n### Active Agents")
-            for a in context["active_agents"]:
-                blocked = (
-                    f" (blocked by #{', #'.join(str(b) for b in a['blocked_by'])})"
-                    if a["blocked_by"]
-                    else ""
-                )
-                lines.append(f"- {a['agent_id']}: {a['status']}{blocked}")
-
-        lines.append("\n## New Events\n")
-        for i, evt in enumerate(context["events"]):
-            lines.append(f"- **{evt['type']}** issue=#{evt['issue']} pr=#{evt['pr']}")
-            if i < len(events):
-                payload = events[i].data.get("payload", {})
-                issue_data = payload.get("issue", {})
-                if issue_data:
-                    lines.append(f"  Title: {issue_data.get('title', 'N/A')}")
-                    labels = [lbl.get("name", "") for lbl in issue_data.get("labels", [])]
-                    if labels:
-                        lines.append(f"  Labels: {', '.join(labels)}")
-                    body = issue_data.get("body", "")
-                    if body:
-                        lines.append(f"  Body: {body[:500]}")
-                pr_data = payload.get("pull_request", {})
-                if pr_data:
-                    lines.append(f"  PR Title: {pr_data.get('title', 'N/A')}")
-
-        lines.append("\n## Instructions")
-        lines.append("Analyze these events and take appropriate action using your available tools.")
-        lines.append(
-            "For new issues: triage, classify with labels (type + priority), and post a triage comment."
-        )
-        lines.append(
-            "IMPORTANT: Applying a type label (feature, bug, etc.) automatically spawns the appropriate agent — do NOT try to assign issues to bots."
-        )
-        lines.append("For closed issues: check if any blocked agents should be unblocked.")
-        lines.append("For PR events: coordinate review assignments.")
-
-        return "\n".join(lines)
-
-    async def _run_pm_session(
-        self,
-        pm_def: AgentDefinition,
-        context: dict,
-        events: list[SquadronEvent],
-    ) -> None:
-        """Run a fresh PM session for a batch of events.
-
-        PM is stateless — each batch gets a new session that is
-        destroyed after processing (AD-017).
+        This is the universal trigger handler — it replaces the old hardcoded
+        PM queue routing and label→agent mapping.  Every agent role's triggers
+        are checked against the incoming event.
         """
-        import time
+        from squadron.event_router import REVERSE_EVENT_MAP
 
-        batch_id = f"batch-{int(time.time())}"
-        session_id = f"squadron-pm-{batch_id}"
-
-        # Build custom_agents list from PM's subagent references
-        custom_agents = self._build_custom_agents(pm_def)
-        # Build MCP servers dict from agent definition
-        mcp_servers = self._build_mcp_servers(pm_def)
-
-        session_config = build_session_config(
-            role="pm",
-            issue_number=None,
-            system_message=pm_def.prompt or pm_def.raw_content,
-            working_directory=str(self.repo_root),
-            runtime_config=self.config.runtime,
-            session_id_override=session_id,
-            tools=self._pm_tools.get_tools(),
-            custom_agents=custom_agents,
-            mcp_servers=mcp_servers,
-        )
-
-        if not self._pm_copilot:
-            logger.error("PM CopilotAgent not started")
+        github_event_type = REVERSE_EVENT_MAP.get(event.event_type)
+        if not github_event_type:
             return
 
-        session = await self._pm_copilot.create_session(session_config)
+        sender = event.data.get("sender", "")
+        payload = event.data.get("payload", {})
 
-        try:
-            # Build the prompt with injected context
-            prompt = self._format_pm_prompt(events, context)
-            logger.info(
-                "PM SESSION [%s] — %d events, %d chars prompt, model=%s",
-                session_id,
-                len(events),
-                len(prompt),
-                session_config.get("model", "default"),
-            )
-            result = await session.send_and_wait({"prompt": prompt})
-            logger.info(
-                "PM SESSION [%s] completed — result=%s",
-                session_id,
-                result.type.value if result else "no response",
-            )
-        except Exception:
-            logger.exception("PM session %s failed", session_id)
-        finally:
-            # PM sessions are stateless — destroy after use
-            await session.destroy()
-            await self._pm_copilot.delete_session(session_id)
+        for role_name, role_config in self.config.agent_roles.items():
+            for trigger in role_config.triggers:
+                if trigger.event != github_event_type:
+                    continue
+
+                # Bot self-event filter (per-trigger)
+                if trigger.filter_bot and sender == self.router.bot_username:
+                    logger.debug(
+                        "Trigger %s/%s filtered bot event from %s",
+                        role_name,
+                        trigger.event,
+                        sender,
+                    )
+                    continue
+
+                # Label match (for issues.labeled triggers)
+                if trigger.label:
+                    event_label = payload.get("label", {}).get("name", "")
+                    if event_label != trigger.label:
+                        continue
+
+                # Trigger matched — spawn agent
+                issue_number = event.issue_number
+                if not issue_number:
+                    logger.warning(
+                        "Trigger %s/%s matched but no issue_number — skipping",
+                        role_name,
+                        trigger.event,
+                    )
+                    continue
+
+                # Duplicate guard: don't re-spawn if agent already exists
+                # (stateless agents skip this check — they're ephemeral)
+                if not role_config.stateless:
+                    existing = await self.registry.get_agents_for_issue(issue_number)
+                    if any(a.role == role_name for a in existing):
+                        logger.info(
+                            "Agent %s already exists for issue #%d — skipping",
+                            role_name,
+                            issue_number,
+                        )
+                        continue
+
+                logger.info(
+                    "Config trigger matched: %s/%s → spawning %s for issue #%d",
+                    trigger.event,
+                    trigger.label or "*",
+                    role_name,
+                    issue_number,
+                )
+                await self.create_agent(role_name, issue_number, trigger_event=event)
 
     # ── Agent Creation ───────────────────────────────────────────────────
 
@@ -369,19 +241,35 @@ class AgentManager:
     ) -> AgentRecord:
         """Create a new agent for an issue.
 
+        Stateful agents (default):
         1. Create agent record in registry
         2. Create git worktree for branch isolation
         3. Start agent session
-        """
-        agent_id = f"{role}-issue-{issue_number}"
 
-        # Check for existing agent on this issue
-        existing = await self.registry.get_agent_by_issue(issue_number)
-        if existing:
-            logger.warning(
-                "Agent already exists for issue #%d: %s", issue_number, existing.agent_id
-            )
-            return existing
+        Stateless agents (config: stateless: true):
+        1. Create agent record with unique ID (timestamp suffix)
+        2. No worktree — uses repo root
+        3. Start session, run to completion, destroy
+        """
+        import time
+
+        role_config = self.config.agent_roles.get(role)
+        is_stateless = role_config.stateless if role_config else False
+
+        # Stateless agents get unique IDs (multiple can run for same issue)
+        if is_stateless:
+            agent_id = f"{role}-issue-{issue_number}-{int(time.time())}"
+        else:
+            agent_id = f"{role}-issue-{issue_number}"
+
+        # Duplicate guard for stateful agents only
+        if not is_stateless:
+            existing = await self.registry.get_agent_by_issue(issue_number)
+            if existing:
+                logger.warning(
+                    "Agent already exists for issue #%d: %s", issue_number, existing.agent_id
+                )
+                return existing
 
         # Check concurrency limit
         if self._agent_semaphore is not None:
@@ -394,8 +282,8 @@ class AgentManager:
                 self._agent_semaphore._value,  # noqa: SLF001
             )
 
-        # Determine branch name
-        branch = self._branch_name(role, issue_number)
+        # Determine branch name (stateless agents don't need branches)
+        branch = "" if is_stateless else self._branch_name(role, issue_number)
 
         # Create agent record
         record = AgentRecord(
@@ -408,9 +296,13 @@ class AgentManager:
         )
         await self.registry.create_agent(record)
 
-        # Create git worktree
-        worktree_path = await self._create_worktree(record)
-        record.worktree_path = str(worktree_path)
+        if is_stateless:
+            # Stateless: no worktree, use repo root
+            record.worktree_path = str(self.repo_root)
+        else:
+            # Stateful: create git worktree
+            worktree_path = await self._create_worktree(record)
+            record.worktree_path = str(worktree_path)
 
         # Transition to ACTIVE
         record.status = AgentStatus.ACTIVE
@@ -435,7 +327,7 @@ class AgentManager:
         )
         self._agent_tasks[agent_id] = agent_task
 
-        logger.info("Created agent %s on branch %s", agent_id, branch)
+        logger.info("Created agent %s (stateless=%s, branch=%s)", agent_id, is_stateless, branch)
         return record
 
     async def wake_agent(self, agent_id: str, trigger_event: SquadronEvent) -> None:
@@ -603,6 +495,8 @@ class AgentManager:
         - COMPLETED: Agent called report_complete — session destroyed, resources freed
         - ACTIVE: Agent finished turn without lifecycle tool — normal completion
         - ESCALATED: Unhandled exception or timeout
+
+        Stateless agents always destroy their session after completion.
         """
         agent_def = self.agent_definitions.get(record.role)
         if not agent_def:
@@ -613,6 +507,10 @@ class AgentManager:
         if not copilot:
             logger.error("No CopilotAgent instance for: %s", record.agent_id)
             return
+
+        # Check if this is a stateless agent
+        role_config = self.config.agent_roles.get(record.role)
+        is_stateless = role_config.stateless if role_config else False
 
         # Interpolate template variables in agent definition prompt
         raw_prompt = agent_def.prompt or agent_def.raw_content
@@ -629,20 +527,27 @@ class AgentManager:
         custom_agents = self._build_custom_agents(agent_def)
         mcp_servers = self._build_mcp_servers(agent_def)
 
+        # Stateless agents get issue-management tools (PMTools).
+        # Stateful agents get lifecycle tools (FrameworkTools).
+        if is_stateless:
+            tools = self._pm_tools.get_tools()
+        else:
+            tools = self._framework_tools.get_tools_for_agent(record.agent_id)
+
         session_config = build_session_config(
             role=record.role,
             issue_number=record.issue_number,
             system_message=system_message,
             working_directory=str(record.worktree_path or self.repo_root),
             runtime_config=self.config.runtime,
-            tools=self._framework_tools.get_tools_for_agent(record.agent_id),
+            tools=tools,
             hooks=hooks,
             custom_agents=custom_agents,
             mcp_servers=mcp_servers,
         )
 
         try:
-            if resume:
+            if resume and not is_stateless:
                 logger.info(
                     "AGENT RESUME — %s (session=%s, trigger=%s)",
                     record.agent_id,
@@ -663,14 +568,18 @@ class AgentManager:
                 prompt = self._build_wake_prompt(record, trigger_event)
             else:
                 logger.info(
-                    "AGENT START — %s (issue=#%d, branch=%s, session=%s)",
+                    "AGENT START — %s (issue=#%d, branch=%s, session=%s, stateless=%s)",
                     record.agent_id,
                     record.issue_number,
                     record.branch,
                     record.session_id,
+                    is_stateless,
                 )
                 session = await copilot.create_session(session_config)
-                prompt = self._build_agent_prompt(record, trigger_event)
+                if is_stateless:
+                    prompt = await self._build_stateless_prompt(record, trigger_event)
+                else:
+                    prompt = self._build_agent_prompt(record, trigger_event)
 
             # Layer 2 circuit breaker: pass max_duration as the SDK's own
             # send_and_wait timeout. The SDK defaults to 60s internally if
@@ -711,6 +620,19 @@ class AgentManager:
             )
 
             # ── Post-turn state machine ──────────────────────────────────
+            # Stateless agents always clean up after completion
+            if is_stateless:
+                logger.info("STATELESS AGENT DONE — %s", record.agent_id)
+                record.status = AgentStatus.COMPLETED
+                await self.registry.update_agent(record)
+                await self._cleanup_agent(
+                    record.agent_id,
+                    destroy_session=True,
+                    copilot=copilot,
+                    session_id=record.session_id,
+                )
+                return
+
             # Re-read agent status from registry (framework tools may have
             # mutated it during the turn via report_blocked / report_complete)
             updated = await self.registry.get_agent(record.agent_id)
@@ -1049,63 +971,6 @@ class AgentManager:
 
     # ── Event Handlers ───────────────────────────────────────────────────
 
-    async def _handle_issue_assigned(self, event: SquadronEvent) -> None:
-        """Handle issue assignment — create an agent if assigned to a bot role."""
-        payload = event.data.get("payload", {})
-        assignee = payload.get("assignee", {})
-        issue = payload.get("issue", {})
-
-        if not assignee or not issue:
-            return
-
-        # Check if assigned to an agent role (via labels)
-        labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
-        role = self._label_to_role(labels)
-
-        if role:
-            await self.create_agent(role, issue["number"], trigger_event=event)
-
-    async def _handle_issue_labeled(self, event: SquadronEvent) -> None:
-        """Handle issue labeled — spawn agent if label maps to an agent role.
-
-        This is the primary agent spawn trigger. When the PM labels an issue
-        with a type label (e.g. 'feature', 'bug'), and that label maps to an
-        agent role via assignable_labels in config, we spawn the agent.
-        """
-        payload = event.data.get("payload", {})
-        issue = payload.get("issue", {})
-        label = payload.get("label", {})
-
-        if not issue or not label:
-            return
-
-        label_name = label.get("name", "")
-        issue_number = issue.get("number")
-        if not label_name or not issue_number:
-            return
-
-        # Check if this specific label maps to an agent role
-        for role_name, role_config in self.config.agent_roles.items():
-            if role_config.assignable_labels and label_name in role_config.assignable_labels:
-                # Don't spawn if an agent already exists for this issue+role
-                existing = await self.registry.get_agents_for_issue(issue_number)
-                if any(a.role == role_name for a in existing):
-                    logger.info(
-                        "Agent %s already exists for issue #%d — skipping",
-                        role_name,
-                        issue_number,
-                    )
-                    return
-
-                logger.info(
-                    "Label '%s' on issue #%d → spawning %s agent",
-                    label_name,
-                    issue_number,
-                    role_name,
-                )
-                await self.create_agent(role_name, issue_number, trigger_event=event)
-                return  # Only spawn one agent per label event
-
     async def _handle_issue_closed(self, event: SquadronEvent) -> None:
         """Handle issue closure — check if it unblocks any sleeping agents."""
         if event.issue_number is None:
@@ -1343,6 +1208,85 @@ class AgentManager:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
+    async def _build_stateless_prompt(
+        self,
+        record: AgentRecord,
+        trigger_event: SquadronEvent | None,
+    ) -> str:
+        """Build the prompt for a stateless agent session.
+
+        Stateless agents (like PM) get full project context injected
+        into each session since they have no memory between runs.
+        """
+        active_agents = await self.registry.get_all_active_agents()
+
+        lines = [f"## Event for Issue #{record.issue_number}\n"]
+
+        # Project context
+        lines.append(f"**Project:** {self.config.project.name}")
+        lines.append(f"**Active agents:** {len(active_agents)}")
+
+        if active_agents:
+            lines.append("\n### Active Agents")
+            for a in active_agents:
+                blocked = (
+                    f" (blocked by #{', #'.join(str(b) for b in a.blocked_by)})"
+                    if a.blocked_by
+                    else ""
+                )
+                lines.append(f"- {a.agent_id}: {a.status.value}{blocked}")
+
+        # Event details
+        if trigger_event:
+            lines.append("\n### Triggering Event")
+            lines.append(f"**Type:** {trigger_event.event_type.value}")
+            payload = trigger_event.data.get("payload", {})
+
+            issue_data = payload.get("issue", {})
+            if issue_data:
+                lines.append(f"**Title:** {issue_data.get('title', 'N/A')}")
+                labels = [lbl.get("name", "") for lbl in issue_data.get("labels", [])]
+                if labels:
+                    lines.append(f"**Labels:** {', '.join(labels)}")
+                body = issue_data.get("body", "")
+                if body:
+                    lines.append(f"\n**Description:**\n{body[:1000]}")
+
+            comment_data = payload.get("comment", {})
+            if comment_data:
+                lines.append(
+                    f"\n**Comment by {comment_data.get('user', {}).get('login', 'unknown')}:**"
+                )
+                lines.append(comment_data.get("body", "")[:1000])
+
+            pr_data = payload.get("pull_request", {})
+            if pr_data:
+                lines.append(f"**PR Title:** {pr_data.get('title', 'N/A')}")
+
+        # Available agent roles
+        lines.append("\n### Available Agent Roles")
+        for role_name, role_config in self.config.agent_roles.items():
+            trigger_info = ", ".join(
+                f"{t.event}" + (f"[{t.label}]" if t.label else "") for t in role_config.triggers
+            )
+            lines.append(f"- **{role_name}**: triggers on {trigger_info or 'approval_flow only'}")
+
+        lines.append("\n### Instructions")
+        lines.append(f"**Your role:** {record.role}")
+        lines.append("Analyze this event and take appropriate action using your available tools.")
+        lines.append(
+            "For new issues: triage, classify with labels (type + priority), and post a triage comment."
+        )
+        lines.append(
+            "IMPORTANT: Applying a type label (feature, bug, etc.) automatically spawns the appropriate agent — do NOT try to assign issues to bots."
+        )
+        lines.append("For closed issues: check if any blocked agents should be unblocked.")
+        lines.append(
+            "For comments: respond if needed or re-triage if the issue context has changed."
+        )
+
+        return "\n".join(lines)
+
     def _branch_name(self, role: str, issue_number: int) -> str:
         """Generate a branch name from config templates."""
         naming = self.config.branch_naming
@@ -1355,15 +1299,6 @@ class AgentManager:
         }
         template = templates.get(role, f"{role}/issue-{{issue_number}}")
         return template.format(issue_number=issue_number)
-
-    def _label_to_role(self, labels: list[str]) -> str | None:
-        """Map issue labels to an agent role using config."""
-        for role_name, role_config in self.config.agent_roles.items():
-            if role_config.assignable_labels:
-                for label in labels:
-                    if label in role_config.assignable_labels:
-                        return role_name
-        return None
 
     async def _run_git(self, *args: str, timeout: int = 60) -> tuple[int, str, str]:
         """Run a git command asynchronously without blocking the event loop.

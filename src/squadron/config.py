@@ -51,11 +51,27 @@ class BranchNamingConfig(BaseModel):
     hotfix: str = "hotfix/issue-{issue_number}"
 
 
+class AgentTrigger(BaseModel):
+    """Defines when an agent should be spawned.
+
+    Examples:
+        - {event: "issues.opened"}  → new issues
+        - {event: "issues.labeled", label: "feature"}  → specific label applied
+        - {event: "pull_request.opened"}  → PR opened
+    """
+
+    event: str  # GitHub webhook event type, e.g. "issues.opened", "issues.labeled"
+    label: str | None = None  # Only trigger when this specific label is applied
+    filter_bot: bool = True  # Skip events from the bot (default: yes)
+
+
 class AgentRoleConfig(BaseModel):
     agent_definition: str  # Relative path to agent .md file
     singleton: bool = False
-    assignable_labels: list[str] = Field(default_factory=list)
-    trigger: str | None = None  # e.g. "approval_flow"
+    stateless: bool = False  # Stateless agents: no worktree, session destroyed after each run
+    triggers: list[AgentTrigger] = Field(default_factory=list)  # Event triggers for this agent
+    assignable_labels: list[str] = Field(default_factory=list)  # DEPRECATED — use triggers
+    trigger: str | None = None  # e.g. "approval_flow" — DEPRECATED — use triggers
     subagents: list[str] = Field(default_factory=list)  # Other agent roles available as subagents
 
 
