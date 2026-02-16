@@ -19,7 +19,7 @@ labels:
     - feature
     - bug
     - security
-    - docs
+    - documentation
     - infrastructure
   priorities:
     - critical

@@ -80,6 +80,60 @@ class TestBotFilter:
         await r._route_event(event)
         assert not r.pm_queue.empty()
 
+    async def test_allows_bot_label_events(self, router, registry):
+        """Bot-originated issues.labeled must pass through to handlers
+        (this is how PM label → agent spawn works)."""
+        r, _ = router
+        handler_called = asyncio.Event()
+
+        async def mock_handler(event: SquadronEvent):
+            handler_called.set()
+
+        r.on(SquadronEventType.ISSUE_LABELED, mock_handler)
+
+        event = GitHubEvent(
+            delivery_id="d-label-bot",
+            event_type="issues",
+            action="labeled",
+            payload={
+                "sender": {"login": "squadron[bot]", "type": "Bot"},
+                "issue": {"number": 42, "labels": [{"name": "feature"}]},
+                "label": {"name": "feature"},
+            },
+        )
+        await r._route_event(event)
+
+        # Handler MUST be called (agent spawn depends on this)
+        assert handler_called.is_set(), "Bot label event must reach handlers"
+
+        # PM queue must stay empty (avoid PM re-triaging its own label)
+        assert r.pm_queue.empty(), "Bot label event must not go to PM queue"
+
+    async def test_allows_bot_pr_opened_events(self, router, registry):
+        """Bot-originated pull_request.opened must pass through to handlers
+        (dev agents open PRs which trigger review agents)."""
+        r, _ = router
+        handler_called = asyncio.Event()
+
+        async def mock_handler(event: SquadronEvent):
+            handler_called.set()
+
+        r.on(SquadronEventType.PR_OPENED, mock_handler)
+
+        event = GitHubEvent(
+            delivery_id="d-pr-bot",
+            event_type="pull_request",
+            action="opened",
+            payload={
+                "sender": {"login": "squadron[bot]", "type": "Bot"},
+                "pull_request": {"number": 10, "labels": [], "head": {"ref": "feat/issue-42"}},
+            },
+        )
+        await r._route_event(event)
+
+        assert handler_called.is_set(), "Bot PR opened event must reach handlers"
+        assert r.pm_queue.empty(), "Bot PR opened event must not go to PM queue"
+
 
 class TestDeduplication:
     async def test_duplicate_event_filtered(self, router, registry):

@@ -25,6 +25,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Bot-initiated events that are intentional workflow triggers and must NOT
+# be filtered.  The PM agent applies labels to spawn dev agents, and dev
+# agents open / push to PRs to trigger review — these are the backbone of
+# the multi-agent orchestration loop.
+_BOT_ALLOWED_EVENTS: set[str] = {
+    "issues.labeled",  # PM labels issue → spawn dev/bug/docs agent
+    "pull_request.opened",  # Dev agent opens PR → trigger review agents
+    "pull_request.synchronize",  # Dev agent pushes to PR → re-trigger reviews
+}
+
 # Map GitHub event types to internal event types
 EVENT_MAP: dict[str, SquadronEventType] = {
     "issues.opened": SquadronEventType.ISSUE_OPENED,
@@ -113,10 +123,16 @@ class EventRouter:
 
     async def _route_event(self, event: GitHubEvent) -> None:
         """Route a single GitHub event."""
-        # 1. Bot self-event filter
+        # 1. Bot self-event filter — allow intentional workflow triggers
         if event.sender == self.bot_username:
-            logger.debug("Filtered bot self-event: %s", event.full_type)
-            return
+            if event.full_type not in _BOT_ALLOWED_EVENTS:
+                logger.debug("Filtered bot self-event: %s", event.full_type)
+                return
+            logger.info(
+                "Allowing bot workflow trigger: %s (delivery=%s)",
+                event.full_type,
+                event.delivery_id,
+            )
 
         # 2. Webhook deduplication
         if await self.registry.has_seen_event(event.delivery_id):
@@ -201,6 +217,11 @@ class EventRouter:
             event.pr_number,
         )
 
+        # Check if this is a bot-originated event (skip PM queue to avoid
+        # the PM re-triaging its own actions)
+        sender = event.data.get("sender", "")
+        is_bot_event = sender == self.bot_username
+
         # PM-bound events: issue triage, comments with @-pings, blocker resolution
         pm_events = {
             SquadronEventType.ISSUE_OPENED,
@@ -209,7 +230,7 @@ class EventRouter:
             SquadronEventType.ISSUE_LABELED,
         }
 
-        if event.event_type in pm_events:
+        if event.event_type in pm_events and not is_bot_event:
             await self.pm_queue.put(event)
 
         # PR events: route to approval flow / review agents
@@ -220,8 +241,9 @@ class EventRouter:
         }
 
         if event.event_type in pr_events:
-            # Also send to PM for awareness
-            await self.pm_queue.put(event)
+            # Also send to PM for awareness (but not bot's own PRs)
+            if not is_bot_event:
+                await self.pm_queue.put(event)
 
         # Call registered handlers
         handlers = self._handlers.get(event.event_type, [])

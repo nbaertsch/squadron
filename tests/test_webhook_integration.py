@@ -179,7 +179,12 @@ class TestIssuePayloads:
         assert evt.data["payload"]["issue"]["state_reason"] == "completed"
 
     async def test_bot_sender_filtered(self, client, event_queue, registry, config, payloads):
-        """When squadron[bot] is the sender, the event should be filtered."""
+        """Bot self-events should be filtered UNLESS they are workflow triggers.
+
+        pull_request.opened from the bot IS a workflow trigger (dev agents
+        open PRs to trigger review), so it should pass through to handlers.
+        Non-workflow bot events (e.g. issue_comment.created) remain filtered.
+        """
         payload = payloads["pull_request_opened"]
         _send_webhook(client, "pull_request", payload)
 
@@ -187,13 +192,14 @@ class TestIssuePayloads:
         assert raw.sender == "squadron[bot]"
         assert raw.is_bot is True
 
-        # Route — should be filtered
+        # Route — pull_request.opened IS a bot-allowed workflow trigger
         router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
         handler = AsyncMock()
         router.on(SquadronEventType.PR_OPENED, handler)
         await router._route_event(raw)
 
-        handler.assert_not_called()
+        # Handler SHOULD be called — bot PR opens are workflow triggers
+        handler.assert_called_once()
 
 
 class TestPullRequestPayloads:
