@@ -90,12 +90,12 @@ class ProviderConfig(BaseModel):
 
 class ModelOverride(BaseModel):
     model: str
-    reasoning_effort: str = "medium"
+    reasoning_effort: str | None = None
 
 
 class RuntimeConfig(BaseModel):
     default_model: str = "claude-sonnet-4"
-    default_reasoning_effort: str = "medium"
+    default_reasoning_effort: str | None = None
     models: dict[str, ModelOverride] = Field(default_factory=dict)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     reconciliation_interval: int = 300  # seconds

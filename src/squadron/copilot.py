@@ -165,11 +165,13 @@ def build_session_config(
     # Resolve model for this role (override or default)
     model_override = runtime_config.models.get(role)
     model = model_override.model if model_override else runtime_config.default_model
+
+    # Resolve reasoning_effort: role override > global default > omit entirely.
+    # Not all models support it (e.g. claude-sonnet-4 rejects it), so only
+    # include when explicitly set.
     reasoning = (
-        model_override.reasoning_effort
-        if model_override
-        else runtime_config.default_reasoning_effort
-    )
+        model_override.reasoning_effort if model_override else None
+    ) or runtime_config.default_reasoning_effort
 
     config: SDKSessionConfig = {
         "session_id": session_id,
@@ -187,9 +189,9 @@ def build_session_config(
     provider_dict = _build_provider_dict(runtime_config)
     if provider_dict:
         config["provider"] = provider_dict
-    # Only include reasoning_effort if explicitly configured for this role
+    # Only include reasoning_effort when explicitly configured
     # (not all models support it — e.g. claude-sonnet-4 rejects it)
-    if model_override and model_override.reasoning_effort:
+    if reasoning:
         config["reasoning_effort"] = reasoning
     if tools:
         config["tools"] = tools
