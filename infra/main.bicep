@@ -181,6 +181,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'GITHUB_WEBHOOK_SECRET', secretRef: 'github-webhook-secret' }
             { name: 'COPILOT_GITHUB_TOKEN', secretRef: 'copilot-github-token' }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
+            { name: 'SQUADRON_DATA_DIR', value: '/tmp/squadron-data' }
           ]
           command: ['squadron', 'serve']
           args: ['--repo-root', '/data', '--host', '0.0.0.0', '--port', '8000']

@@ -3,14 +3,16 @@
 Tracks agent instances, their lifecycle status, blocker dependencies,
 and provides BFS cycle detection for blocker graphs.
 Also stores seen webhook delivery IDs for deduplication.
+
+The DB is expected to live on local (container) disk, NOT on a network
+filesystem.  State is ephemeral across container restarts; a future
+state-rebuild system will reconstruct it from GitHub project state.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-import asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -75,59 +77,12 @@ class AgentRegistry:
 
     async def initialize(self) -> None:
         """Open database and create tables."""
-        # On network filesystems (e.g., Azure Files/SMB), WAL can be unreliable and
-        # may fail with "database is locked" at startup. Use a busy timeout and
-        # fall back to a safer journal mode if WAL can't be enabled.
-        self._db = await aiosqlite.connect(self.db_path, timeout=30)
+        self._db = await aiosqlite.connect(self.db_path)
         self._db.row_factory = aiosqlite.Row
-
-        # Wait for locks instead of failing immediately.
-        await self._db.execute("PRAGMA busy_timeout=30000")
-
-        # Best-effort: WAL improves concurrency on local disks, but is often unreliable on SMB.
-        # If it fails (locked/unsupported), continue with SQLite defaults rather than crashloop.
-        try:
-            await self._db.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError as e:
-            logger.warning(
-                "Could not enable WAL for %s (%s) — continuing without WAL",
-                self.db_path,
-                str(e),
-            )
-
-        # Azure Files can transiently lock the DB during revision swaps.
-        # Retry schema initialization instead of crashlooping.
-        #
-        # NOTE: This can legitimately take a few minutes when an old ACA revision is
-        # still terminating (or SMB lock propagation lags), so keep the retry window
-        # longer than the typical container cold-start.
-        last_error: Exception | None = None
-        max_attempts = 300  # ~5 minutes
-        for attempt in range(max_attempts):
-            try:
-                await self._db.execute("PRAGMA foreign_keys=ON")
-                await self._db.executescript(SCHEMA)
-                await self._db.commit()
-                last_error = None
-                break
-            except sqlite3.OperationalError as e:
-                last_error = e
-                if "locked" in str(e).lower():
-                    logger.warning(
-                        "SQLite locked during init (%s) — retrying (%d/%d)",
-                        self.db_path,
-                        attempt + 1,
-                        max_attempts,
-                    )
-                    await asyncio.sleep(1)
-                    continue
-                raise
-
-        if last_error is not None:
-            raise RuntimeError(
-                f"Failed to initialize registry DB after retries: {self.db_path}"
-            ) from last_error
-
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._db.executescript(SCHEMA)
+        await self._db.commit()
         logger.info("Agent registry initialized: %s", self.db_path)
 
     async def close(self) -> None:
