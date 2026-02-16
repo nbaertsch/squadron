@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -67,6 +68,11 @@ class SquadronServer:
     async def start(self) -> None:
         """Initialize all components and start background loops."""
         logger.info("Squadron server starting (repo=%s)", self.repo_root)
+
+        # 0. Clone repo if SQUADRON_REPO_URL is set (container environment)
+        repo_url = os.environ.get("SQUADRON_REPO_URL")
+        if repo_url:
+            await self._clone_repo(repo_url)
 
         # 1. Load config
         self.config = load_config(self.squadron_dir)
@@ -195,6 +201,93 @@ class SquadronServer:
             await self.registry.close()
 
         logger.info("Squadron server stopped")
+
+    async def _clone_repo(self, repo_url: str) -> None:
+        """Clone the repository at startup so we have .squadron/ config and a git repo for worktrees.
+
+        Uses GitHub App credentials to generate an installation token for auth.
+        Clones into /tmp/squadron-repo (ephemeral — dies with the container).
+        """
+        clone_dir = Path("/tmp/squadron-repo")
+
+        if clone_dir.exists() and (clone_dir / ".git").exists():
+            logger.info("Repo already cloned at %s — pulling latest", clone_dir)
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "-C", str(clone_dir), "pull", "--ff-only"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if proc.returncode == 0:
+                self.repo_root = clone_dir
+                self.squadron_dir = clone_dir / ".squadron"
+                logger.info("Repo updated at %s", clone_dir)
+                return
+            logger.warning("git pull failed (%d): %s — re-cloning", proc.returncode, proc.stderr)
+            import shutil
+
+            shutil.rmtree(clone_dir, ignore_errors=True)
+
+        # Generate installation token for authenticated clone
+        app_id = os.environ.get("GITHUB_APP_ID")
+        private_key = os.environ.get("GITHUB_PRIVATE_KEY")
+        installation_id = os.environ.get("GITHUB_INSTALLATION_ID")
+
+        if not all([app_id, private_key, installation_id]):
+            logger.error("Cannot clone repo — missing GitHub App credentials")
+            return
+
+        # Create a temporary GitHubClient just for token generation
+        temp_client = GitHubClient(
+            app_id=app_id,
+            private_key=private_key,
+            installation_id=installation_id,
+        )
+        await temp_client.start()
+        try:
+            token = await temp_client._ensure_token()
+        finally:
+            await temp_client.close()
+
+        # Build authenticated URL: https://x-access-token:TOKEN@github.com/owner/repo.git
+        auth_url = repo_url.replace("https://", f"https://x-access-token:{token}@")
+
+        # Determine default branch from config or use 'main'
+        default_branch = os.environ.get("SQUADRON_DEFAULT_BRANCH", "main")
+
+        logger.info("Cloning %s (branch: %s) into %s", repo_url, default_branch, clone_dir)
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [
+                "git",
+                "clone",
+                "--branch",
+                default_branch,
+                "--single-branch",
+                auth_url,
+                str(clone_dir),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+        if proc.returncode != 0:
+            logger.error("git clone failed (%d): %s", proc.returncode, proc.stderr)
+            raise RuntimeError(f"Failed to clone repo: {proc.stderr}")
+
+        # Strip the token from the remote URL so it doesn't leak
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", "-C", str(clone_dir), "remote", "set-url", "origin", repo_url],
+            capture_output=True,
+            text=True,
+        )
+
+        self.repo_root = clone_dir
+        self.squadron_dir = clone_dir / ".squadron"
+        logger.info("Repo cloned successfully at %s", clone_dir)
 
     async def _recover_stale_agents(self) -> None:
         """On startup, mark any ACTIVE agents as SLEEPING.

@@ -3,19 +3,10 @@
 // Provisions:
 //   1. Log Analytics workspace (required by Container App Environment)
 //   2. Container App Environment
-//   3. Storage Account + Azure Files share (persistent volume for SQLite + worktrees)
-//   4. Container App (single container, pulls from GHCR)
+//   3. Container App (single container, pulls from GHCR)
 //
-// Deploy:
-//   az deployment group create \
-//     --resource-group <rg> \
-//     --template-file infra/main.bicep \
-//     --parameters appName=my-squadron \
-//                  ghcrImage=ghcr.io/owner/repo:latest \
-//                  githubAppId=12345 \
-//                  githubInstallationId=67890 \
-//                  githubPrivateKey='<pem-contents>' \
-//                  githubWebhookSecret='<secret>'
+// The container clones the repo at startup using GitHub App credentials.
+// All data (SQLite, worktrees) lives on ephemeral container-local disk.
 
 targetScope = 'resourceGroup'
 
@@ -46,6 +37,9 @@ param maxReplicas int = 1
 
 @description('Revision suffix (set to a unique value to force a new revision)')
 param revisionSuffix string = ''
+
+@description('GitHub repo clone URL (e.g. https://github.com/owner/repo.git)')
+param repoUrl string
 
 // GitHub App credentials
 @secure()
@@ -97,51 +91,6 @@ resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-// ── Storage Account + Azure Files ───────────────────────────────────────────
-
-var storageAccountName = replace('${appName}stor', '-', '')
-
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: length(storageAccountName) > 24 ? substring(storageAccountName, 0, 24) : storageAccountName
-  location: location
-  kind: 'StorageV2'
-  sku: {
-    name: 'Standard_LRS'
-  }
-  properties: {
-    minimumTlsVersion: 'TLS1_2'
-    supportsHttpsTrafficOnly: true
-  }
-}
-
-resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
-  parent: storageAccount
-  name: 'default'
-}
-
-resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
-  parent: fileService
-  name: 'squadron-data'
-  properties: {
-    shareQuota: 1 // 1 GB — config + SQLite DB only (worktrees use local ephemeral disk)
-    accessTier: 'TransactionOptimized'
-  }
-}
-
-// Mount the Azure Files share into the Container App Environment
-resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: env
-  name: 'squadron-data'
-  properties: {
-    azureFile: {
-      accountName: storageAccount.name
-      accountKey: storageAccount.listKeys().keys[0].value
-      shareName: fileShare.name
-      accessMode: 'ReadWrite'
-    }
-  }
-}
-
 // ── Container App ───────────────────────────────────────────────────────────
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
@@ -182,15 +131,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'COPILOT_GITHUB_TOKEN', secretRef: 'copilot-github-token' }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
             { name: 'SQUADRON_DATA_DIR', value: '/tmp/squadron-data' }
+            { name: 'SQUADRON_REPO_URL', value: repoUrl }
           ]
           command: ['squadron', 'serve']
-          args: ['--repo-root', '/data', '--host', '0.0.0.0', '--port', '8000']
-          volumeMounts: [
-            {
-              volumeName: 'squadron-data'
-              mountPath: '/data'
-            }
-          ]
+          args: ['--host', '0.0.0.0', '--port', '8000']
           probes: [
             {
               type: 'Liveness'
@@ -198,7 +142,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 path: '/health'
                 port: 8000
               }
-              initialDelaySeconds: 10
+              initialDelaySeconds: 30
               periodSeconds: 30
             }
             {
@@ -207,20 +151,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 path: '/health'
                 port: 8000
               }
-              initialDelaySeconds: 5
+              initialDelaySeconds: 15
               periodSeconds: 10
             }
           ]
         }
       ]
       revisionSuffix: revisionSuffix
-      volumes: [
-        {
-          name: 'squadron-data'
-          storageName: envStorage.name
-          storageType: 'AzureFile'
-        }
-      ]
       scale: {
         minReplicas: minReplicas
         maxReplicas: maxReplicas
