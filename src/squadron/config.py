@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -52,25 +52,53 @@ class BranchNamingConfig(BaseModel):
 
 
 class AgentTrigger(BaseModel):
-    """Defines when an agent should be spawned.
+    """Defines when an agent should be spawned, woken, completed, or put to sleep.
+
+    Actions:
+        - spawn (default): Create a new agent for this role
+        - wake: Wake a sleeping agent of this role (for the matched PR/issue)
+        - complete: Complete an active/sleeping agent of this role
+        - sleep: Transition an active agent to SLEEPING (e.g. after opening PR)
 
     Examples:
-        - {event: "issues.opened"}  → new issues
-        - {event: "issues.labeled", label: "feature"}  → specific label applied
-        - {event: "pull_request.opened"}  → PR opened
+        - {event: "issues.labeled", label: "feature"}  → spawn on label
+        - {event: "pull_request.opened", condition: {approval_flow: true}}  → spawn reviewer via approval flow
+        - {event: "pull_request.opened", action: "sleep", filter_bot: false}  → sleep dev after PR opened
+        - {event: "pull_request.synchronize", action: "wake"}  → wake reviewer on PR update
+        - {event: "pull_request.closed", action: "complete"}  → complete agent on PR close
+        - {event: "pull_request.closed", condition: {merged: false}, action: "wake"}  → wake dev on PR rejection
+        - {event: "pull_request_review.submitted", condition: {review_state: "changes_requested"}, action: "wake"}
     """
 
     event: str  # GitHub webhook event type, e.g. "issues.opened", "issues.labeled"
     label: str | None = None  # Only trigger when this specific label is applied
     filter_bot: bool = True  # Skip events from the bot (default: yes)
+    action: Literal["spawn", "wake", "complete", "sleep"] = "spawn"
+    condition: dict[str, Any] | None = None  # e.g. {approval_flow: true}, {merged: false}
 
 
 class AgentRoleConfig(BaseModel):
     agent_definition: str  # Relative path to agent .md file
     singleton: bool = False
-    stateless: bool = False  # Stateless agents: no worktree, session destroyed after each run
+    lifecycle: Literal["ephemeral", "persistent"] = "persistent"
     triggers: list[AgentTrigger] = Field(default_factory=list)  # Event triggers for this agent
     subagents: list[str] = Field(default_factory=list)  # Other agent roles available as subagents
+    tools: list[str] | None = None  # Explicit tool whitelist; None → lifecycle-based defaults
+    branch_template: str | None = (
+        None  # e.g. "feat/issue-{issue_number}"; None → auto from BranchNamingConfig
+    )
+
+    # Backward-compat: accept `stateless: true` → lifecycle: ephemeral
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_stateless(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.pop("stateless", None):
+            data.setdefault("lifecycle", "ephemeral")
+        return data
+
+    @property
+    def is_ephemeral(self) -> bool:
+        return self.lifecycle == "ephemeral"
 
 
 class CircuitBreakerDefaults(BaseModel):
@@ -350,7 +378,8 @@ class AgentDefinition(BaseModel):
     display_name: str = ""
     description: str = ""
     infer: bool = True
-    tools: list[str] = Field(default_factory=list)
+    tools: list[str] | None = None  # Allowlist of tool names (built-in aliases + custom).
+    #                                  None = all tools available; list = only listed tools.
     mcp_servers: dict[str, MCPServerDefinition] = Field(default_factory=dict)
 
     def to_custom_agent_config(self) -> dict[str, Any]:
@@ -446,7 +475,7 @@ def parse_agent_definition(role: str, content: str) -> AgentDefinition:
         display_name=fm.get("display_name", ""),
         description=fm.get("description", ""),
         infer=fm.get("infer", True),
-        tools=fm.get("tools", []) or [],
+        tools=fm.get("tools") or None,
         mcp_servers=mcp_servers,
     )
 

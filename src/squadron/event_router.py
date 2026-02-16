@@ -7,7 +7,8 @@ Runs as an async consumer loop. Handles:
 
 All event→agent routing is defined in config.yaml agent_roles.triggers.
 The router itself has NO hardcoded routing logic — it maps GitHub events
-to SquadronEventType and calls registered handlers.
+to SquadronEventType and calls registered handlers.  Workflow pipeline
+evaluation is handled by the AgentManager (unified dispatch).
 
 See event-routing.md and AD-013 for design details.
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 
 from squadron.models import GitHubEvent, SquadronEvent, SquadronEventType
@@ -23,7 +25,6 @@ from squadron.models import GitHubEvent, SquadronEvent, SquadronEventType
 if TYPE_CHECKING:
     from squadron.config import SquadronConfig
     from squadron.registry import AgentRegistry
-    from squadron.workflow_engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
 
@@ -77,21 +78,19 @@ class EventRouter:
             SquadronEventType, list[Callable[[SquadronEvent], Awaitable[None]]]
         ] = {}
 
-        # Workflow engine (optional — set via set_workflow_engine)
-        self._workflow_engine: WorkflowEngine | None = None
-
         self._running = False
         self._task: asyncio.Task | None = None
-
-    def set_workflow_engine(self, engine: WorkflowEngine) -> None:
-        """Attach the workflow engine for event-driven pipeline triggers."""
-        self._workflow_engine = engine
+        self.last_event_time: str | None = None  # ISO timestamp of last dispatched event
 
     def on(
         self, event_type: SquadronEventType, handler: Callable[[SquadronEvent], Awaitable[None]]
     ) -> None:
         """Register an event handler."""
         self._handlers.setdefault(event_type, []).append(handler)
+
+    def clear_handlers_for(self, event_type: SquadronEventType) -> None:
+        """Remove all handlers for a given event type."""
+        self._handlers.pop(event_type, None)
 
     async def start(self) -> None:
         """Start the event consumer loop."""
@@ -153,36 +152,7 @@ class EventRouter:
         # 4. Create internal event
         squadron_event = self._to_squadron_event(event, internal_type)
 
-        # 5. Workflow engine evaluation (triggers pipelines before normal dispatch)
-        if self._workflow_engine:
-            try:
-                triggered = await self._workflow_engine.evaluate_event(
-                    event.full_type,
-                    event.payload,
-                    squadron_event,
-                )
-                if triggered:
-                    logger.info(
-                        "Workflow triggered for %s — skipping approval flow", event.full_type
-                    )
-
-                # For PR review events, check if this advances a workflow stage
-                if (
-                    internal_type == SquadronEventType.PR_REVIEW_SUBMITTED
-                    and squadron_event.pr_number
-                ):
-                    review = event.payload.get("review", {})
-                    await self._workflow_engine.handle_pr_review(
-                        pr_number=squadron_event.pr_number,
-                        reviewer=review.get("user", {}).get("login", ""),
-                        review_state=review.get("state", ""),
-                        payload=event.payload,
-                        squadron_event=squadron_event,
-                    )
-            except Exception:
-                logger.exception("Workflow engine error for %s", event.full_type)
-
-        # 6. Dispatch to handlers
+        # 5. Dispatch to handlers (all routing is config-driven via AgentManager)
         await self._dispatch(squadron_event)
 
     def _to_squadron_event(
@@ -219,6 +189,8 @@ class EventRouter:
         AgentManager based on config.yaml trigger definitions.  The router
         itself has no opinion about which events go where.
         """
+        self.last_event_time = datetime.now(timezone.utc).isoformat()
+
         logger.info(
             "Dispatching event: %s (issue=#%s, pr=#%s)",
             event.event_type,

@@ -19,6 +19,7 @@ class AgentStatus(str, enum.Enum):
     SLEEPING = "sleeping"
     COMPLETED = "completed"
     ESCALATED = "escalated"
+    FAILED = "failed"
 
 
 # Agent roles are plain strings — defined in .squadron/config.yaml, not in code.

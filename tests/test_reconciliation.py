@@ -56,7 +56,9 @@ def _make_github(**overrides) -> AsyncMock:
     return github
 
 
-def _make_loop(registry, github=None, on_wake=None, config=None) -> ReconciliationLoop:
+def _make_loop(
+    registry, github=None, on_wake=None, on_complete=None, config=None
+) -> ReconciliationLoop:
     return ReconciliationLoop(
         config=config or _config(),
         registry=registry,
@@ -64,6 +66,7 @@ def _make_loop(registry, github=None, on_wake=None, config=None) -> Reconciliati
         owner="testowner",
         repo="testrepo",
         on_wake_agent=on_wake,
+        on_complete_agent=on_complete,
     )
 
 
@@ -269,14 +272,181 @@ class TestCheckStaleActiveAgents:
 
 
 class TestReconcile:
-    async def test_full_pass_runs_both_checks(self, registry):
+    async def test_full_pass_runs_all_checks(self, registry):
         loop = _make_loop(registry)
 
         # Patch internal methods to verify they're called
         loop._check_sleeping_agents = AsyncMock()
         loop._check_stale_active_agents = AsyncMock()
+        loop._check_orphaned_agents = AsyncMock()
 
         await loop.reconcile()
 
         loop._check_sleeping_agents.assert_called_once()
         loop._check_stale_active_agents.assert_called_once()
+        loop._check_orphaned_agents.assert_called_once()
+
+
+# ── Orphaned Agent Checks ───────────────────────────────────────────────────
+
+
+class TestCheckOrphanedAgents:
+    async def test_issue_closed_while_sleeping_completes_agent(self, registry):
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(return_value={"state": "closed"})
+
+        on_complete = AsyncMock()
+        loop = _make_loop(registry, github=github, on_complete=on_complete)
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED
+        on_complete.assert_called_once_with(agent.agent_id)
+
+    async def test_pr_merged_while_sleeping_completes_agent(self, registry):
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+            pr_number=10,
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(
+            return_value={"state": "open", "assignees": [{"login": "squadron[bot]"}]}
+        )
+        github.get_pull_request = AsyncMock(return_value={"state": "closed", "merged": True})
+
+        on_complete = AsyncMock()
+        loop = _make_loop(registry, github=github, on_complete=on_complete)
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED
+        on_complete.assert_called_once_with(agent.agent_id)
+
+    async def test_pr_closed_not_merged_completes_agent(self, registry):
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+            pr_number=10,
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(
+            return_value={"state": "open", "assignees": [{"login": "squadron[bot]"}]}
+        )
+        github.get_pull_request = AsyncMock(return_value={"state": "closed", "merged": False})
+
+        on_complete = AsyncMock()
+        loop = _make_loop(registry, github=github, on_complete=on_complete)
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED
+
+    async def test_issue_reassigned_away_from_bot_completes_agent(self, registry):
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(
+            return_value={"state": "open", "assignees": [{"login": "humandev"}]}
+        )
+
+        on_complete = AsyncMock()
+        loop = _make_loop(registry, github=github, on_complete=on_complete)
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED
+        on_complete.assert_called_once_with(agent.agent_id)
+
+    async def test_issue_still_assigned_to_bot_stays_sleeping(self, registry):
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(
+            return_value={"state": "open", "assignees": [{"login": "squadron[bot]"}]}
+        )
+
+        loop = _make_loop(registry, github=github)
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.SLEEPING
+
+    async def test_pr_still_open_stays_sleeping(self, registry):
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+            pr_number=10,
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(
+            return_value={"state": "open", "assignees": [{"login": "squadron[bot]"}]}
+        )
+        github.get_pull_request = AsyncMock(return_value={"state": "open", "merged": False})
+
+        loop = _make_loop(registry, github=github)
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.SLEEPING
+
+    async def test_github_error_does_not_crash_orphan_check(self, registry):
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(side_effect=Exception("API error"))
+
+        loop = _make_loop(registry, github=github)
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.SLEEPING
+
+    async def test_no_on_complete_callback_still_updates_status(self, registry):
+        """Even without on_complete, agent should still be marked COMPLETED."""
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            blocked_by=[],
+            sleeping_since=datetime.now(timezone.utc),
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github()
+        github.get_issue = AsyncMock(return_value={"state": "closed"})
+
+        loop = _make_loop(registry, github=github)  # no on_complete
+        await loop._check_orphaned_agents()
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED

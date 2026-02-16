@@ -34,12 +34,12 @@ class WorkflowEngine:
     """Matches events to workflow triggers and advances stage pipelines.
 
     Lifecycle:
-    1. ``evaluate_event()`` — called by the event router for every event.
+    1. ``evaluate_event()`` — called by the agent manager for every event.
        Checks all workflow definitions for a trigger match.  If matched,
        creates a workflow run and spawns the first stage's agent.
-    2. ``handle_stage_completed()`` — called when an agent belonging to an
-       active workflow run completes its action (e.g. PR approval).
-       Advances to the next stage or completes the workflow.
+    2. ``handle_pr_review()`` — called by the agent manager when a PR
+       review event arrives.  Advances to the next stage or completes
+       the workflow.
     """
 
     def __init__(
@@ -218,6 +218,7 @@ class WorkflowEngine:
                     run=run,
                     workflow=workflow,
                     current_stage=current_stage,
+                    squadron_event=squadron_event,
                 )
 
         return False
@@ -303,6 +304,7 @@ class WorkflowEngine:
         run: dict,
         workflow: WorkflowDefinition,
         current_stage,  # WorkflowStage
+        squadron_event: SquadronEvent | None = None,
     ) -> bool:
         """Handle stage rejection (changes_requested)."""
         run_id = run["run_id"]
@@ -321,16 +323,30 @@ class WorkflowEngine:
         elif on_reject == "restart":
             # Restart from the first stage
             first_stage = workflow.stages[0]
+            pr_number = run.get("pr_number")
+
+            # Spawn agent for the restarted stage
+            agent_id = None
+            if squadron_event:
+                agent_id = await self._spawn_stage_agent(
+                    run_id=run_id,
+                    stage=first_stage,
+                    pr_number=pr_number,
+                    event=squadron_event,
+                )
+
             await self.registry.advance_workflow_run(
                 run_id=run_id,
                 next_stage=first_stage.name,
                 stage_index=0,
+                stage_agent_id=agent_id,
             )
             logger.info(
-                "WORKFLOW RESTART — %s restarting from %s (run=%s)",
+                "WORKFLOW RESTART — %s restarting from %s (run=%s, agent=%s)",
                 workflow.name,
                 first_stage.name,
                 run_id,
+                agent_id,
             )
             return True
 
@@ -339,16 +355,30 @@ class WorkflowEngine:
             jump_idx = self._find_stage_index(workflow, on_reject)
             if jump_idx is not None:
                 target_stage = workflow.stages[jump_idx]
+                pr_number = run.get("pr_number")
+
+                # Spawn agent for the target stage
+                agent_id = None
+                if squadron_event:
+                    agent_id = await self._spawn_stage_agent(
+                        run_id=run_id,
+                        stage=target_stage,
+                        pr_number=pr_number,
+                        event=squadron_event,
+                    )
+
                 await self.registry.advance_workflow_run(
                     run_id=run_id,
                     next_stage=target_stage.name,
                     stage_index=jump_idx,
+                    stage_agent_id=agent_id,
                 )
                 logger.info(
-                    "WORKFLOW REJECT JUMP — %s → %s (run=%s)",
+                    "WORKFLOW REJECT JUMP — %s → %s (run=%s, agent=%s)",
                     workflow.name,
                     target_stage.name,
                     run_id,
+                    agent_id,
                 )
                 return True
 

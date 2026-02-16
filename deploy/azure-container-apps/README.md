@@ -19,12 +19,12 @@ The Bicep template (`infra/main.bicep` in the Squadron repo) creates:
 |---|---|
 | **Log Analytics Workspace** | Container logs and monitoring |
 | **Container App Environment** | Managed environment for the container |
-| **Storage Account + Azure Files** | Persistent volume for `.squadron/` config + SQLite DB |
 | **Container App** | The Squadron server (`ghcr.io/nbaertsch/squadron:latest`) |
 
 Storage architecture:
-- **Azure Files** (`/data`) — persistent: `.squadron/` config, SQLite registry DB
+- **Git clone** (`/tmp/squadron-repo`) — the container clones the target repo at startup for `.squadron/` config and SQLite DB
 - **Ephemeral disk** (`/tmp/squadron-worktrees`) — agent git worktrees (fast local I/O, recreated on demand)
+- **Config hot-reload** — push events to `main` trigger `git pull` + config reload (no restart needed)
 
 Estimated cost: **~$5–15/month** on a single 1-CPU / 2GB container with scale-to-one.
 
@@ -43,16 +43,20 @@ Follow the **[GitHub App setup guide](../github-app-setup.md)** to:
 
 You'll need these values for Step 5 (repository secrets).
 
-### 2. Initialize Squadron config in your repo
+### 2. Add Squadron config to your repo
 
 ```bash
 cd your-repo
 
-# Install squadron CLI (if not already installed)
-uv pip install squadron
+# Copy example config from the Squadron repo
+cp -r /path/to/squadron/examples/.squadron .squadron
 
-# Scaffold .squadron/ directory with default config and agent definitions
-squadron init
+# Or download directly from GitHub
+mkdir -p .squadron/agents
+curl -sL https://raw.githubusercontent.com/nbaertsch/squadron/main/examples/.squadron/config.yaml -o .squadron/config.yaml
+for agent in pm feat-dev pr-review; do
+  curl -sL https://raw.githubusercontent.com/nbaertsch/squadron/main/examples/.squadron/agents/${agent}.md -o .squadron/agents/${agent}.md
+done
 
 # Review and customize
 $EDITOR .squadron/config.yaml
@@ -66,9 +70,7 @@ This creates:
 └── agents/
     ├── pm.md             # PM agent definition
     ├── feat-dev.md       # Feature developer agent
-    ├── bug-fix.md        # Bug fix agent
-    ├── pr-review.md      # PR review agent
-    └── security-review.md
+    └── pr-review.md      # PR review agent
 ```
 
 ### 3. Copy the deployment workflow
@@ -175,12 +177,16 @@ az containerapp logs show \
 
 ## Config Sync
 
-When you push changes to `.squadron/**` on the `main` branch, the workflow automatically:
+When you push changes to `.squadron/**` on the `main` branch:
 
-1. Uploads the updated `.squadron/` files to Azure Files
-2. Restarts the container to pick up the new config
+1. The running container detects the push via webhook
+2. Automatically runs `git pull` to fetch the latest config
+3. Validates the new config with Pydantic
+4. Hot-reloads atomically — in-flight agents continue, new spawns use new config
 
-No manual intervention needed. Edit your agent definitions or config, push, and the running instance updates within ~60 seconds.
+No manual restart needed. Edit your agent definitions or config, push, and the running instance updates within seconds.
+
+If the webhook-based hot-reload is missed, you can manually trigger a restart via the `sync-config` workflow dispatch action.
 
 ## Workflow Actions
 
@@ -189,7 +195,7 @@ The template workflow supports three actions via **manual dispatch**:
 | Action | What it does |
 |---|---|
 | `deploy` | Full infrastructure deployment + config sync |
-| `sync-config` | Upload `.squadron/` to Azure Files + restart (no infra changes) |
+| `sync-config` | Restart the container to git pull latest config (fallback if hot-reload missed) |
 | `destroy` | Tear down all Azure resources |
 
 ## Troubleshooting
@@ -210,9 +216,8 @@ az containerapp revision list --name <app-name> --resource-group squadron-rg -o 
 
 ### Config not loading
 ```bash
-# Verify files on Azure Files
-STORAGE=$(az storage account list --resource-group squadron-rg --query "[0].name" -o tsv)
-az storage file list --share-name squadron-data --account-name $STORAGE --path .squadron -o table
+# Check container logs for config errors
+az containerapp logs show --name <app-name> --resource-group squadron-rg --follow | grep -i config
 ```
 
 ### Webhook signature errors (401)

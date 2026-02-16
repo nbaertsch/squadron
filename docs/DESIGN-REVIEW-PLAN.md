@@ -1,5 +1,9 @@
 # Squadron Systems Design Review Plan
 
+> **⚠️ Superseded**: This document was the research/design phase. All decisions
+> have been resolved and implemented via [ACTION-PLAN.md](ACTION-PLAN.md).
+> Kept for historical reference only.
+
 > **Purpose**: Top-down design review — requirements first, architecture second.
 > Not a bug list. This plan asks "what should Squadron *be*?" before asking
 > "is the code correct?" Every section opens with user intent, then derives

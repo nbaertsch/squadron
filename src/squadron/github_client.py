@@ -223,6 +223,57 @@ class GitHubClient:
 
     # ── Issue Operations ─────────────────────────────────────────────────
 
+    async def list_issues(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        labels: str | None = None,
+        state: str = "open",
+        per_page: int = 100,
+    ) -> list[dict]:
+        """List issues for a repository, optionally filtered by labels.
+
+        Args:
+            labels: Comma-separated label names, e.g. ``"in-progress,blocked"``.
+            state: ``"open"``, ``"closed"``, or ``"all"``.
+        """
+        params: dict[str, str | int] = {"state": state, "per_page": per_page}
+        if labels:
+            params["labels"] = labels
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/issues",
+            params=params,
+        )
+        # Filter out pull requests (GitHub returns PRs in the issues endpoint)
+        return [i for i in resp.json() if "pull_request" not in i]
+
+    async def list_pull_requests(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "open",
+        head: str | None = None,
+        per_page: int = 100,
+    ) -> list[dict]:
+        """List pull requests for a repository.
+
+        Args:
+            state: ``"open"``, ``"closed"``, or ``"all"``.
+            head: Filter by head user/branch, e.g. ``"user:branch"``.
+        """
+        params: dict[str, str | int] = {"state": state, "per_page": per_page}
+        if head:
+            params["head"] = head
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls",
+            params=params,
+        )
+        return resp.json()
+
     async def get_issue(self, owner: str, repo: str, issue_number: int) -> dict:
         resp = await self._request("GET", f"/repos/{owner}/{repo}/issues/{issue_number}")
         return resp.json()
@@ -310,6 +361,30 @@ class GitHubClient:
             "POST",
             f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
             json=payload,
+        )
+        return resp.json()
+
+    async def get_pr_reviews(self, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """List reviews on a pull request.
+
+        Returns a list of review dicts with 'id', 'user', 'state', 'body',
+        'submitted_at' keys.  States: APPROVED, CHANGES_REQUESTED, COMMENTED.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+        )
+        return resp.json()
+
+    async def get_pr_review_comments(self, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """List inline review comments on a pull request.
+
+        Returns a list of comment dicts with 'path', 'line', 'body',
+        'user', 'created_at', 'diff_hunk' keys.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
         )
         return resp.json()
 

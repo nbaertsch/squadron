@@ -177,6 +177,20 @@ class AgentRegistry:
         rows = await cursor.fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    async def get_recent_agents(self, limit: int = 10) -> list[AgentRecord]:
+        """Get recently completed, escalated, or failed agents, ordered by most recent.
+
+        Useful for giving ephemeral agents (like PM) context about recent
+        project activity and triage history.
+        """
+        cursor = await self.db.execute(
+            "SELECT * FROM agents WHERE status IN ('completed', 'escalated', 'failed') "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     async def update_agent(self, record: AgentRecord) -> None:
         """Update an existing agent record."""
         record.updated_at = datetime.now(timezone.utc)

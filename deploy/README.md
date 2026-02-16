@@ -12,24 +12,25 @@ flowchart LR
   end
 
   subgraph instance["Squadron Instance (Azure)"]
-    data["/data/.squadron/ (config)<br>/data/.squadron-data/ (SQLite)"]
+    clone["/tmp/squadron-repo/<br>(git clone of repo)"]
     worktrees["/tmp/squadron-worktrees/"]
-    server["squadron serve<br>--repo-root /data"]
+    server["squadron serve<br>--repo-root /tmp/squadron-repo"]
   end
 
-  workflow -- "sync config<br>(on push)" --> data
+  workflow -- "deploy / restart" --> instance
   ghapp["GitHub App<br>(webhooks)"] --> server
+  server -- "git pull on push event<br>(config hot-reload)" --> clone
 ```
 
 - **Your repo** contains `.squadron/` configuration (agent definitions, project settings)
-- **A GitHub Actions workflow** (copied from our templates) deploys the Squadron container and syncs config
-- **The deployed instance** receives webhooks from the GitHub App and orchestrates agents
-- **Config sync** happens automatically when you push changes to `.squadron/`
+- **A GitHub Actions workflow** (copied from our templates) deploys the Squadron container
+- **The deployed container** clones the repo at startup and receives webhooks from the GitHub App
+- **Config hot-reload** happens automatically — push events to `main` that touch `.squadron/` trigger a git pull + config reload (no restart needed)
 
 ## Onboarding a New Repo
 
 1. **[Create a GitHub App](github-app-setup.md)** for your repo (one app per repo)
-2. **Run `squadron init`** to scaffold `.squadron/` configuration
+2. **Copy `examples/.squadron/`** from the Squadron repo into your repo root and customize
 3. **Copy the deployment workflow template** into `.github/workflows/`
 4. **Set repository secrets** (Azure credentials, GitHub App credentials)
 5. **Run the workflow** to deploy

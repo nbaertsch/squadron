@@ -241,13 +241,15 @@ def build_resume_config(
         "model": model,
         "system_message": {"mode": "replace", "content": system_message},
         "working_directory": working_directory,
-        "reasoning_effort": reasoning,
         "infinite_sessions": {
             "enabled": True,
             "background_compaction_threshold": 0.80,
             "buffer_exhaustion_threshold": 0.95,
         },
     }
+    # Only include reasoning_effort when explicitly configured
+    if reasoning is not None:
+        config["reasoning_effort"] = reasoning
     # Only include provider when BYOK credentials are configured
     provider_dict = _build_provider_dict(runtime_config)
     if provider_dict:

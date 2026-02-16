@@ -3,7 +3,7 @@
 Startup sequence (from runtime-architecture.md):
 1. Load .squadron/ config
 2. Initialize SQLite database
-3. Recover stale agents (ACTIVE/SLEEPING → ESCALATED)
+3. Recover stale agents (ACTIVE → SLEEPING)
 4. Start FastAPI (uvicorn)
 5. Start Event Router consumer loop
 6. Start Reconciliation Loop
@@ -36,7 +36,7 @@ from squadron.config import (
 )
 from squadron.event_router import EventRouter
 from squadron.github_client import GitHubClient
-from squadron.models import AgentStatus, GitHubEvent
+from squadron.models import AgentStatus, GitHubEvent, SquadronEvent, SquadronEventType
 from squadron.reconciliation import ReconciliationLoop
 from squadron.registry import AgentRegistry
 from squadron.resource_monitor import ResourceMonitor
@@ -63,6 +63,7 @@ class SquadronServer:
         self.agent_manager: AgentManager | None = None
         self.reconciliation: ReconciliationLoop | None = None
         self.resource_monitor: ResourceMonitor | None = None
+        self._config_version: str | None = None  # Commit SHA of current config
         self.workflow_engine: WorkflowEngine | None = None
 
     async def start(self) -> None:
@@ -101,8 +102,8 @@ class SquadronServer:
         self.registry = AgentRegistry(db_path)
         await self.registry.initialize()
 
-        # 3. Recover stale agents
-        await self._recover_stale_agents()
+        # 3. Recover stale agents + reconstruct from GitHub
+        await self._recover_agents()
 
         # 4. Initialize GitHub client
         self.github = GitHubClient(
@@ -115,6 +116,10 @@ class SquadronServer:
 
         # 4b. Ensure label taxonomy exists on the repo
         await self._ensure_labels()
+
+        # 4c. Reconstruct agent state from GitHub (Phase 2 recovery)
+        await self._reconstruct_from_github()
+
         self.event_queue = asyncio.Queue(maxsize=1000)
         self.router = EventRouter(
             event_queue=self.event_queue,
@@ -141,6 +146,7 @@ class SquadronServer:
             owner=self.config.project.owner,
             repo=self.config.project.repo,
             on_wake_agent=self.agent_manager.wake_agent,
+            on_complete_agent=self.agent_manager.complete_agent,
         )
 
         # 8. Wire webhook endpoint (single-tenant security validation)
@@ -165,12 +171,15 @@ class SquadronServer:
             self.workflow_engine.set_spawn_callback(
                 self.agent_manager.spawn_workflow_agent,
             )
-            self.router.set_workflow_engine(self.workflow_engine)
+            self.agent_manager.set_workflow_engine(self.workflow_engine)
 
         # 9. Start background loops
         await self.router.start()
         await self.agent_manager.start()
         await self.reconciliation.start()
+
+        # 9b. Register config hot-reload on push to default branch (D-5)
+        self.router.on(SquadronEventType.PUSH, self._handle_config_reload)
 
         # 10. Start resource monitor
         worktree_dir = (
@@ -259,15 +268,7 @@ class SquadronServer:
         logger.info("Cloning %s (branch: %s) into %s", repo_url, default_branch, clone_dir)
         proc = await asyncio.to_thread(
             subprocess.run,
-            [
-                "git",
-                "clone",
-                "--branch",
-                default_branch,
-                "--single-branch",
-                auth_url,
-                str(clone_dir),
-            ],
+            ["git", "clone", "--branch", default_branch, auth_url, str(clone_dir)],
             capture_output=True,
             text=True,
             timeout=300,
@@ -289,28 +290,50 @@ class SquadronServer:
         self.squadron_dir = clone_dir / ".squadron"
         logger.info("Repo cloned successfully at %s", clone_dir)
 
-    async def _recover_stale_agents(self) -> None:
-        """On startup, mark any ACTIVE/SLEEPING agents as ESCALATED.
+    async def _recover_agents(self) -> None:
+        """On startup, handle agents left over from a previous run.
 
-        Container-local state is ephemeral — if the container restarted,
-        SDK sessions and worktrees are gone.  Mark orphaned agents as
-        ESCALATED so they don't appear as resumable.
+        Phase 1 (immediate): Mark stale ACTIVE/CREATED agents as FAILED.
+        Phase 2 (after GitHub client init): Reconstruct from GitHub.
+
+        Phase 2 runs later via ``_reconstruct_from_github()`` once the
+        GitHub client is available.  Phase 1 runs here synchronously
+        since it only needs the local registry.
         """
         if not self.registry:
             return
 
-        stale_statuses = [AgentStatus.ACTIVE, AgentStatus.SLEEPING]
+        # Phase 1 only (no GitHub client yet) — just mark stale as FAILED
+        stale_statuses = [AgentStatus.ACTIVE, AgentStatus.CREATED]
         for status in stale_statuses:
             agents = await self.registry.get_agents_by_status(status)
             if agents:
                 logger.warning(
-                    "Found %d stale %s agents from previous run — marking ESCALATED",
+                    "Found %d stale %s agents from previous run — marking FAILED",
                     len(agents),
                     status.value,
                 )
                 for agent in agents:
-                    agent.status = AgentStatus.ESCALATED
+                    agent.status = AgentStatus.FAILED
+                    agent.active_since = None
                     await self.registry.update_agent(agent)
+
+    async def _reconstruct_from_github(self) -> None:
+        """Phase 2 recovery: reconstruct agent records from GitHub state.
+
+        Called after the GitHub client is initialized so we can query
+        the Issues and PRs APIs.
+        """
+        if not self.registry or not self.github or not self.config:
+            return
+
+        from squadron.recovery import recover_on_startup
+
+        try:
+            summary = await recover_on_startup(self.config, self.registry, self.github)
+            logger.info("GitHub reconstruction: %s", summary)
+        except Exception:
+            logger.exception("GitHub state reconstruction failed — continuing without")
 
     async def _ensure_labels(self) -> None:
         """Create label taxonomy on the GitHub repo if labels don't exist.
@@ -343,6 +366,105 @@ class SquadronServer:
                 exc_info=True,
             )
 
+    async def _handle_config_reload(self, event: SquadronEvent) -> None:
+        """Handle push event — reload config if .squadron/ files changed on default branch.
+
+        D-5: Config hot-reload. On push to default branch:
+        1. Check if any modified files are under .squadron/
+        2. git pull to get latest
+        3. Re-parse config.yaml and agent definitions
+        4. If valid: swap config atomically (new spawns use new config)
+        5. If invalid: keep old config, log error
+        """
+        payload = event.data.get("payload", {})
+
+        # Only reload on pushes to the default branch
+        default_branch = self.config.project.default_branch if self.config else "main"
+        ref = payload.get("ref", "")
+        if ref != f"refs/heads/{default_branch}":
+            return
+
+        # Check if any commits touched .squadron/ files
+        commits = payload.get("commits", [])
+        squadron_changed = False
+        for commit in commits:
+            changed_files = (
+                commit.get("added", []) + commit.get("modified", []) + commit.get("removed", [])
+            )
+            if any(f.startswith(".squadron/") for f in changed_files):
+                squadron_changed = True
+                break
+
+        if not squadron_changed:
+            return
+
+        logger.info("Config change detected on %s — reloading", default_branch)
+
+        # Pull latest changes
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "-C", str(self.repo_root), "pull", "--ff-only"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if proc.returncode != 0:
+                logger.error("git pull failed during config reload: %s", proc.stderr)
+                return
+        except Exception:
+            logger.exception("Failed to git pull during config reload")
+            return
+
+        # Re-read config
+        try:
+            new_config = load_config(self.squadron_dir)
+            new_agent_defs = load_agent_definitions(self.squadron_dir)
+            new_workflow_defs = load_workflow_definitions(self.squadron_dir)
+        except Exception:
+            logger.exception(
+                "Config reload failed — keeping old config. Fix the config and push again."
+            )
+            return
+
+        # Swap atomically
+        old_version = self._config_version
+        head_sha = payload.get("after", "unknown")
+        self._config_version = head_sha
+
+        self.config = new_config
+
+        # Update agent manager config + definitions for new spawns
+        self.agent_manager.config = new_config
+        self.agent_manager.agent_definitions = new_agent_defs
+
+        # Re-register trigger handlers with new config
+        self.agent_manager._register_trigger_handlers()
+
+        # Re-register lifecycle handlers that may have been cleared
+        # (if their event types overlapped with config triggers)
+        self.router.on(SquadronEventType.ISSUE_CLOSED, self.agent_manager._handle_issue_closed)
+        self.router.on(SquadronEventType.ISSUE_ASSIGNED, self.agent_manager._handle_issue_assigned)
+        self.router.on(SquadronEventType.PUSH, self._handle_config_reload)
+
+        # Update reconciliation config
+        self.reconciliation.config = new_config
+
+        # Update workflow engine if present
+        if self._workflow_engine_exists() and new_workflow_defs:
+            self.workflow_engine.workflows = new_workflow_defs
+
+        logger.info(
+            "Config reloaded successfully (version: %s → %s, %d agent defs, %d workflows)",
+            old_version or "initial",
+            head_sha[:8],
+            len(new_agent_defs),
+            len(new_workflow_defs),
+        )
+
+    def _workflow_engine_exists(self) -> bool:
+        return hasattr(self, "workflow_engine") and self.workflow_engine is not None
+
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
 
@@ -374,13 +496,16 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        """Health check endpoint."""
+        """Health check endpoint with operational metrics."""
         agent_counts = {}
+        total_agents = 0
         if _server.registry:
             for status in AgentStatus:
                 agents = await _server.registry.get_agents_by_status(status)
-                if agents:
-                    agent_counts[status.value] = len(agents)
+                count = len(agents)
+                if count:
+                    agent_counts[status.value] = count
+                total_agents += count
 
         resources = None
         if _server.resource_monitor:
@@ -392,10 +517,19 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 "active_agent_count": snap.active_agent_count,
             }
 
+        # Queue and event metrics
+        queue_depth = _server.event_queue.qsize() if _server.event_queue else 0
+        last_event_ts = _server.router.last_event_time if _server.router else None
+        last_spawn_ts = _server.agent_manager.last_spawn_time if _server.agent_manager else None
+
         return {
             "status": "ok",
             "project": _server.config.project.name if _server.config else None,
             "agents": agent_counts,
+            "total_agents": total_agents,
+            "queue_depth": queue_depth,
+            "last_event_time": last_event_ts,
+            "last_spawn_time": last_spawn_ts,
             "resources": resources,
         }
 

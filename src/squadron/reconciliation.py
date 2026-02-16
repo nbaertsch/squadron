@@ -37,6 +37,7 @@ class ReconciliationLoop:
         owner: str = "",
         repo: str = "",
         on_wake_agent: Any = None,  # Callable[[str, SquadronEvent], Awaitable[None]]
+        on_complete_agent: Any = None,  # Callable[[str], Awaitable[None]]
     ):
         self.config = config
         self.registry = registry
@@ -44,6 +45,7 @@ class ReconciliationLoop:
         self.owner = owner
         self.repo = repo
         self._on_wake_agent = on_wake_agent
+        self._on_complete_agent = on_complete_agent
 
         self.interval = config.runtime.reconciliation_interval
         self._running = False
@@ -81,6 +83,7 @@ class ReconciliationLoop:
 
         await self._check_sleeping_agents()
         await self._check_stale_active_agents()
+        await self._check_orphaned_agents()
 
         # Prune old webhook dedup entries (keep 72h)
         try:
@@ -215,3 +218,88 @@ class ReconciliationLoop:
                             "Failed to create escalation issue for %s",
                             agent.agent_id,
                         )
+
+    async def _check_orphaned_agents(self) -> None:
+        """Detect agents whose issue/PR has been closed while they were sleeping.
+
+        Catches:
+        - Issue closed while agent was SLEEPING → mark COMPLETED
+        - PR merged while agent was SLEEPING → mark COMPLETED
+        - PR closed (not merged) while agent was SLEEPING → mark COMPLETED
+        - Issue reassigned to a non-bot user while SLEEPING → mark COMPLETED
+        """
+        sleeping = await self.registry.get_agents_by_status(AgentStatus.SLEEPING)
+
+        for agent in sleeping:
+            if not self.owner or not self.repo:
+                continue
+
+            # Check if the agent's issue was closed
+            if agent.issue_number:
+                try:
+                    issue_data = await self.github.get_issue(
+                        self.owner, self.repo, agent.issue_number
+                    )
+                    if issue_data.get("state") == "closed":
+                        logger.info(
+                            "Reconciliation: issue #%d closed while agent %s was sleeping — completing",
+                            agent.issue_number,
+                            agent.agent_id,
+                        )
+                        agent.status = AgentStatus.COMPLETED
+                        await self.registry.update_agent(agent)
+                        if self._on_complete_agent:
+                            await self._on_complete_agent(agent.agent_id)
+                        continue
+
+                    # Check if issue was reassigned away from bot
+                    assignees = issue_data.get("assignees", [])
+                    bot_logins = {"squadron[bot]", "squadron-dev[bot]"}
+                    if assignees and not any(
+                        a.get("login", "").lower() in bot_logins for a in assignees
+                    ):
+                        logger.info(
+                            "Reconciliation: issue #%d reassigned away from bot while agent %s was sleeping — completing",
+                            agent.issue_number,
+                            agent.agent_id,
+                        )
+                        agent.status = AgentStatus.COMPLETED
+                        await self.registry.update_agent(agent)
+                        if self._on_complete_agent:
+                            await self._on_complete_agent(agent.agent_id)
+                        continue
+                except Exception:
+                    logger.debug(
+                        "Could not check issue #%d for orphaned agent %s",
+                        agent.issue_number,
+                        agent.agent_id,
+                    )
+
+            # Check if the agent's PR was merged or closed
+            if agent.pr_number:
+                try:
+                    pr_data = await self.github.get_pull_request(
+                        self.owner, self.repo, agent.pr_number
+                    )
+                    pr_state = pr_data.get("state", "")
+                    pr_merged = pr_data.get("merged", False)
+
+                    if pr_state == "closed" or pr_merged:
+                        status_desc = "merged" if pr_merged else "closed"
+                        logger.info(
+                            "Reconciliation: PR #%d %s while agent %s was sleeping — completing",
+                            agent.pr_number,
+                            status_desc,
+                            agent.agent_id,
+                        )
+                        agent.status = AgentStatus.COMPLETED
+                        await self.registry.update_agent(agent)
+                        if self._on_complete_agent:
+                            await self._on_complete_agent(agent.agent_id)
+                        continue
+                except Exception:
+                    logger.debug(
+                        "Could not check PR #%d for orphaned agent %s",
+                        agent.pr_number,
+                        agent.agent_id,
+                    )
