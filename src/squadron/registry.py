@@ -96,9 +96,14 @@ class AgentRegistry:
             )
 
         # Azure Files can transiently lock the DB during revision swaps.
-        # Retry schema initialization briefly instead of exiting.
+        # Retry schema initialization instead of crashlooping.
+        #
+        # NOTE: This can legitimately take a few minutes when an old ACA revision is
+        # still terminating (or SMB lock propagation lags), so keep the retry window
+        # longer than the typical container cold-start.
         last_error: Exception | None = None
-        for attempt in range(60):
+        max_attempts = 300  # ~5 minutes
+        for attempt in range(max_attempts):
             try:
                 await self._db.execute("PRAGMA foreign_keys=ON")
                 await self._db.executescript(SCHEMA)
@@ -109,9 +114,10 @@ class AgentRegistry:
                 last_error = e
                 if "locked" in str(e).lower():
                     logger.warning(
-                        "SQLite locked during init (%s) — retrying (%d/60)",
+                        "SQLite locked during init (%s) — retrying (%d/%d)",
                         self.db_path,
                         attempt + 1,
+                        max_attempts,
                     )
                     await asyncio.sleep(1)
                     continue

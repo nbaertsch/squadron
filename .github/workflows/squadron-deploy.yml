@@ -298,7 +298,7 @@ jobs:
           # New revisions on Azure Container Apps can take several minutes to become reachable
           # (image pull + volume mount + app startup). Keep each attempt bounded, but allow
           # a longer overall window so first deploys don't fail spuriously.
-          for i in $(seq 1 24); do
+          for i in $(seq 1 36); do
             # Bound each attempt so a hung TLS connect or stalled response doesn't stretch the loop.
             HTTP_CODE=$(curl \
               -s \
@@ -313,7 +313,7 @@ jobs:
               curl -s --connect-timeout 3 --max-time 5 "https://${FQDN}/health" | python3 -m json.tool
               exit 0
             fi
-            echo "  Attempt $i/24 — HTTP $HTTP_CODE (waiting 10s...)"
+            echo "  Attempt $i/36 — HTTP $HTTP_CODE (waiting 10s...)"
             sleep 10
           done
 
