@@ -79,9 +79,9 @@ class CircuitBreakerConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
-    type: str = "anthropic"
-    base_url: str = "https://api.anthropic.com"
-    api_key_env: str = "ANTHROPIC_API_KEY"
+    type: str = "copilot"
+    base_url: str = ""
+    api_key_env: str = ""
 
     @property
     def api_key(self) -> str | None:

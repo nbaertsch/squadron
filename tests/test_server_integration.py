@@ -279,9 +279,16 @@ class TestCopilotSDKTypes:
         """Verify provider dict matches SDK ProviderConfig type when BYOK key set."""
 
         from squadron.copilot import _build_provider_dict
+        from squadron.config import ProviderConfig
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provider-shape")
-        runtime_config = RuntimeConfig()
+        runtime_config = RuntimeConfig(
+            provider=ProviderConfig(
+                type="anthropic",
+                base_url="https://api.anthropic.com",
+                api_key_env="ANTHROPIC_API_KEY",
+            )
+        )
         provider = _build_provider_dict(runtime_config)
 
         assert provider is not None
