@@ -71,7 +71,6 @@ agent_roles:
       - event: "issues.labeled"
         label: feature
       - event: "pull_request.opened"
-        filter_bot: false
         action: sleep
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
@@ -90,7 +89,6 @@ agent_roles:
       - event: "issues.labeled"
         label: bug
       - event: "pull_request.opened"
-        filter_bot: false
         action: sleep
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
@@ -107,7 +105,6 @@ agent_roles:
     triggers:
       - event: "pull_request.opened"
         condition: {approval_flow: true}
-        filter_bot: false
       - event: "pull_request.synchronize"
         action: wake
       - event: "pull_request.closed"
@@ -120,7 +117,6 @@ agent_roles:
         label: security
       - event: "pull_request.opened"
         condition: {approval_flow: true}
-        filter_bot: false
       - event: "pull_request.synchronize"
         action: wake
       - event: "pull_request.closed"
@@ -132,7 +128,6 @@ agent_roles:
       - event: "issues.labeled"
         label: documentation
       - event: "pull_request.opened"
-        filter_bot: false
         action: sleep
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
@@ -147,7 +142,6 @@ agent_roles:
       - event: "issues.labeled"
         label: infrastructure
       - event: "pull_request.opened"
-        filter_bot: false
         action: sleep
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}

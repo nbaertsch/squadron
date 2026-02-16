@@ -54,8 +54,13 @@ class TestEventMapping:
             assert isinstance(value, SquadronEventType)
 
 
-class TestBotFilter:
-    async def test_filters_bot_events(self, router):
+class TestBotEvents:
+    """All events — including from the bot — are routed.  Loop protection
+    relies on dedup, singleton, duplicate-agent, and circuit-breaker guards,
+    NOT on filtering the sender."""
+
+    async def test_routes_bot_events(self, router, registry):
+        """Bot-originated events are NOT filtered — they pass through."""
         r, _ = router
         handler_called = asyncio.Event()
 
@@ -68,11 +73,13 @@ class TestBotFilter:
             delivery_id="d1",
             event_type="issues",
             action="opened",
-            payload={"sender": {"login": "squadron[bot]", "type": "Bot"}},
+            payload={
+                "sender": {"login": "squadron[bot]", "type": "Bot"},
+                "issue": {"number": 1, "labels": []},
+            },
         )
-        # Should silently return (filtered)
         await r._route_event(event)
-        assert not handler_called.is_set()
+        assert handler_called.is_set(), "Bot events must be routed (no sender filtering)"
 
     async def test_passes_human_events(self, router, registry):
         r, _ = router

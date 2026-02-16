@@ -203,22 +203,11 @@ class AgentManager:
         if not github_event_type:
             return
 
-        sender = event.data.get("sender", "")
         payload = event.data.get("payload", {})
 
         for role_name, role_config in self.config.agent_roles.items():
             for trigger in role_config.triggers:
                 if trigger.event != github_event_type:
-                    continue
-
-                # Bot self-event filter (per-trigger)
-                if trigger.filter_bot and sender == self.router.bot_username:
-                    logger.debug(
-                        "Trigger %s/%s filtered bot event from %s",
-                        role_name,
-                        trigger.event,
-                        sender,
-                    )
                     continue
 
                 # Label match (for issues.labeled triggers)
@@ -684,8 +673,9 @@ class AgentManager:
         await self.registry.create_agent(record)
 
         if is_ephemeral:
-            # Ephemeral: no worktree, use repo root
-            record.worktree_path = str(self.repo_root)
+            # Ephemeral: no worktree, use repo root directly (don't set worktree_path
+            # so cleanup won't try to remove the shared repo clone)
+            record.worktree_path = None
         else:
             # Stateful: create git worktree
             worktree_path = await self._create_worktree(record)
@@ -1188,7 +1178,12 @@ class AgentManager:
         agent_record = await self.registry.get_agent(agent_id)
         if agent_record and agent_record.worktree_path:
             worktree = Path(agent_record.worktree_path)
-            if worktree.exists():
+            # Safety: never remove the main repo clone
+            if worktree == self.repo_root:
+                logger.warning(
+                    "Refusing to remove worktree %s — it is the main repo root", worktree
+                )
+            elif worktree.exists():
                 try:
                     await self._run_git(
                         "worktree",
@@ -1587,11 +1582,9 @@ class AgentManager:
         new_login = (assignee.get("login") or "").lower()
 
         # If assigned to the bot, let existing trigger logic handle it
-        bot_logins = {"squadron[bot]", "squadron-dev[bot]"}
-        if self.config.project.bot_username:
-            bot_logins.add(self.config.project.bot_username.lower())
+        bot_login = (self.config.project.bot_username or "").lower()
 
-        if new_login in bot_logins:
+        if bot_login and new_login == bot_login:
             logger.debug(
                 "Issue #%d assigned to bot (%s) — ignoring (trigger system handles spawning)",
                 event.issue_number,

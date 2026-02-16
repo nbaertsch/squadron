@@ -71,7 +71,7 @@ def _example_config() -> SquadronConfig:
                 agent_definition="agents/feat-dev.md",
                 triggers=[
                     AgentTrigger(event="issues.labeled", label="feature"),
-                    AgentTrigger(event="pull_request.opened", filter_bot=False, action="sleep"),
+                    AgentTrigger(event="pull_request.opened", action="sleep"),
                     AgentTrigger(
                         event="pull_request_review.submitted",
                         condition={"review_state": "changes_requested"},
@@ -90,7 +90,6 @@ def _example_config() -> SquadronConfig:
                     AgentTrigger(
                         event="pull_request.opened",
                         condition={"approval_flow": True},
-                        filter_bot=False,
                     ),
                     AgentTrigger(event="pull_request.closed", action="complete"),
                 ],
@@ -207,7 +206,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
@@ -249,7 +247,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
@@ -286,7 +283,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
@@ -316,7 +312,7 @@ class TestHappyPathFlow:
             )
             await registry.create_agent(dev_record)
 
-            # Simulate PR opened by bot (filter_bot=false means bot events accepted)
+            # Simulate PR opened by bot
             event = _github_event(
                 "pull_request",
                 action="opened",
@@ -351,7 +347,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
@@ -404,7 +399,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
@@ -471,7 +465,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
@@ -525,7 +518,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
@@ -561,7 +553,6 @@ class TestHappyPathFlow:
             event_queue=event_queue,
             registry=registry,
             config=config,
-            bot_username="squadron[bot]",
         )
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:

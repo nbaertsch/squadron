@@ -795,7 +795,7 @@ class TestStatelessPrompt:
                     agent_definition="agents/feat-dev.md",
                     triggers=[
                         AgentTrigger(event="issues.labeled", label="feature"),
-                        AgentTrigger(event="pull_request.opened", action="sleep", filter_bot=False),
+                        AgentTrigger(event="pull_request.opened", action="sleep"),
                         AgentTrigger(event="pull_request.closed", action="complete"),
                     ],
                 ),
@@ -863,7 +863,7 @@ class TestHandleIssueAssigned:
         event = SquadronEvent(
             event_type=SquadronEventType.ISSUE_ASSIGNED,
             issue_number=42,
-            data={"payload": {"assignee": {"login": "squadron[bot]"}}},
+            data={"payload": {"assignee": {"login": "squadron-dev[bot]"}}},
         )
         await mgr._handle_issue_assigned(event)
 

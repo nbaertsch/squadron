@@ -63,7 +63,7 @@ class AgentTrigger(BaseModel):
     Examples:
         - {event: "issues.labeled", label: "feature"}  → spawn on label
         - {event: "pull_request.opened", condition: {approval_flow: true}}  → spawn reviewer via approval flow
-        - {event: "pull_request.opened", action: "sleep", filter_bot: false}  → sleep dev after PR opened
+        - {event: "pull_request.opened", action: "sleep"}  → sleep dev after PR opened
         - {event: "pull_request.synchronize", action: "wake"}  → wake reviewer on PR update
         - {event: "pull_request.closed", action: "complete"}  → complete agent on PR close
         - {event: "pull_request.closed", condition: {merged: false}, action: "wake"}  → wake dev on PR rejection
@@ -72,7 +72,6 @@ class AgentTrigger(BaseModel):
 
     event: str  # GitHub webhook event type, e.g. "issues.opened", "issues.labeled"
     label: str | None = None  # Only trigger when this specific label is applied
-    filter_bot: bool = True  # Skip events from the bot (default: yes)
     action: Literal["spawn", "wake", "complete", "sleep"] = "spawn"
     condition: dict[str, Any] | None = None  # e.g. {approval_flow: true}, {merged: false}
 

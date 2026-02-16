@@ -125,7 +125,6 @@ class SquadronServer:
             event_queue=self.event_queue,
             registry=self.registry,
             config=self.config,
-            bot_username=self.config.project.bot_username,
         )
 
         # 6. Create agent manager

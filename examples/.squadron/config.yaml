@@ -46,7 +46,6 @@ agent_roles:
         label: feature
       # Sleep dev agent when it opens a PR (wait for review)
       - event: "pull_request.opened"
-        filter_bot: false
         action: sleep
       # Wake dev agent when reviewer requests changes
       - event: "pull_request_review.submitted"
@@ -66,7 +65,6 @@ agent_roles:
       - event: "issues.labeled"
         label: bug
       - event: "pull_request.opened"
-        filter_bot: false
         action: sleep
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
@@ -83,7 +81,6 @@ agent_roles:
       # Spawn via approval flow when PR is opened
       - event: "pull_request.opened"
         condition: {approval_flow: true}
-        filter_bot: false  # Dev agent (bot) opens PRs — must not filter
       # Wake reviewer when PR is updated (new commits pushed)
       - event: "pull_request.synchronize"
         action: wake
@@ -97,7 +94,6 @@ agent_roles:
         label: security
       - event: "pull_request.opened"
         condition: {approval_flow: true}
-        filter_bot: false  # Dev agent (bot) opens PRs — must not filter
       - event: "pull_request.synchronize"
         action: wake
       - event: "pull_request.closed"

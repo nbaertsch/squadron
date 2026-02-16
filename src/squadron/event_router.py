@@ -28,16 +28,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Bot-initiated events that are intentional workflow triggers and must NOT
-# be filtered.  The PM agent applies labels to spawn dev agents, and dev
-# agents open / push to PRs to trigger review — these are the backbone of
-# the multi-agent orchestration loop.
-_BOT_ALLOWED_EVENTS: set[str] = {
-    "issues.labeled",  # PM labels issue → spawn dev/bug/docs agent
-    "pull_request.opened",  # Dev agent opens PR → trigger review agents
-    "pull_request.synchronize",  # Dev agent pushes to PR → re-trigger reviews
-}
-
 # Map GitHub event types to internal event types
 EVENT_MAP: dict[str, SquadronEventType] = {
     "issues.opened": SquadronEventType.ISSUE_OPENED,
@@ -66,12 +56,10 @@ class EventRouter:
         event_queue: asyncio.Queue[GitHubEvent],
         registry: AgentRegistry,
         config: SquadronConfig,
-        bot_username: str = "squadron[bot]",
     ):
         self.event_queue = event_queue
         self.registry = registry
         self.config = config
-        self.bot_username = bot_username
 
         # Handler callbacks, registered by the Agent Manager
         self._handlers: dict[
@@ -125,19 +113,14 @@ class EventRouter:
                 logger.exception("Error routing event %s", event.delivery_id)
 
     async def _route_event(self, event: GitHubEvent) -> None:
-        """Route a single GitHub event."""
-        # 1. Bot self-event filter — allow intentional workflow triggers
-        if event.sender == self.bot_username:
-            if event.full_type not in _BOT_ALLOWED_EVENTS:
-                logger.debug("Filtered bot self-event: %s", event.full_type)
-                return
-            logger.info(
-                "Allowing bot workflow trigger: %s (delivery=%s)",
-                event.full_type,
-                event.delivery_id,
-            )
+        """Route a single GitHub event.
 
-        # 2. Webhook deduplication
+        All events are routed regardless of sender.  Loop protection is
+        handled by existing guards: webhook dedup, singleton, duplicate
+        agent, and circuit breakers.  What triggers what is fully
+        controlled by the user's config.yaml triggers.
+        """
+        # 1. Webhook deduplication
         if await self.registry.has_seen_event(event.delivery_id):
             logger.debug("Duplicate event filtered: %s", event.delivery_id)
             return

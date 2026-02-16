@@ -249,7 +249,6 @@ class TestAgentDefinitionWiring:
         await registry.initialize()
         github = AsyncMock()
         router = AsyncMock(spec=EventRouter)
-        router.bot_username = "squadron-dev[bot]"
 
         manager = AgentManager(
             config=config,
