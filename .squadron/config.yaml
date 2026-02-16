@@ -9,6 +9,7 @@ project:
   owner: "nbaertsch"
   repo: "squadron"
   default_branch: squadron-dev
+  bot_username: "squadron-dev[bot]"
 
 # ─────────────────────────────────────────────
 # Label Taxonomy

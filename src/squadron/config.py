@@ -25,7 +25,7 @@ class ProjectConfig(BaseModel):
     owner: str = ""  # GitHub org/user, e.g. "noahbaertsch"
     repo: str = ""  # GitHub repo name, e.g. "squadron"
     default_branch: str = "main"
-    bot_username: str = "squadron[bot]"  # GitHub App bot username for self-event filtering
+    bot_username: str = "squadron-dev[bot]"  # GitHub App bot username for self-event filtering
 
 
 class LabelsConfig(BaseModel):

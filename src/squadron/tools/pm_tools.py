@@ -34,8 +34,8 @@ class CreateIssueParams(BaseModel):
 class AssignIssueParams(BaseModel):
     issue_number: int = Field(description="The GitHub issue number to assign")
     assignees: list[str] = Field(
-        default_factory=lambda: ["squadron[bot]"],
-        description="GitHub usernames to assign. Default: squadron[bot]",
+        default_factory=lambda: ["squadron-dev[bot]"],
+        description="GitHub usernames to assign. Default: squadron-dev[bot]",
     )
 
 

@@ -105,7 +105,7 @@ class TestLoadConfig:
 
     def test_bot_username_default(self, squadron_dir: Path):
         config = load_config(squadron_dir)
-        assert config.project.bot_username == "squadron[bot]"
+        assert config.project.bot_username == "squadron-dev[bot]"
 
     def test_escalation(self, squadron_dir: Path):
         config = load_config(squadron_dir)
