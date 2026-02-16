@@ -89,7 +89,7 @@ class TestServerBoot:
                     mock_github.close.assert_called_once()
 
     async def test_stale_agent_recovery(self, squadron_dir):
-        """ACTIVE agents from a previous crash should be marked SLEEPING on boot."""
+        """ACTIVE agents from a previous crash should be marked ESCALATED on boot."""
         from squadron.server import SquadronServer
 
         # Pre-populate DB with a stale ACTIVE agent
@@ -135,7 +135,7 @@ class TestServerBoot:
 
                     # Check that stale agent was recovered
                     recovered = await server.registry.get_agent("feat-dev-issue-99")
-                    assert recovered.status == AgentStatus.SLEEPING
+                    assert recovered.status == AgentStatus.ESCALATED
 
                     await server.stop()
 

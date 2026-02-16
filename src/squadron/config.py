@@ -70,8 +70,6 @@ class AgentRoleConfig(BaseModel):
     singleton: bool = False
     stateless: bool = False  # Stateless agents: no worktree, session destroyed after each run
     triggers: list[AgentTrigger] = Field(default_factory=list)  # Event triggers for this agent
-    assignable_labels: list[str] = Field(default_factory=list)  # DEPRECATED — use triggers
-    trigger: str | None = None  # e.g. "approval_flow" — DEPRECATED — use triggers
     subagents: list[str] = Field(default_factory=list)  # Other agent roles available as subagents
 
 

@@ -5,8 +5,20 @@
 //   2. Container App Environment
 //   3. Container App (single container, pulls from GHCR)
 //
-// The container clones the repo at startup using GitHub App credentials.
-// All data (SQLite, worktrees) lives on ephemeral container-local disk.
+// All state is ephemeral (container-local /tmp). The container clones the
+// repo at startup, stores SQLite DB at /tmp/squadron-data, and creates
+// worktrees at /tmp/squadron-worktrees.
+//
+// Deploy:
+//   az deployment group create \
+//     --resource-group <rg> \
+//     --template-file infra/main.bicep \
+//     --parameters appName=my-squadron \
+//                  ghcrImage=ghcr.io/owner/repo:latest \
+//                  githubAppId=12345 \
+//                  githubInstallationId=67890 \
+//                  githubPrivateKey='<pem-contents>' \
+//                  githubWebhookSecret='<secret>'
 
 targetScope = 'resourceGroup'
 
@@ -37,9 +49,6 @@ param maxReplicas int = 1
 
 @description('Revision suffix (set to a unique value to force a new revision)')
 param revisionSuffix string = ''
-
-@description('GitHub repo clone URL (e.g. https://github.com/owner/repo.git)')
-param repoUrl string
 
 // GitHub App credentials
 @secure()
@@ -131,10 +140,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'COPILOT_GITHUB_TOKEN', secretRef: 'copilot-github-token' }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
             { name: 'SQUADRON_DATA_DIR', value: '/tmp/squadron-data' }
-            { name: 'SQUADRON_REPO_URL', value: repoUrl }
           ]
           command: ['squadron', 'serve']
-          args: ['--host', '0.0.0.0', '--port', '8000']
+          args: ['--repo-root', '/tmp/squadron-repo', '--host', '0.0.0.0', '--port', '8000']
           probes: [
             {
               type: 'Liveness'
@@ -142,7 +150,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 path: '/health'
                 port: 8000
               }
-              initialDelaySeconds: 30
+              initialDelaySeconds: 10
               periodSeconds: 30
             }
             {
@@ -151,7 +159,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 path: '/health'
                 port: 8000
               }
-              initialDelaySeconds: 15
+              initialDelaySeconds: 5
               periodSeconds: 10
             }
           ]

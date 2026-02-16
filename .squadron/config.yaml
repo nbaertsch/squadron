@@ -80,14 +80,12 @@ agent_roles:
 
   pr-review:
     agent_definition: agents/pr-review.md
-    trigger: approval_flow
 
   security-review:
     agent_definition: agents/security-review.md
     triggers:
       - event: "issues.labeled"
         label: security
-    trigger: approval_flow
 
   docs-dev:
     agent_definition: agents/docs-dev.md
@@ -103,7 +101,6 @@ agent_roles:
 
   test-coverage:
     agent_definition: agents/test-coverage.md
-    trigger: approval_flow
 
 # ─────────────────────────────────────────────
 # Circuit Breakers

@@ -31,7 +31,7 @@ def squadron_dir(tmp_path: Path) -> Path:
             "pm": {"agent_definition": "agents/pm.md", "singleton": True},
             "feat-dev": {
                 "agent_definition": "agents/feat-dev.md",
-                "assignable_labels": ["feature"],
+                "triggers": [{"event": "issues.labeled", "label": "feature"}],
             },
         },
         "circuit_breakers": {
@@ -79,7 +79,6 @@ class TestLoadConfig:
         assert "pm" in config.agent_roles
         assert config.agent_roles["pm"].singleton is True
         assert "feat-dev" in config.agent_roles
-        assert "feature" in config.agent_roles["feat-dev"].assignable_labels
 
     def test_circuit_breakers_defaults(self, squadron_dir: Path):
         config = load_config(squadron_dir)

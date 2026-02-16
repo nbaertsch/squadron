@@ -3,7 +3,7 @@
 Startup sequence (from runtime-architecture.md):
 1. Load .squadron/ config
 2. Initialize SQLite database
-3. Recover stale agents (ACTIVE → SLEEPING)
+3. Recover stale agents (ACTIVE/SLEEPING → ESCALATED)
 4. Start FastAPI (uvicorn)
 5. Start Event Router consumer loop
 6. Start Reconciliation Loop
@@ -290,23 +290,27 @@ class SquadronServer:
         logger.info("Repo cloned successfully at %s", clone_dir)
 
     async def _recover_stale_agents(self) -> None:
-        """On startup, mark any ACTIVE agents as SLEEPING.
+        """On startup, mark any ACTIVE/SLEEPING agents as ESCALATED.
 
-        If the server crashed while agents were active, their SDK sessions
-        are persisted to disk but the Python tasks are lost. Marking them
-        SLEEPING lets the reconciliation loop re-evaluate them.
+        Container-local state is ephemeral — if the container restarted,
+        SDK sessions and worktrees are gone.  Mark orphaned agents as
+        ESCALATED so they don't appear as resumable.
         """
         if not self.registry:
             return
 
-        active = await self.registry.get_agents_by_status(AgentStatus.ACTIVE)
-        if active:
-            logger.warning(
-                "Found %d stale ACTIVE agents from previous run — marking SLEEPING", len(active)
-            )
-            for agent in active:
-                agent.status = AgentStatus.SLEEPING
-                await self.registry.update_agent(agent)
+        stale_statuses = [AgentStatus.ACTIVE, AgentStatus.SLEEPING]
+        for status in stale_statuses:
+            agents = await self.registry.get_agents_by_status(status)
+            if agents:
+                logger.warning(
+                    "Found %d stale %s agents from previous run — marking ESCALATED",
+                    len(agents),
+                    status.value,
+                )
+                for agent in agents:
+                    agent.status = AgentStatus.ESCALATED
+                    await self.registry.update_agent(agent)
 
     async def _ensure_labels(self) -> None:
         """Create label taxonomy on the GitHub repo if labels don't exist.

@@ -1269,7 +1269,7 @@ class AgentManager:
             trigger_info = ", ".join(
                 f"{t.event}" + (f"[{t.label}]" if t.label else "") for t in role_config.triggers
             )
-            lines.append(f"- **{role_name}**: triggers on {trigger_info or 'approval_flow only'}")
+            lines.append(f"- **{role_name}**: triggers on {trigger_info or 'approval flow only'}")
 
         lines.append("\n### Instructions")
         lines.append(f"**Your role:** {record.role}")

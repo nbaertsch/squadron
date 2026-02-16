@@ -34,18 +34,27 @@ agent_roles:
   pm:
     agent_definition: agents/pm.md
     singleton: true
+    stateless: true
+    triggers:
+      - event: "issues.opened"
+      - event: "issue_comment.created"
   feat-dev:
     agent_definition: agents/feat-dev.md
-    assignable_labels: [feature]
+    triggers:
+      - event: "issues.labeled"
+        label: feature
   bug-fix:
     agent_definition: agents/bug-fix.md
-    assignable_labels: [bug]
+    triggers:
+      - event: "issues.labeled"
+        label: bug
   pr-review:
     agent_definition: agents/pr-review.md
-    trigger: approval_flow
   security-review:
     agent_definition: agents/security-review.md
-    trigger: approval_flow
+    triggers:
+      - event: "issues.labeled"
+        label: security
 
 circuit_breakers:
   defaults:
