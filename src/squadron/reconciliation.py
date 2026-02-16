@@ -110,7 +110,7 @@ class ReconciliationLoop:
 
             # Check max sleep duration (circuit breaker)
             if agent.sleeping_since:
-                limits = self.config.circuit_breakers.for_role(agent.role.value)
+                limits = self.config.circuit_breakers.for_role(agent.role)
                 sleep_seconds = (datetime.now(timezone.utc) - agent.sleeping_since).total_seconds()
 
                 if sleep_seconds > limits.max_sleep_duration:
@@ -168,7 +168,7 @@ class ReconciliationLoop:
             if not agent.active_since:
                 continue
 
-            limits = self.config.circuit_breakers.for_role(agent.role.value)
+            limits = self.config.circuit_breakers.for_role(agent.role)
             active_seconds = (datetime.now(timezone.utc) - agent.active_since).total_seconds()
 
             # Warning threshold
@@ -200,7 +200,7 @@ class ReconciliationLoop:
                             self.repo,
                             title=f"[squadron] Agent {agent.agent_id} exceeded max active duration",
                             body=(
-                                f"Agent `{agent.agent_id}` (role: {agent.role.value}) has been "
+                                f"Agent `{agent.agent_id}` (role: {agent.role}) has been "
                                 f"active for {int(active_seconds)}s, exceeding the configured "
                                 f"limit of {limits.max_active_duration}s.\n\n"
                                 f"**Issue:** #{agent.issue_number}\n"

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.models import AgentRecord, AgentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class AgentRegistry:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.agent_id,
-                record.role.value,
+                record.role,
                 record.issue_number,
                 record.pr_number,
                 record.session_id,
@@ -179,7 +179,7 @@ class AgentRegistry:
                updated_at=?, active_since=?, sleeping_since=?
                WHERE agent_id=?""",
             (
-                record.role.value,
+                record.role,
                 record.issue_number,
                 record.pr_number,
                 record.session_id,
@@ -442,7 +442,7 @@ class AgentRegistry:
         """Convert a database row to an AgentRecord."""
         return AgentRecord(
             agent_id=row["agent_id"],
-            role=AgentRole(row["role"]),
+            role=row["role"],
             issue_number=row["issue_number"],
             pr_number=row["pr_number"],
             session_id=row["session_id"],

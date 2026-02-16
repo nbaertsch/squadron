@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest_asyncio
 
 from squadron.config import ProjectConfig, SquadronConfig
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.models import AgentRecord, AgentStatus
 from squadron.reconciliation import ReconciliationLoop
 from squadron.registry import AgentRegistry
 
@@ -33,7 +33,7 @@ def _config(**overrides) -> SquadronConfig:
 
 def _make_agent(
     agent_id: str = "feat-dev-issue-42",
-    role: AgentRole = AgentRole.FEAT_DEV,
+    role: str = "feat-dev",
     issue_number: int = 42,
     status: AgentStatus = AgentStatus.SLEEPING,
     **kwargs,

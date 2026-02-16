@@ -131,7 +131,7 @@ class PMTools:
         for agent in agents:
             blockers = f" (blocked by: {agent.blocked_by})" if agent.blocked_by else ""
             lines.append(
-                f"- `{agent.agent_id}` [{agent.role.value}] "
+                f"- `{agent.agent_id}` [{agent.role}] "
                 f"status={agent.status.value} issue=#{agent.issue_number}{blockers}"
             )
         return "\n".join(lines)

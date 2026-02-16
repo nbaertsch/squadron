@@ -40,7 +40,10 @@ branch_naming:
   feature: "feat/issue-{issue_number}"
   bugfix: "fix/issue-{issue_number}"
   security: "security/issue-{issue_number}"
+  docs: "docs/issue-{issue_number}"
+  infra: "infra/issue-{issue_number}"
   hotfix: "hotfix/issue-{issue_number}"
+  chore: "chore/{description}"
 
 # ─────────────────────────────────────────────
 # Human Groups
@@ -55,7 +58,7 @@ agent_roles:
   pm:
     agent_definition: agents/pm.md
     singleton: true
-    subagents: [feat-dev, bug-fix, pr-review, security-review]
+    subagents: [feat-dev, bug-fix, pr-review, security-review, docs-dev, infra-dev]
 
   feat-dev:
     agent_definition: agents/feat-dev.md
@@ -72,7 +75,16 @@ agent_roles:
 
   security-review:
     agent_definition: agents/security-review.md
+    assignable_labels: [security]
     trigger: approval_flow
+
+  docs-dev:
+    agent_definition: agents/docs-dev.md
+    assignable_labels: [documentation]
+
+  infra-dev:
+    agent_definition: agents/infra-dev.md
+    assignable_labels: [infrastructure]
 
   test-coverage:
     agent_definition: agents/test-coverage.md

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from squadron.copilot import CopilotAgent, build_resume_config, build_session_config
-from squadron.models import AgentRecord, AgentRole, AgentStatus, SquadronEvent, SquadronEventType
+from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEventType
 from squadron.tools.framework import FrameworkTools
 from squadron.tools.pm_tools import PMTools
 
@@ -225,7 +225,7 @@ class AgentManager:
             "active_agents": [
                 {
                     "agent_id": a.agent_id,
-                    "role": a.role.value,
+                    "role": a.role,
                     "issue": a.issue_number,
                     "status": a.status.value,
                     "blocked_by": a.blocked_by,
@@ -363,7 +363,7 @@ class AgentManager:
 
     async def create_agent(
         self,
-        role: AgentRole,
+        role: str,
         issue_number: int,
         trigger_event: SquadronEvent | None = None,
     ) -> AgentRecord:
@@ -373,7 +373,7 @@ class AgentManager:
         2. Create git worktree for branch isolation
         3. Start agent session
         """
-        agent_id = f"{role.value}-issue-{issue_number}"
+        agent_id = f"{role}-issue-{issue_number}"
 
         # Check for existing agent on this issue
         existing = await self.registry.get_agent_by_issue(issue_number)
@@ -528,12 +528,6 @@ class AgentManager:
             logger.error("No agent definition for workflow role: %s", role)
             return None
 
-        try:
-            agent_role = AgentRole(role)
-        except ValueError:
-            logger.warning("Unknown AgentRole: %s — skipping workflow spawn", role)
-            return None
-
         payload = event.data.get("payload", {})
         pr_data = payload.get("pull_request", {})
 
@@ -543,7 +537,7 @@ class AgentManager:
 
         record = AgentRecord(
             agent_id=agent_id,
-            role=agent_role,
+            role=role,
             issue_number=issue_number,
             pr_number=pr_number,
             session_id=f"squadron-{agent_id}",
@@ -610,7 +604,7 @@ class AgentManager:
         - ACTIVE: Agent finished turn without lifecycle tool — normal completion
         - ESCALATED: Unhandled exception or timeout
         """
-        agent_def = self.agent_definitions.get(record.role.value)
+        agent_def = self.agent_definitions.get(record.role)
         if not agent_def:
             logger.error("No agent definition for role: %s", record.role)
             return
@@ -625,7 +619,7 @@ class AgentManager:
         system_message = self._interpolate_agent_def(raw_prompt, record, trigger_event)
 
         # Resolve circuit breaker limits for this role
-        cb_limits = self.config.circuit_breakers.for_role(record.role.value)
+        cb_limits = self.config.circuit_breakers.for_role(record.role)
         max_duration = cb_limits.max_active_duration  # seconds
 
         # Build hooks for Layer 1 circuit breaker (tool call counting)
@@ -636,7 +630,7 @@ class AgentManager:
         mcp_servers = self._build_mcp_servers(agent_def)
 
         session_config = build_session_config(
-            role=record.role.value,
+            role=record.role,
             issue_number=record.issue_number,
             system_message=system_message,
             working_directory=str(record.worktree_path or self.repo_root),
@@ -656,7 +650,7 @@ class AgentManager:
                     trigger_event.event_type if trigger_event else "manual",
                 )
                 resume_config = build_resume_config(
-                    role=record.role.value,
+                    role=record.role,
                     system_message=system_message,
                     working_directory=str(record.worktree_path or self.repo_root),
                     runtime_config=self.config.runtime,
@@ -889,7 +883,7 @@ class AgentManager:
             issue_body = issue_data.get("body", "")
 
         # Get circuit breaker limits for default values
-        cb_limits = self.config.circuit_breakers.for_role(record.role.value)
+        cb_limits = self.config.circuit_breakers.for_role(record.role)
 
         values = defaultdict(
             str,
@@ -996,7 +990,7 @@ class AgentManager:
                 if labels:
                     lines.append(f"\n**Labels:** {', '.join(labels)}")
 
-        lines.append(f"\n**Your role:** {record.role.value}")
+        lines.append(f"\n**Your role:** {record.role}")
         lines.append(f"**Branch:** {record.branch}")
         lines.append("\nBegin working on this issue. Use the available tools to read code,")
         lines.append("make changes, run tests, and report progress.")
@@ -1083,18 +1077,12 @@ class AgentManager:
         # Check if this specific label maps to an agent role
         for role_name, role_config in self.config.agent_roles.items():
             if role_config.assignable_labels and label_name in role_config.assignable_labels:
-                try:
-                    role = AgentRole(role_name)
-                except ValueError:
-                    logger.warning("Unknown role in config: %s", role_name)
-                    continue
-
-                # Don't spawn if an agent already exists for this issue
+                # Don't spawn if an agent already exists for this issue+role
                 existing = await self.registry.get_agents_for_issue(issue_number)
-                if any(a.role == role for a in existing):
+                if any(a.role == role_name for a in existing):
                     logger.info(
                         "Agent %s already exists for issue #%d — skipping",
-                        role.value,
+                        role_name,
                         issue_number,
                     )
                     return
@@ -1103,9 +1091,9 @@ class AgentManager:
                     "Label '%s' on issue #%d → spawning %s agent",
                     label_name,
                     issue_number,
-                    role.value,
+                    role_name,
                 )
-                await self.create_agent(role, issue_number, trigger_event=event)
+                await self.create_agent(role_name, issue_number, trigger_event=event)
                 return  # Only spawn one agent per label event
 
     async def _handle_issue_closed(self, event: SquadronEvent) -> None:
@@ -1175,11 +1163,7 @@ class AgentManager:
                 logger.warning("Review role %s not found in config — skipping", role_name)
                 continue
 
-            try:
-                role = AgentRole(role_name)
-            except ValueError:
-                logger.warning("Unknown AgentRole: %s — skipping", role_name)
-                continue
+            role = role_name
 
             # Create a review agent for this PR
             agent_id = f"{role_name}-pr-{event.pr_number}"
@@ -1280,7 +1264,7 @@ class AgentManager:
                             self.config.project.owner,
                             self.config.project.repo,
                             agent.issue_number,
-                            f"**[squadron:{agent.role.value}]** PR #{event.pr_number} merged. Task complete.",
+                            f"**[squadron:{agent.role}]** PR #{event.pr_number} merged. Task complete.",
                         )
                     except Exception:
                         logger.debug("Failed to post merge comment for agent %s", agent.agent_id)
@@ -1288,7 +1272,7 @@ class AgentManager:
                 logger.info("AGENT COMPLETED (PR merged) — %s", agent.agent_id)
             else:
                 # PR closed without merge — wake dev agent to reassess
-                if agent.role in (AgentRole.FEAT_DEV, AgentRole.BUG_FIX):
+                if agent.role in ("feat-dev", "bug-fix"):
                     if agent.status == AgentStatus.SLEEPING:
                         wake_event = SquadronEvent(
                             event_type=SquadronEventType.WAKE_AGENT,
@@ -1297,7 +1281,7 @@ class AgentManager:
                             data={"reason": "PR closed without merge", **event.data},
                         )
                         await self.wake_agent(agent.agent_id, wake_event)
-                elif agent.role in (AgentRole.PR_REVIEW, AgentRole.SECURITY_REVIEW):
+                elif agent.role in ("pr-review", "security-review"):
                     # Review agents are no longer needed
                     agent.status = AgentStatus.COMPLETED
                     await self.registry.update_agent(agent)
@@ -1336,7 +1320,7 @@ class AgentManager:
         for agent in agents:
             if (
                 agent.pr_number == event.pr_number
-                and agent.role in (AgentRole.PR_REVIEW, AgentRole.SECURITY_REVIEW)
+                and agent.role in ("pr-review", "security-review")
                 and agent.status == AgentStatus.SLEEPING
             ):
                 wake_event = SquadronEvent(
@@ -1349,27 +1333,26 @@ class AgentManager:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
-    def _branch_name(self, role: AgentRole, issue_number: int) -> str:
+    def _branch_name(self, role: str, issue_number: int) -> str:
         """Generate a branch name from config templates."""
         naming = self.config.branch_naming
         templates = {
-            AgentRole.FEAT_DEV: naming.feature,
-            AgentRole.BUG_FIX: naming.bugfix,
-            AgentRole.SECURITY_REVIEW: naming.security,
+            "feat-dev": naming.feature,
+            "bug-fix": naming.bugfix,
+            "security-review": naming.security,
+            "docs-dev": naming.docs,
+            "infra-dev": naming.infra,
         }
-        template = templates.get(role, f"{role.value}/issue-{{issue_number}}")
+        template = templates.get(role, f"{role}/issue-{{issue_number}}")
         return template.format(issue_number=issue_number)
 
-    def _label_to_role(self, labels: list[str]) -> AgentRole | None:
+    def _label_to_role(self, labels: list[str]) -> str | None:
         """Map issue labels to an agent role using config."""
         for role_name, role_config in self.config.agent_roles.items():
             if role_config.assignable_labels:
                 for label in labels:
                     if label in role_config.assignable_labels:
-                        try:
-                            return AgentRole(role_name)
-                        except ValueError:
-                            logger.warning("Unknown role in config: %s", role_name)
+                        return role_name
         return None
 
     async def _run_git(self, *args: str, timeout: int = 60) -> tuple[int, str, str]:

@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from squadron.config import RuntimeConfig, load_config
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
 
 
@@ -101,7 +101,7 @@ class TestServerBoot:
         await reg.initialize()
         stale_agent = AgentRecord(
             agent_id="feat-dev-issue-99",
-            role=AgentRole.FEAT_DEV,
+            role="feat-dev",
             issue_number=99,
             status=AgentStatus.ACTIVE,
         )

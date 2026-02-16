@@ -46,6 +46,8 @@ class BranchNamingConfig(BaseModel):
     feature: str = "feat/issue-{issue_number}"
     bugfix: str = "fix/issue-{issue_number}"
     security: str = "security/issue-{issue_number}"
+    docs: str = "docs/issue-{issue_number}"
+    infra: str = "infra/issue-{issue_number}"
     hotfix: str = "hotfix/issue-{issue_number}"
 
 

@@ -21,17 +21,9 @@ class AgentStatus(str, enum.Enum):
     ESCALATED = "escalated"
 
 
-class AgentRole(str, enum.Enum):
-    """Built-in agent roles."""
-
-    PM = "pm"
-    FEAT_DEV = "feat-dev"
-    BUG_FIX = "bug-fix"
-    PR_REVIEW = "pr-review"
-    SECURITY_REVIEW = "security-review"
-    TEST_COVERAGE = "test-coverage"
-    CODE_SEARCH = "code-search"
-    TEST_WRITER = "test-writer"
+# Agent roles are plain strings — defined in .squadron/config.yaml, not in code.
+# The config's agent_roles dict is the single source of truth for available roles.
+AgentRole = str
 
 
 # ── Agent Record ─────────────────────────────────────────────────────────────

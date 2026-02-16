@@ -12,7 +12,7 @@ from squadron.config import (
     ProjectConfig,
     SquadronConfig,
 )
-from squadron.models import AgentRecord, AgentRole, AgentStatus, SquadronEvent, SquadronEventType
+from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEventType
 from squadron.registry import AgentRegistry
 from squadron.tools.framework import EscalateToHumanParams, FrameworkTools
 from squadron.tools.pm_tools import (
@@ -40,7 +40,7 @@ async def registry(tmp_path):
 
 def _make_agent(
     agent_id: str = "feat-dev-issue-42",
-    role: AgentRole = AgentRole.FEAT_DEV,
+    role: str = "feat-dev",
     issue_number: int = 42,
     status: AgentStatus = AgentStatus.ACTIVE,
     **kwargs,
@@ -353,7 +353,7 @@ class TestHandlePRClosed:
     async def test_pr_merged_cleans_up_review_agents(self, registry):
         review_agent = _make_agent(
             agent_id="pr-review-pr-10",
-            role=AgentRole.PR_REVIEW,
+            role="pr-review",
             issue_number=10,
             pr_number=10,
             session_id="ses-review",
@@ -404,7 +404,7 @@ class TestHandlePRClosed:
     async def test_pr_closed_without_merge_cleans_review_agents(self, registry):
         review_agent = _make_agent(
             agent_id="pr-review-pr-10",
-            role=AgentRole.PR_REVIEW,
+            role="pr-review",
             issue_number=10,
             pr_number=10,
             session_id="ses-review",

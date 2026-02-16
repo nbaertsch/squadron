@@ -172,7 +172,7 @@ class FrameworkTools:
                 self.owner,
                 self.repo,
                 agent.issue_number,
-                f"**[squadron:{agent.role.value}]** Blocked by #{params.blocker_issue}: {params.reason}\n\nGoing to sleep until the blocker is resolved.",
+                f"**[squadron:{agent.role}]** Blocked by #{params.blocker_issue}: {params.reason}\n\nGoing to sleep until the blocker is resolved.",
             )
 
         return (
@@ -203,7 +203,7 @@ class FrameworkTools:
                 self.owner,
                 self.repo,
                 agent.issue_number,
-                f"**[squadron:{agent.role.value}]** Task complete: {params.summary}",
+                f"**[squadron:{agent.role}]** Task complete: {params.summary}",
             )
 
         return (
@@ -255,7 +255,7 @@ class FrameworkTools:
                 self.owner,
                 self.repo,
                 agent.issue_number,
-                f"**[squadron:{agent.role.value}]** Discovered a blocker — created #{new_issue_number}: {params.title}\n\nGoing to sleep until it's resolved.",
+                f"**[squadron:{agent.role}]** Discovered a blocker — created #{new_issue_number}: {params.title}\n\nGoing to sleep until it's resolved.",
             )
 
         return (
@@ -297,7 +297,7 @@ class FrameworkTools:
                 self.repo,
                 agent.issue_number,
                 (
-                    f"**[squadron:{agent.role.value}]** \u26a0\ufe0f **Escalation — needs human attention**\n\n"
+                    f"**[squadron:{agent.role}]** \u26a0\ufe0f **Escalation — needs human attention**\n\n"
                     f"**Category:** {params.category}\n"
                     f"**Reason:** {params.reason}\n\n"
                     "This task has been escalated and the agent has stopped. "
@@ -317,7 +317,7 @@ class FrameworkTools:
         ask clarifying questions, or post status updates.
         """
         agent = await self.registry.get_agent(agent_id)
-        prefix = f"**[squadron:{agent.role.value}]** " if agent else ""
+        prefix = f"**[squadron:{agent.role}]** " if agent else ""
 
         await self.github.comment_on_issue(
             self.owner,

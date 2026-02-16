@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest_asyncio
 
 from squadron.config import CircuitBreakerDefaults
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
 from squadron.tools.framework import (
     CreateBlockerIssueParams,
@@ -42,7 +42,7 @@ async def registry(tmp_path):
 
 def _make_agent(
     agent_id: str = "feat-dev-issue-42",
-    role: AgentRole = AgentRole.FEAT_DEV,
+    role: str = "feat-dev",
     issue_number: int = 42,
     status: AgentStatus = AgentStatus.ACTIVE,
     **kwargs,
@@ -381,9 +381,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         # Simulate the agent calling report_blocked during its turn
         async def side_effect_block(*args, **kwargs):
@@ -426,9 +426,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         async def side_effect_complete(*args, **kwargs):
             a = await registry.get_agent(agent.agent_id)
@@ -468,9 +468,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         await manager._run_agent(agent, trigger_event=None, resume=False)
 
@@ -497,9 +497,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         await manager._run_agent(agent, trigger_event=None, resume=False)
 
@@ -610,7 +610,7 @@ class TestCommentOnIssue:
         github.comment_on_issue.assert_called_once()
         call_args = github.comment_on_issue.call_args
         # Should include role prefix
-        assert f"[squadron:{agent.role.value}]" in call_args[1].get("body", call_args[0][-1])
+        assert f"[squadron:{agent.role}]" in call_args[1].get("body", call_args[0][-1])
 
 
 class TestSubmitPRReview:
