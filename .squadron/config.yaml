@@ -112,27 +112,22 @@ circuit_breakers:
 # ─────────────────────────────────────────────
 runtime:
   default_model: "claude-sonnet-4"
-  default_reasoning_effort: "medium"
+  # NOTE: reasoning_effort is NOT supported by claude-sonnet-4 via the
+  # Copilot SDK.  Omit per-role overrides until model support is added.
 
   models:
     pm:
       model: "claude-sonnet-4"
-      reasoning_effort: "low"
     feat-dev:
       model: "claude-sonnet-4"
-      reasoning_effort: "high"
     bug-fix:
       model: "claude-sonnet-4"
-      reasoning_effort: "high"
     pr-review:
       model: "claude-sonnet-4"
-      reasoning_effort: "medium"
     security-review:
       model: "claude-sonnet-4"
-      reasoning_effort: "high"
     test-coverage:
       model: "claude-sonnet-4"
-      reasoning_effort: "medium"
 
   provider:
     type: "anthropic"
