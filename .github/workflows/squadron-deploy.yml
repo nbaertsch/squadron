@@ -1,19 +1,15 @@
 # Squadron Deploy — Azure Container Apps
 #
-# TEMPLATE: Copy this file to your repo at .github/workflows/squadron-deploy.yml
-#
 # This workflow manages the full lifecycle of a Squadron deployment:
-#   - Initial infrastructure deployment (Azure Container Apps via Bicep)
-#   - Config sync when .squadron/ changes
-#   - Infrastructure teardown
+#   - Full deploy: infrastructure + new container revision (code changes or manual)
+#   - Config sync: upload .squadron/ config + restart (config-only changes)
+#   - Destroy: tear down all infrastructure
 #
-# Prerequisites:
-#   1. GitHub App installed on this repo
-#   2. Repository secrets configured (see deploy/azure-container-apps/README.md)
+# On push to main:
+#   - Code changes (src/**, Dockerfile, pyproject.toml) → full deploy (new revision)
+#   - Config-only changes (.squadron/**) → sync-config (restart existing revision)
 #
-# Usage:
-#   - Manual dispatch: Actions → Squadron Deploy → Run workflow
-#   - Auto sync: push changes to .squadron/** on main
+# Manual dispatch: Actions → Squadron Deploy → Run workflow
 
 name: Squadron Deploy
 
@@ -46,7 +42,7 @@ on:
         required: false
         default: "ghcr.io/nbaertsch/squadron:latest"
 
-  # ── Auto-sync on config changes ───────────────────────────────────
+  # ── Auto-deploy on code/config changes ────────────────────────────
   push:
     branches: [main]
     paths:
@@ -61,16 +57,43 @@ permissions:
 
 # ── Environment ────────────────────────────────────────────────────────────
 env:
-  # Pin the Squadron infrastructure template version
-  # Change to a release tag for stability (e.g. v0.1.0)
   SQUADRON_REF: "main"
 
 jobs:
   # ════════════════════════════════════════════════════════════════════
-  # Deploy infrastructure + sync config
+  # Detect what changed (push events only)
+  # ════════════════════════════════════════════════════════════════════
+  detect:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.check.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check for code vs config changes
+        id: check
+        run: |
+          if git diff --name-only HEAD~1 | grep -qE '^(src/|Dockerfile|pyproject\.toml)'; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Code changes detected — will trigger full deploy"
+          else
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Config-only changes — will trigger sync-config"
+          fi
+
+  # ════════════════════════════════════════════════════════════════════
+  # Deploy infrastructure + sync config (full redeploy)
   # ════════════════════════════════════════════════════════════════════
   deploy:
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
+    needs: [detect]
+    if: >
+      always() && (
+        (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+        || (needs.detect.outputs.code_changed == 'true')
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -113,7 +136,6 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Azure context diagnostics
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
         run: |
           set -euo pipefail
           echo "## Azure context" 
@@ -125,9 +147,8 @@ jobs:
             echo "- $ns: $state"
           done
 
-      # ── Infrastructure (only on full deploy) ──────────────────────
+      # ── Infrastructure ────────────────────────────────────────────
       - name: Download Squadron Bicep template
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
         run: |
           curl -sfL \
             "https://raw.githubusercontent.com/nbaertsch/squadron/${{ env.SQUADRON_REF }}/infra/main.bicep" \
@@ -135,7 +156,6 @@ jobs:
           echo "Downloaded Bicep template (ref: ${{ env.SQUADRON_REF }})"
 
       - name: Create resource group
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deploy'
         run: |
           az group create \
             --name "${{ steps.params.outputs.resource-group }}" \
@@ -382,12 +402,15 @@ jobs:
           exit 1
 
   # ════════════════════════════════════════════════════════════════════
-  # Sync config only (no infrastructure changes)
+  # Sync config only (no code changes — just upload config + restart)
   # ════════════════════════════════════════════════════════════════════
   sync-config:
+    needs: [detect]
     if: >
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config')
-      || github.event_name == 'push'
+      always() && (
+        (github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config')
+        || (github.event_name == 'push' && needs.detect.outputs.code_changed != 'true')
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -447,19 +470,20 @@ jobs:
             --account-key "${{ steps.storage.outputs.key }}"
           echo "Config synced"
 
-      - name: Update container image and restart
+      - name: Restart container to load new config
         run: |
           RG="${{ inputs.resource-group || 'squadron-rg' }}"
           APP="${{ steps.app.outputs.name }}"
-          IMAGE="${{ inputs.squadron-image || 'ghcr.io/nbaertsch/squadron:latest' }}"
-
-          echo "Updating container app to image: $IMAGE (forces new revision)..."
-          az containerapp update \
+          REVISION=$(az containerapp revision list \
             --name "$APP" \
             --resource-group "$RG" \
-            --image "$IMAGE" \
+            --query "[0].name" --output tsv)
+          az containerapp revision restart \
+            --name "$APP" \
+            --resource-group "$RG" \
+            --revision "$REVISION" \
             --output none
-          echo "Container updated with new image — new revision created"
+          echo "Container restarted with new config"
 
   # ════════════════════════════════════════════════════════════════════
   # Destroy all infrastructure
