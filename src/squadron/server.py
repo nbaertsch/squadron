@@ -84,10 +84,13 @@ class SquadronServer:
                 [w.name for w in workflow_definitions],
             )
 
-        # 2. Initialize database
-        data_dir = self.repo_root / ".squadron-data"
+        # 2. Initialize database (container-local disk, NOT a network mount)
+        data_dir = Path(
+            os.environ.get("SQUADRON_DATA_DIR") or str(self.repo_root / ".squadron-data")
+        )
         data_dir.mkdir(parents=True, exist_ok=True)
         db_path = str(data_dir / "registry.db")
+        logger.info("Registry DB path: %s", db_path)
 
         self.registry = AgentRegistry(db_path)
         await self.registry.initialize()

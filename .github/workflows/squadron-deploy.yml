@@ -190,6 +190,40 @@ jobs:
             --parameters @/tmp/squadron-params.json \
             --output none
 
+      # ── Kill old revisions so they stop holding locks ────────────
+      - name: Deactivate old revisions
+        run: |
+          set -euo pipefail
+          APP="${{ steps.app.outputs.name }}"
+          RG="${{ steps.params.outputs.resource-group }}"
+          LATEST="squadron-squadron--run-${{ github.run_id }}"
+
+          echo "Latest revision: $LATEST"
+          echo "Deactivating all other revisions..."
+
+          az containerapp revision list \
+            --name "$APP" --resource-group "$RG" \
+            --query "[?name!='$LATEST'].name" -o tsv \
+          | while read -r rev; do
+              echo "  Deactivating: $rev"
+              az containerapp revision deactivate \
+                --name "$APP" --resource-group "$RG" \
+                --revision "$rev" --output none 2>/dev/null || true
+            done
+
+          echo "Old revisions deactivated"
+
+      # ── Clean up stale DB from Azure Files (legacy) ───────────────
+      - name: Remove stale registry DB from Azure Files
+        run: |
+          az storage file delete-batch \
+            --source "squadron-data" \
+            --pattern ".squadron-data/*" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --output none 2>/dev/null || true
+          echo "Cleaned up any stale registry DB from Azure Files"
+
       # ── Config sync (always runs) ─────────────────────────────────
       - name: Resolve storage account
         id: storage
