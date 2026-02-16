@@ -37,7 +37,7 @@ on:
       location:
         description: "Azure region"
         required: false
-        default: "eastus"
+        default: "eastus2"
       app-name:
         description: "Container App name (default: <repo>-squadron)"
         required: false
@@ -51,6 +51,9 @@ on:
     branches: [main]
     paths:
       - ".squadron/**"
+      - "src/**"
+      - "Dockerfile"
+      - "pyproject.toml"
 
 # ── Permissions ────────────────────────────────────────────────────────────
 permissions:
@@ -101,7 +104,7 @@ jobs:
         id: params
         run: |
           echo "resource-group=${{ inputs.resource-group || 'squadron-rg' }}" >> "$GITHUB_OUTPUT"
-          echo "location=${{ inputs.location || 'eastus' }}" >> "$GITHUB_OUTPUT"
+          echo "location=${{ inputs.location || 'eastus2' }}" >> "$GITHUB_OUTPUT"
           echo "image=${{ inputs.squadron-image || 'ghcr.io/nbaertsch/squadron:latest' }}" >> "$GITHUB_OUTPUT"
 
       - name: Azure Login
