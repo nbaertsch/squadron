@@ -6,7 +6,7 @@
 # ─────────────────────────────────────────────
 project:
   name: "squadron"
-  owner: "noahbaertsch"
+  owner: "nbaertsch"
   repo: "squadron"
   default_branch: squadron-dev
 
