@@ -447,19 +447,19 @@ jobs:
             --account-key "${{ steps.storage.outputs.key }}"
           echo "Config synced"
 
-      - name: Restart container
+      - name: Update container image and restart
         run: |
           RG="${{ inputs.resource-group || 'squadron-rg' }}"
-          REVISION=$(az containerapp revision list \
-            --name "${{ steps.app.outputs.name }}" \
+          APP="${{ steps.app.outputs.name }}"
+          IMAGE="${{ inputs.squadron-image || 'ghcr.io/nbaertsch/squadron:latest' }}"
+
+          echo "Updating container app to image: $IMAGE (forces new revision)..."
+          az containerapp update \
+            --name "$APP" \
             --resource-group "$RG" \
-            --query "[0].name" --output tsv)
-          az containerapp revision restart \
-            --name "${{ steps.app.outputs.name }}" \
-            --resource-group "$RG" \
-            --revision "$REVISION" \
+            --image "$IMAGE" \
             --output none
-          echo "Container restarted with new config"
+          echo "Container updated with new image — new revision created"
 
   # ════════════════════════════════════════════════════════════════════
   # Destroy all infrastructure
