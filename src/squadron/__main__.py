@@ -262,10 +262,12 @@ def main():
 
     # Validate repo root (skip if SQUADRON_REPO_URL is set — server will clone at startup)
     squadron_dir = args.repo_root / ".squadron"
-    if not squadron_dir.exists() and not os.environ.get("SQUADRON_REPO_URL"):
+    repo_url = os.environ.get("SQUADRON_REPO_URL", "").strip()
+    if not squadron_dir.exists() and not repo_url:
         print(f"Error: .squadron/ directory not found at {squadron_dir}", file=sys.stderr)
         print(
-            "Copy examples/.squadron/ into your repo root, or specify --repo-root", file=sys.stderr
+            "Copy examples/.squadron/ into your repo root, or specify --repo-root",
+            file=sys.stderr,
         )
         sys.exit(1)
 

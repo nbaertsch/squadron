@@ -71,7 +71,7 @@ class SquadronServer:
         logger.info("Squadron server starting (repo=%s)", self.repo_root)
 
         # 0. Clone repo if SQUADRON_REPO_URL is set (container environment)
-        repo_url = os.environ.get("SQUADRON_REPO_URL")
+        repo_url = os.environ.get("SQUADRON_REPO_URL", "").strip()
         if repo_url:
             await self._clone_repo(repo_url)
 

@@ -1,12 +1,13 @@
 # Squadron Deploy — Azure Container Apps
 #
 # This workflow manages the full lifecycle of a Squadron deployment:
-#   - deploy: infrastructure + new container revision
-#   - destroy: tear down all infrastructure
+#   - Full deploy: infrastructure + new container revision (code changes or manual)
+#   - Config sync: upload .squadron/ config + restart (config-only changes)
+#   - Destroy: tear down all infrastructure
 #
-# On push to main (any code or config change) → full deploy.
-# The container clones the repo at startup so config changes are
-# picked up automatically on each new revision.
+# On push to main:
+#   - Code changes (src/**, Dockerfile, pyproject.toml) → full deploy (new revision)
+#   - Config-only changes (.squadron/**) → sync-config (restart existing revision)
 #
 # Manual dispatch: Actions → Squadron Deploy → Run workflow
 
@@ -22,6 +23,7 @@ on:
         type: choice
         options:
           - deploy
+          - sync-config
           - destroy
         default: deploy
       resource-group:
@@ -40,7 +42,7 @@ on:
         required: false
         default: "ghcr.io/nbaertsch/squadron:latest"
 
-  # ── Auto-deploy on push to main ───────────────────────────────────
+  # ── Auto-deploy on code/config changes ────────────────────────────
   push:
     branches: [main]
     paths:
@@ -48,20 +50,50 @@ on:
       - "src/**"
       - "Dockerfile"
       - "pyproject.toml"
-      - "infra/**"
 
 # ── Permissions ────────────────────────────────────────────────────────────
 permissions:
   contents: read
 
+# ── Environment ────────────────────────────────────────────────────────────
+env:
+  SQUADRON_REF: "main"
+
 jobs:
   # ════════════════════════════════════════════════════════════════════
-  # Deploy infrastructure + new container revision
+  # Detect what changed (push events only)
+  # ════════════════════════════════════════════════════════════════════
+  detect:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.check.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check for code vs config changes
+        id: check
+        run: |
+          if git diff --name-only HEAD~1 | grep -qE '^(src/|Dockerfile|pyproject\.toml)'; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Code changes detected — will trigger full deploy"
+          else
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Config-only changes — will trigger sync-config"
+          fi
+
+  # ════════════════════════════════════════════════════════════════════
+  # Deploy infrastructure + sync config (full redeploy)
   # ════════════════════════════════════════════════════════════════════
   deploy:
+    needs: [detect]
     if: >
-      github.event_name == 'push'
-      || (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+      always() && (
+        (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+        || (needs.detect.outputs.code_changed == 'true')
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -69,12 +101,17 @@ jobs:
 
       - name: Validate .squadron/ exists
         run: |
-          if [ ! -f ".squadron/config.yaml" ]; then
-            echo "::error::.squadron/config.yaml not found."
+          if [ ! -d ".squadron" ]; then
+            echo "::error::.squadron/ directory not found."
             echo "Run 'squadron init' to create it, then commit and push."
             exit 1
           fi
-          echo "Found .squadron/config.yaml"
+          if [ ! -f ".squadron/config.yaml" ]; then
+            echo "::error::.squadron/config.yaml not found."
+            exit 1
+          fi
+          echo "Found .squadron/ with config.yaml"
+          ls -la .squadron/
 
       - name: Determine app name
         id: app
@@ -98,7 +135,26 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Azure context diagnostics
+        run: |
+          set -euo pipefail
+          echo "## Azure context" 
+          az account show -o jsonc
+          echo "" 
+          echo "## Provider registration states" 
+          for ns in Microsoft.OperationalInsights Microsoft.App Microsoft.Storage; do
+            state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null || echo "unknown")
+            echo "- $ns: $state"
+          done
+
       # ── Infrastructure ────────────────────────────────────────────
+      - name: Download Squadron Bicep template
+        run: |
+          curl -sfL \
+            "https://raw.githubusercontent.com/nbaertsch/squadron/${{ env.SQUADRON_REF }}/infra/main.bicep" \
+            -o /tmp/squadron-infra.bicep
+          echo "Downloaded Bicep template (ref: ${{ env.SQUADRON_REF }})"
+
       - name: Create resource group
         run: |
           az group create \
@@ -118,10 +174,12 @@ jobs:
           SQ_INSTALLATION_ID: ${{ secrets.SQ_INSTALLATION_ID_DEV }}
           SQ_WEBHOOK_SECRET: ${{ secrets.SQ_WEBHOOK_SECRET }}
           SQ_COPILOT_TOKEN: ${{ secrets.SQ_COPILOT_TOKEN }}
+          REPO_URL: https://github.com/${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
           set -euo pipefail
 
-          # Write ARM parameters file (handles multiline PEM keys via JSON escaping)
+          # Write ARM parameters file using JSON escaping (handles multiline PEM keys)
           python3 - <<'PY' > /tmp/squadron-params.json
           import json, os
 
@@ -143,6 +201,10 @@ jobs:
                   "githubPrivateKey": {"value": must_get("SQ_PRIVATE_KEY")},
                   "githubInstallationId": {"value": must_get("SQ_INSTALLATION_ID")},
                   "githubWebhookSecret": {"value": must_get("SQ_WEBHOOK_SECRET")},
+                  # Repo clone config
+                  "repoUrl": {"value": os.environ.get("REPO_URL", "")},
+                  "defaultBranch": {"value": os.environ.get("DEFAULT_BRANCH", "main")},
+                  # Optional
                   "copilotGithubToken": {"value": os.environ.get("SQ_COPILOT_TOKEN", "")},
               },
           }
@@ -152,20 +214,24 @@ jobs:
           az deployment group create \
             --name "squadron-infra" \
             --resource-group "${{ steps.params.outputs.resource-group }}" \
-            --template-file infra/main.bicep \
+            --template-file /tmp/squadron-infra.bicep \
             --parameters @/tmp/squadron-params.json \
             --output none
 
-      # ── Clean up old revisions ────────────────────────────────────
+      # ── Kill old revisions so they stop holding locks ────────────
       - name: Deactivate old revisions
         run: |
           set -euo pipefail
           APP="${{ steps.app.outputs.name }}"
           RG="${{ steps.params.outputs.resource-group }}"
+          LATEST="squadron-squadron--run-${{ github.run_id }}"
+
+          echo "Latest revision: $LATEST"
+          echo "Deactivating all other revisions..."
 
           az containerapp revision list \
             --name "$APP" --resource-group "$RG" \
-            --query "[?properties.active && properties.trafficWeight==\`0\`].name" -o tsv \
+            --query "[?name!='$LATEST'].name" -o tsv \
           | while read -r rev; do
               echo "  Deactivating: $rev"
               az containerapp revision deactivate \
@@ -174,6 +240,81 @@ jobs:
             done
 
           echo "Old revisions deactivated"
+
+      # ── Clean up stale DB from Azure Files (legacy) ───────────────
+      - name: Remove stale registry DB from Azure Files
+        run: |
+          az storage file delete-batch \
+            --source "squadron-data" \
+            --pattern ".squadron-data/*" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --output none 2>/dev/null || true
+          echo "Cleaned up any stale registry DB from Azure Files"
+
+      # ── Config sync (always runs) ─────────────────────────────────
+      - name: Resolve storage account
+        id: storage
+        run: |
+          # Find the storage account in the resource group
+          STORAGE_ACCOUNT=$(az storage account list \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --query "[0].name" --output tsv)
+
+          if [ -z "$STORAGE_ACCOUNT" ]; then
+            echo "::error::No storage account found in resource group."
+            echo "Run with action=deploy first to create infrastructure."
+            exit 1
+          fi
+
+          STORAGE_KEY=$(az storage account keys list \
+            --account-name "$STORAGE_ACCOUNT" \
+            --query "[0].value" --output tsv)
+
+          echo "account=$STORAGE_ACCOUNT" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$STORAGE_KEY"
+          echo "key=$STORAGE_KEY" >> "$GITHUB_OUTPUT"
+          echo "Resolved storage account: $STORAGE_ACCOUNT"
+
+      - name: Sync .squadron/ config to Azure Files
+        run: |
+          echo "Removing existing .squadron/ from Azure Files share (best-effort)..."
+          az storage file delete-batch \
+            --source "squadron-data" \
+            --pattern ".squadron/*" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --output none \
+            2>/dev/null || true
+
+          echo "Uploading .squadron/ to Azure Files share..."
+          az storage file upload-batch \
+            --destination "squadron-data" \
+            --source ".squadron" \
+            --destination-path ".squadron" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}"
+          echo "Config synced successfully"
+
+      - name: Restart container to load new config
+        run: |
+          echo "Restarting container to pick up config changes..."
+          REVISION=$(az containerapp revision list \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --query "[0].name" --output tsv 2>/dev/null || true)
+
+          if [ -n "$REVISION" ]; then
+            az containerapp revision restart \
+              --name "${{ steps.app.outputs.name }}" \
+              --resource-group "${{ steps.params.outputs.resource-group }}" \
+              --revision "$REVISION" \
+              --output none
+            echo "Container restarted"
+          else
+            echo "::warning::No active revision found — container may not be running yet."
+            echo "If this is your first deploy, run again with action=deploy."
+          fi
 
       # ── Output ────────────────────────────────────────────────────
       - name: Output deployment info
@@ -192,8 +333,14 @@ jobs:
             echo "| **FQDN** | https://${FQDN} |" >> "$GITHUB_STEP_SUMMARY"
             echo "| **Webhook URL** | \`https://${FQDN}/webhook\` |" >> "$GITHUB_STEP_SUMMARY"
             echo "| **Health** | https://${FQDN}/health |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Next Steps" >> "$GITHUB_STEP_SUMMARY"
+            echo "1. Set the **Webhook URL** in your [GitHub App settings](https://github.com/settings/apps):" >> "$GITHUB_STEP_SUMMARY"
+            echo "   \`https://${FQDN}/webhook\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "2. Verify health: \`curl https://${FQDN}/health\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "3. Open an issue to test!" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::Could not determine FQDN."
+            echo "::warning::Could not determine FQDN. Check if the container app exists."
           fi
 
       - name: Health check
@@ -210,10 +357,19 @@ jobs:
           fi
 
           echo "Waiting for https://${FQDN}/health ..."
+          # New revisions on Azure Container Apps can take several minutes to become reachable
+          # (image pull + volume mount + app startup). Keep each attempt bounded, but allow
+          # a longer overall window so first deploys don't fail spuriously.
           for i in $(seq 1 36); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --connect-timeout 3 --max-time 5 \
-              "https://${FQDN}/health" 2>/dev/null || true)
+            # Bound each attempt so a hung TLS connect or stalled response doesn't stretch the loop.
+            HTTP_CODE=$(curl \
+              -s \
+              -o /dev/null \
+              -w "%{http_code}" \
+              --connect-timeout 3 \
+              --max-time 5 \
+              "https://${FQDN}/health" \
+              2>/dev/null || true)
             if [ "$HTTP_CODE" = "200" ]; then
               echo "Health check passed!"
               curl -s --connect-timeout 3 --max-time 5 "https://${FQDN}/health" | python3 -m json.tool
@@ -223,16 +379,116 @@ jobs:
             sleep 10
           done
 
-          echo "::error::Health check failed. Dumping diagnostics..."
+          echo "::error::Health check did not pass within the expected window. Dumping Container App diagnostics..."
+          echo "" 
+          echo "## containerapp show" 
           timeout 30s az containerapp show \
             --name "${{ steps.app.outputs.name }}" \
             --resource-group "${{ steps.params.outputs.resource-group }}" \
-            -o jsonc || true
+            -o jsonc \
+            || true
+
+          echo "" 
+          echo "## revisions" 
+          timeout 30s az containerapp revision list \
+            --name "${{ steps.app.outputs.name }}" \
+            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            -o table \
+            || true
+
+          echo "" 
+          echo "## recent logs (tail=200)" 
           timeout 60s az containerapp logs show \
             --name "${{ steps.app.outputs.name }}" \
             --resource-group "${{ steps.params.outputs.resource-group }}" \
-            --tail 200 || true
+            --tail 200 \
+            || true
+
           exit 1
+
+  # ════════════════════════════════════════════════════════════════════
+  # Sync config only (no code changes — just upload config + restart)
+  # ════════════════════════════════════════════════════════════════════
+  sync-config:
+    needs: [detect]
+    if: >
+      always() && (
+        (github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config')
+        || (github.event_name == 'push' && needs.detect.outputs.code_changed != 'true')
+      )
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Determine app name
+        id: app
+        run: |
+          if [ -n "${{ inputs.app-name }}" ]; then
+            echo "name=${{ inputs.app-name }}" >> "$GITHUB_OUTPUT"
+          else
+            REPO_NAME="${{ github.event.repository.name }}"
+            echo "name=${REPO_NAME}-squadron" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve storage account
+        id: storage
+        run: |
+          RG="${{ inputs.resource-group || 'squadron-rg' }}"
+          STORAGE_ACCOUNT=$(az storage account list \
+            --resource-group "$RG" \
+            --query "[0].name" --output tsv)
+
+          if [ -z "$STORAGE_ACCOUNT" ]; then
+            echo "::warning::No storage account found in resource group '$RG'."
+            echo "::warning::Run the workflow with action=deploy once to create infrastructure."
+            exit 0
+          fi
+
+          STORAGE_KEY=$(az storage account keys list \
+            --account-name "$STORAGE_ACCOUNT" \
+            --query "[0].value" --output tsv)
+          echo "account=$STORAGE_ACCOUNT" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$STORAGE_KEY"
+          echo "key=$STORAGE_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Sync .squadron/ config
+        run: |
+          az storage file delete-batch \
+            --source "squadron-data" \
+            --pattern ".squadron/*" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}" \
+            --output none \
+            2>/dev/null || true
+
+          az storage file upload-batch \
+            --destination "squadron-data" \
+            --source ".squadron" \
+            --destination-path ".squadron" \
+            --account-name "${{ steps.storage.outputs.account }}" \
+            --account-key "${{ steps.storage.outputs.key }}"
+          echo "Config synced"
+
+      - name: Restart container to load new config
+        run: |
+          RG="${{ inputs.resource-group || 'squadron-rg' }}"
+          APP="${{ steps.app.outputs.name }}"
+          REVISION=$(az containerapp revision list \
+            --name "$APP" \
+            --resource-group "$RG" \
+            --query "[0].name" --output tsv)
+          az containerapp revision restart \
+            --name "$APP" \
+            --resource-group "$RG" \
+            --revision "$REVISION" \
+            --output none
+          echo "Container restarted with new config"
 
   # ════════════════════════════════════════════════════════════════════
   # Destroy all infrastructure
@@ -247,12 +503,17 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Confirm destruction
+        run: |
+          echo "::warning::Destroying all Squadron resources in ${{ inputs.resource-group }}"
+          echo "This will delete the Container App, storage, and all data."
+
       - name: Delete resource group
         run: |
-          echo "::warning::Destroying all Squadron resources in ${{ inputs.resource-group || 'squadron-rg' }}"
           az group delete \
             --name "${{ inputs.resource-group || 'squadron-rg' }}" \
             --yes --no-wait
-          echo "Resource group deletion initiated"
+          echo "Resource group deletion initiated (async)"
           echo "## Squadron Destroyed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Resource group \`${{ inputs.resource-group || 'squadron-rg' }}\` is being deleted." >> "$GITHUB_STEP_SUMMARY"

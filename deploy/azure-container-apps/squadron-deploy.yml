@@ -146,6 +146,7 @@ jobs:
             githubWebhookSecret=${{ secrets.SQ_WEBHOOK_SECRET }}
             copilotGithubToken=${{ secrets.SQ_COPILOT_TOKEN }}
             repoUrl=https://github.com/${{ github.repository }}
+            defaultBranch=${{ github.event.repository.default_branch || 'main' }}
 
       # ── Config sync (push to main with .squadron/ changes) ────────
       # The container clones the repo at startup and hot-reloads config

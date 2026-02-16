@@ -74,6 +74,9 @@ param copilotGithubToken string = ''
 @description('GitHub repo URL to clone at startup (e.g. https://github.com/owner/repo)')
 param repoUrl string = ''
 
+@description('Branch to clone (default: main)')
+param defaultBranch string = 'main'
+
 // ── Log Analytics ───────────────────────────────────────────────────────────
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -142,6 +145,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'GITHUB_WEBHOOK_SECRET', secretRef: 'github-webhook-secret' }
             { name: 'COPILOT_GITHUB_TOKEN', secretRef: 'copilot-github-token' }
             { name: 'SQUADRON_REPO_URL', value: repoUrl }
+            { name: 'SQUADRON_DEFAULT_BRANCH', value: defaultBranch }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
             { name: 'SQUADRON_DATA_DIR', value: '/tmp/squadron-data' }
           ]
