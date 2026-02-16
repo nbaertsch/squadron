@@ -239,7 +239,12 @@ class SquadronServer:
             await self.github.ensure_labels_exist(owner, repo, all_labels)
             logger.info("Ensured %d labels exist on %s/%s", len(all_labels), owner, repo)
         except Exception:
-            logger.warning("Failed to ensure labels on %s/%s — continuing without", owner, repo)
+            logger.warning(
+                "Failed to ensure labels on %s/%s — continuing without",
+                owner,
+                repo,
+                exc_info=True,
+            )
 
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
