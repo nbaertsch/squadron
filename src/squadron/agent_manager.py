@@ -672,42 +672,28 @@ class AgentManager:
                 session = await copilot.create_session(session_config)
                 prompt = self._build_agent_prompt(record, trigger_event)
 
-            # Layer 2 circuit breaker: timeout around send_and_wait
+            # Layer 2 circuit breaker: pass max_duration as the SDK's own
+            # send_and_wait timeout. The SDK defaults to 60s internally if
+            # not specified, which was causing premature TimeoutErrors.
             try:
-                _cb_start = asyncio.get_event_loop().time()
-                result = await asyncio.wait_for(
-                    session.send_and_wait({"prompt": prompt}),
-                    timeout=max_duration,
-                )
+                result = await session.send_and_wait({"prompt": prompt}, timeout=max_duration)
             except asyncio.TimeoutError:
-                _elapsed = asyncio.get_event_loop().time() - _cb_start
-                # Only treat as circuit breaker if we actually ran long enough.
-                # The Copilot SDK can raise its own TimeoutError (e.g. HTTP
-                # request timeout) which wait_for() catches indiscriminately.
-                if _elapsed < max_duration * 0.9:
-                    logger.error(
-                        "Agent %s got TimeoutError after %.0fs (SDK/HTTP timeout, NOT circuit breaker). "
-                        "max_active_duration=%ds. Treating as agent error, not escalation.",
-                        record.agent_id,
-                        _elapsed,
-                        max_duration,
-                    )
-                    record.status = AgentStatus.ERROR
-                    await self.registry.update_agent(record)
-                    await self._cleanup_agent(
-                        record.agent_id,
-                        destroy_session=True,
-                        copilot=copilot,
-                        session_id=record.session_id,
-                    )
-                    return
-
                 logger.warning(
-                    "CIRCUIT BREAKER — agent %s exceeded max_active_duration (%ds, elapsed=%.0fs)",
+                    "CIRCUIT BREAKER — agent %s exceeded max_active_duration (%ds)",
                     record.agent_id,
                     max_duration,
-                    _elapsed,
                 )
+                record.status = AgentStatus.ESCALATED
+                await self.registry.update_agent(record)
+                await self._cleanup_agent(
+                    record.agent_id,
+                    destroy_session=True,
+                    copilot=copilot,
+                    session_id=record.session_id,
+                )
+                return
+            except Exception:
+                logger.exception("Agent %s send_and_wait failed", record.agent_id)
                 record.status = AgentStatus.ESCALATED
                 await self.registry.update_agent(record)
                 await self._cleanup_agent(
