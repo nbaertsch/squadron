@@ -145,6 +145,7 @@ jobs:
           APP_NAME: ${{ steps.app.outputs.name }}
           IMAGE: ${{ steps.params.outputs.image }}
           LOCATION: ${{ steps.params.outputs.location }}
+          REVISION_SUFFIX: run-${{ github.run_id }}
           SQ_APP_ID: ${{ secrets.SQ_APP_ID_DEV }}
           SQ_PRIVATE_KEY: ${{ secrets.SQ_APP_PRIVATE_KEY }}
           SQ_INSTALLATION_ID: ${{ secrets.SQ_INSTALLATION_ID_DEV }}
@@ -170,6 +171,7 @@ jobs:
                   "appName": {"value": os.environ["APP_NAME"]},
                   "ghcrImage": {"value": os.environ["IMAGE"]},
                   "location": {"value": os.environ["LOCATION"]},
+                  "revisionSuffix": {"value": os.environ.get("REVISION_SUFFIX", "")},
                   "githubAppId": {"value": must_get("SQ_APP_ID")},
                   "githubPrivateKey": {"value": must_get("SQ_PRIVATE_KEY")},
                   "githubInstallationId": {"value": must_get("SQ_INSTALLATION_ID")},

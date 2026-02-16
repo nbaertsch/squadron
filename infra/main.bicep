@@ -44,6 +44,9 @@ param minReplicas int = 1
 @description('Maximum replicas')
 param maxReplicas int = 1
 
+@description('Revision suffix (set to a unique value to force a new revision)')
+param revisionSuffix string = ''
+
 // GitHub App credentials
 @secure()
 @description('GitHub App ID')
@@ -209,6 +212,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           ]
         }
       ]
+      revisionSuffix: revisionSuffix
       volumes: [
         {
           name: 'squadron-data'
