@@ -154,6 +154,15 @@ class AgentRegistry:
         row = await cursor.fetchone()
         return self._row_to_record(row) if row else None
 
+    async def get_agents_for_issue(self, issue_number: int) -> list[AgentRecord]:
+        """Get all active/sleeping agents assigned to an issue."""
+        cursor = await self.db.execute(
+            "SELECT * FROM agents WHERE issue_number = ? AND status IN ('created', 'active', 'sleeping') ORDER BY created_at DESC",
+            (issue_number,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     async def get_agents_by_status(self, status: AgentStatus) -> list[AgentRecord]:
         """Get all agents with a given status."""
         cursor = await self.db.execute("SELECT * FROM agents WHERE status = ?", (status.value,))
