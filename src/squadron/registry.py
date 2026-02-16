@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -83,19 +84,44 @@ class AgentRegistry:
         # Wait for locks instead of failing immediately.
         await self._db.execute("PRAGMA busy_timeout=30000")
 
+        # Best-effort: WAL improves concurrency on local disks, but is often unreliable on SMB.
+        # If it fails (locked/unsupported), continue with SQLite defaults rather than crashloop.
         try:
             await self._db.execute("PRAGMA journal_mode=WAL")
         except sqlite3.OperationalError as e:
             logger.warning(
-                "Failed to enable WAL journal mode for %s (%s) — falling back to DELETE",
+                "Could not enable WAL for %s (%s) — continuing without WAL",
                 self.db_path,
                 str(e),
             )
-            await self._db.execute("PRAGMA journal_mode=DELETE")
 
-        await self._db.execute("PRAGMA foreign_keys=ON")
-        await self._db.executescript(SCHEMA)
-        await self._db.commit()
+        # Azure Files can transiently lock the DB during revision swaps.
+        # Retry schema initialization briefly instead of exiting.
+        last_error: Exception | None = None
+        for attempt in range(60):
+            try:
+                await self._db.execute("PRAGMA foreign_keys=ON")
+                await self._db.executescript(SCHEMA)
+                await self._db.commit()
+                last_error = None
+                break
+            except sqlite3.OperationalError as e:
+                last_error = e
+                if "locked" in str(e).lower():
+                    logger.warning(
+                        "SQLite locked during init (%s) — retrying (%d/60)",
+                        self.db_path,
+                        attempt + 1,
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                raise
+
+        if last_error is not None:
+            raise RuntimeError(
+                f"Failed to initialize registry DB after retries: {self.db_path}"
+            ) from last_error
+
         logger.info("Agent registry initialized: %s", self.db_path)
 
     async def close(self) -> None:
