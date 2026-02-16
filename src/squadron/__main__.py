@@ -501,9 +501,9 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Validate repo root
+    # Validate repo root (skip if SQUADRON_REPO_URL is set — server will clone at startup)
     squadron_dir = args.repo_root / ".squadron"
-    if not squadron_dir.exists():
+    if not squadron_dir.exists() and not os.environ.get("SQUADRON_REPO_URL"):
         print(f"Error: .squadron/ directory not found at {squadron_dir}", file=sys.stderr)
         print("Run 'squadron init' to create one, or specify --repo-root", file=sys.stderr)
         sys.exit(1)
