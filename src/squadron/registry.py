@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -73,9 +74,25 @@ class AgentRegistry:
 
     async def initialize(self) -> None:
         """Open database and create tables."""
-        self._db = await aiosqlite.connect(self.db_path)
+        # On network filesystems (e.g., Azure Files/SMB), WAL can be unreliable and
+        # may fail with "database is locked" at startup. Use a busy timeout and
+        # fall back to a safer journal mode if WAL can't be enabled.
+        self._db = await aiosqlite.connect(self.db_path, timeout=30)
         self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA journal_mode=WAL")
+
+        # Wait for locks instead of failing immediately.
+        await self._db.execute("PRAGMA busy_timeout=30000")
+
+        try:
+            await self._db.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as e:
+            logger.warning(
+                "Failed to enable WAL journal mode for %s (%s) — falling back to DELETE",
+                self.db_path,
+                str(e),
+            )
+            await self._db.execute("PRAGMA journal_mode=DELETE")
+
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA)
         await self._db.commit()
