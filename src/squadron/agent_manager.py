@@ -106,6 +106,7 @@ class AgentManager:
 
         # Register event handlers
         self.router.on(SquadronEventType.ISSUE_ASSIGNED, self._handle_issue_assigned)
+        self.router.on(SquadronEventType.ISSUE_LABELED, self._handle_issue_labeled)
         self.router.on(SquadronEventType.ISSUE_CLOSED, self._handle_issue_closed)
         self.router.on(SquadronEventType.PR_OPENED, self._handle_pr_opened)
         self.router.on(SquadronEventType.PR_CLOSED, self._handle_pr_closed)
@@ -285,7 +286,12 @@ class AgentManager:
 
         lines.append("\n## Instructions")
         lines.append("Analyze these events and take appropriate action using your available tools.")
-        lines.append("For new issues: triage, label, and assign to the appropriate agent role.")
+        lines.append(
+            "For new issues: triage, classify with labels (type + priority), and post a triage comment."
+        )
+        lines.append(
+            "IMPORTANT: Applying a type label (feature, bug, etc.) automatically spawns the appropriate agent — do NOT try to assign issues to bots."
+        )
         lines.append("For closed issues: check if any blocked agents should be unblocked.")
         lines.append("For PR events: coordinate review assignments.")
 
@@ -1054,6 +1060,53 @@ class AgentManager:
 
         if role:
             await self.create_agent(role, issue["number"], trigger_event=event)
+
+    async def _handle_issue_labeled(self, event: SquadronEvent) -> None:
+        """Handle issue labeled — spawn agent if label maps to an agent role.
+
+        This is the primary agent spawn trigger. When the PM labels an issue
+        with a type label (e.g. 'feature', 'bug'), and that label maps to an
+        agent role via assignable_labels in config, we spawn the agent.
+        """
+        payload = event.data.get("payload", {})
+        issue = payload.get("issue", {})
+        label = payload.get("label", {})
+
+        if not issue or not label:
+            return
+
+        label_name = label.get("name", "")
+        issue_number = issue.get("number")
+        if not label_name or not issue_number:
+            return
+
+        # Check if this specific label maps to an agent role
+        for role_name, role_config in self.config.agent_roles.items():
+            if role_config.assignable_labels and label_name in role_config.assignable_labels:
+                try:
+                    role = AgentRole(role_name)
+                except ValueError:
+                    logger.warning("Unknown role in config: %s", role_name)
+                    continue
+
+                # Don't spawn if an agent already exists for this issue
+                existing = await self.registry.get_agents_for_issue(issue_number)
+                if any(a.role == role for a in existing):
+                    logger.info(
+                        "Agent %s already exists for issue #%d — skipping",
+                        role.value,
+                        issue_number,
+                    )
+                    return
+
+                logger.info(
+                    "Label '%s' on issue #%d → spawning %s agent",
+                    label_name,
+                    issue_number,
+                    role.value,
+                )
+                await self.create_agent(role, issue_number, trigger_event=event)
+                return  # Only spawn one agent per label event
 
     async def _handle_issue_closed(self, event: SquadronEvent) -> None:
         """Handle issue closure — check if it unblocks any sleeping agents."""

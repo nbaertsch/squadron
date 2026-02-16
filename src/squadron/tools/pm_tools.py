@@ -160,7 +160,7 @@ class PMTools:
             return await pm.create_issue(params)
 
         @define_tool(
-            description="Assign a GitHub issue to squadron[bot] so the framework creates the appropriate agent."
+            description="Assign a GitHub issue to squadron-dev[bot] for tracking visibility. Labels are the actual agent spawn trigger."
         )
         async def assign_issue(params: AssignIssueParams) -> str:
             return await pm.assign_issue(params)
