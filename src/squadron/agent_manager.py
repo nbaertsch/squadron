@@ -1398,7 +1398,7 @@ class AgentManager:
         """Interpolate template variables in agent definition markdown.
 
         Agent .md files use {project_name}, {issue_number}, {issue_title},
-        {issue_body}, {branch_name}, {base_branch}, {max_iterations}, etc.
+        {issue_body}, {branch_name}, {base_branch}, {pr_number}, {max_iterations}, etc.
         Uses format_map with a defaultdict so missing keys become empty strings
         instead of raising KeyError.
         """
@@ -1407,11 +1407,16 @@ class AgentManager:
         # Extract issue metadata from trigger event payload
         issue_title = ""
         issue_body = ""
+        pr_number = ""
         if trigger_event:
             payload = trigger_event.data.get("payload", {})
             issue_data = payload.get("issue", {})
             issue_title = issue_data.get("title", "")
             issue_body = issue_data.get("body", "")
+
+            # Extract PR number from trigger event if available
+            if trigger_event.pr_number:
+                pr_number = str(trigger_event.pr_number)
 
         # Get circuit breaker limits for default values
         cb_limits = self.config.circuit_breakers.for_role(record.role)
@@ -1428,6 +1433,7 @@ class AgentManager:
                 "max_iterations": str(cb_limits.max_iterations),
                 "max_tool_calls": str(cb_limits.max_tool_calls),
                 "max_turns": str(cb_limits.max_turns),
+                "pr_number": pr_number,
             },
         )
 
