@@ -106,6 +106,17 @@ class GitHubEvent(BaseModel):
     def comment(self) -> dict | None:
         return self.payload.get("comment")
 
+    @property
+    def issue_creator(self) -> str | None:
+        """GitHub username of the user who created the issue.
+        
+        Returns the username from payload.issue.user.login if available.
+        This is different from sender which is the user who triggered the event.
+        """
+        issue = self.payload.get("issue", {})
+        user = issue.get("user", {})
+        return user.get("login")
+
 
 # ── Internal Events ──────────────────────────────────────────────────────────
 
