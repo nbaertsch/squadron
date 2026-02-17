@@ -1398,7 +1398,7 @@ class AgentManager:
         """Interpolate template variables in agent definition markdown.
 
         Agent .md files use {project_name}, {issue_number}, {issue_title},
-        {issue_body}, {branch_name}, {base_branch}, {max_iterations}, etc.
+        {issue_body}, {branch_name}, {base_branch}, {pr_number}, {max_iterations}, etc.
         Uses format_map with a defaultdict so missing keys become empty strings
         instead of raising KeyError.
         """
@@ -1428,6 +1428,7 @@ class AgentManager:
                 "max_iterations": str(cb_limits.max_iterations),
                 "max_tool_calls": str(cb_limits.max_tool_calls),
                 "max_turns": str(cb_limits.max_turns),
+                "pr_number": str(record.pr_number or ""),
             },
         )
 

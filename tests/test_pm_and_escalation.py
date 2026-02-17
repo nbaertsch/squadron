@@ -336,6 +336,30 @@ class TestTemplateInterpolation:
         assert "Max tools: 200" in result
 
 
+
+    def test_interpolates_pr_number_from_agent_record(self, registry):
+        """Regression test for issue #28: pr_number should be available for template interpolation."""
+        manager = _make_manager(registry)
+        # Create agent with pr_number set (as would happen for PR review agents)
+        agent = _make_agent(pr_number=23)
+        
+        template = "Review PR #{pr_number} and provide feedback."
+        result = manager._interpolate_agent_def(template, agent, None)
+        
+        # Should interpolate pr_number correctly, not leave it blank
+        assert result == "Review PR #23 and provide feedback."
+        assert "{pr_number}" not in result  # Ensure template variable was replaced
+        
+    def test_pr_number_defaults_to_empty_when_missing(self, registry):
+        """Test that missing pr_number becomes empty string, not error."""
+        manager = _make_manager(registry)
+        agent = _make_agent()  # No pr_number set
+        
+        template = "Review PR #{pr_number} if available."
+        result = manager._interpolate_agent_def(template, agent, None)
+        
+        # Should use empty string for missing pr_number (defaultdict behavior)
+        assert result == "Review PR # if available."
 # ── PR Closed Handler ────────────────────────────────────────────────────────
 
 
