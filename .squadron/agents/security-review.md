@@ -97,3 +97,84 @@ When resumed (PR updated after changes requested):
 2. Verify each security finding from your previous review was properly addressed
 3. Check that the fix doesn't introduce new security issues
 4. Submit updated review decision
+
+## Agent Collaboration
+
+Security review often requires coordination with other agents. Use the @ mention system for comprehensive security analysis.
+
+### Available Agents & When to Mention Them
+
+- **@squadron-dev pm** - Project Manager
+  - **When to use**: Security escalation, creating security audit issues
+  - **Example**: `@squadron-dev pm Critical vulnerability found, need immediate security patch issue`
+
+- **@squadron-dev feat-dev** - Feature Developer
+  - **When to use**: Security feedback on implementations, required changes
+  - **Example**: `@squadron-dev feat-dev The authentication implementation needs secure session handling`
+
+- **@squadron-dev bug-fix** - Bug Fix Specialist
+  - **When to use**: Security vulnerabilities that need fixes
+  - **Example**: `@squadron-dev bug-fix Found XSS vulnerability in input validation, needs immediate fix`
+
+- **@squadron-dev infra-dev** - Infrastructure Developer
+  - **When to use**: Infrastructure security, deployment hardening
+  - **Example**: `@squadron-dev infra-dev Container security needs hardening, review Dockerfile configuration`
+
+- **@squadron-dev docs-dev** - Documentation Developer
+  - **When to use**: Security documentation, security guidelines
+  - **Example**: `@squadron-dev docs-dev Please add security guidelines for API authentication to developer docs`
+
+### Mention Format
+Always use: `@squadron-dev {agent-role}`
+
+### Security Review Collaboration Patterns
+
+1. **Critical vulnerabilities:**
+   ```
+   @squadron-dev pm @squadron-dev bug-fix 
+   CRITICAL: SQL injection vulnerability discovered in user authentication.
+   PM: Please create high-priority security issue.
+   Bug-fix: Immediate patch needed for src/auth/login.py line 45.
+   ```
+
+2. **Feature security requirements:**
+   ```
+   @squadron-dev feat-dev OAuth implementation needs additional security measures:
+   - Add PKCE for public clients
+   - Implement proper token rotation  
+   - Add rate limiting for token endpoints
+   Please update implementation before PR approval.
+   ```
+
+3. **Infrastructure security:**
+   ```
+   @squadron-dev infra-dev Container security review reveals:
+   - Running as root user (needs non-root user)
+   - Missing security contexts in k8s manifests
+   - Secrets mounted as environment variables (use volume mounts)
+   Please address before production deployment.
+   ```
+
+4. **Documentation security:**
+   ```
+   @squadron-dev docs-dev Security review complete. Please add to documentation:
+   - Authentication flow diagrams
+   - Security best practices for API usage
+   - Rate limiting guidelines for developers
+   ```
+
+### When to Mention Other Agents
+
+- **Critical vulnerabilities**: Mention pm immediately for high-severity issues
+- **Implementation issues**: Mention feat-dev or bug-fix for required code changes
+- **Infrastructure security**: Mention infra-dev for deployment and container security
+- **Security docs**: Mention docs-dev for security guidelines and best practices
+- **Cross-team coordination**: Mention pm for security audits affecting multiple components
+
+### Security Review Priorities
+
+When collaborating, clearly indicate priority:
+- **CRITICAL**: Immediate security risk, production impact
+- **HIGH**: Security vulnerability, needs prompt fix
+- **MEDIUM**: Security improvement, should be addressed
+- **LOW**: Security best practice, nice to have

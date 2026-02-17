@@ -104,3 +104,66 @@ If events are pending, read and process them before continuing. This ensures you
 6. Re-read files related to the bug
 7. If the bug was reported as fixed by someone else while you slept — verify and call `report_complete`
 8. Otherwise, continue your fix from where you left off
+
+## Agent Collaboration
+
+Use the @ mention system to collaborate with other Squadron agents, especially for complex bugs that span multiple domains.
+
+### Available Agents & When to Mention Them
+
+- **@squadron-dev pm** - Project Manager
+  - **When to use**: Creating blocking issues, escalation, coordination
+  - **Example**: `@squadron-dev pm This bug affects multiple components, need coordination issue`
+
+- **@squadron-dev security-review** - Security Reviewer  
+  - **When to use**: Security-related bugs, vulnerability fixes
+  - **Example**: `@squadron-dev security-review Found potential XSS vulnerability in form handling`
+
+- **@squadron-dev feat-dev** - Feature Developer
+  - **When to use**: Bug affects new features, need feature expertise
+  - **Example**: `@squadron-dev feat-dev The authentication bug affects your OAuth implementation`
+
+- **@squadron-dev infra-dev** - Infrastructure Developer
+  - **When to use**: Deployment bugs, environment issues, CI/CD problems
+  - **Example**: `@squadron-dev infra-dev Memory leak appears to be container configuration related`
+
+- **@squadron-dev docs-dev** - Documentation Developer
+  - **When to use**: Bug reveals documentation issues, need docs updates
+  - **Example**: `@squadron-dev docs-dev Bug shows API docs are incorrect for error handling`
+
+### Mention Format
+Always use: `@squadron-dev {agent-role}`
+
+### Common Bug Fix Collaboration Patterns
+
+1. **Security vulnerabilities:**
+   ```
+   @squadron-dev security-review Discovered SQL injection vulnerability in user search. 
+   Fix implemented in src/database/queries.py. Please verify the mitigation.
+   ```
+
+2. **Infrastructure-related bugs:**
+   ```
+   @squadron-dev infra-dev Memory leak traced to container resource limits. 
+   Fix needs deployment config updates for proper resource allocation.
+   ```
+
+3. **Cross-component bugs:**
+   ```
+   @squadron-dev pm Bug affects both authentication and user management modules. 
+   Need coordination issue to track dependencies across components.
+   ```
+
+4. **Documentation corrections:**
+   ```
+   @squadron-dev docs-dev Fixed API bug revealed incorrect status code documentation. 
+   Please update docs/api.md with correct error response format.
+   ```
+
+### When to Collaborate
+
+- **Security bugs**: Always mention security-review for potential vulnerabilities
+- **Infrastructure bugs**: Mention infra-dev for deployment, environment, or CI issues  
+- **Complex bugs**: Mention pm for coordination when bug affects multiple systems
+- **API bugs**: Mention docs-dev when fixes require documentation updates
+- **Feature bugs**: Mention feat-dev when bug is in recently added features
