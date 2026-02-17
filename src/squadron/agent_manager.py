@@ -954,18 +954,28 @@ class AgentManager:
         custom_agents = self._build_custom_agents(agent_def)
         mcp_servers = self._build_mcp_servers(agent_def)
 
-        # Get tools for this agent based on role config
+        # ── Tool selection: .md frontmatter is the single source of truth ──
+        # The frontmatter `tools:` list is a mixed bag of:
+        #   - Custom Squadron tools (names in ALL_TOOL_NAMES) → passed as tools=
+        #   - SDK built-in tools (read_file, bash, git, etc.) → passed as available_tools=
+        # We split them here so each goes to the right SDK config key.
+        from squadron.tools.squadron_tools import ALL_TOOL_NAMES_SET
+
+        if agent_def.tools is not None:
+            custom_tool_names = [t for t in agent_def.tools if t in ALL_TOOL_NAMES_SET]
+            # SDK available_tools must include both builtins AND custom tool names
+            # so the model can see them all.  If the .md lists tools, use the
+            # full list as the allowlist; otherwise leave it open (None).
+            sdk_available_tools = agent_def.tools
+        else:
+            custom_tool_names = None  # → lifecycle-based defaults
+            sdk_available_tools = None  # → all tools visible
+
         tools = self._tools.get_tools(
             record.agent_id,
-            names=role_config.tools if role_config else None,
+            names=custom_tool_names,
             is_stateless=is_ephemeral,
         )
-
-        # SDK built-in tool restriction from agent definition frontmatter.
-        # When the .agent.md frontmatter specifies `tools: [...]`, it acts
-        # as an allowlist for ALL tools the model can see (built-in + custom).
-        # An empty list means no tools; omitting means all tools.
-        sdk_available_tools = agent_def.tools if agent_def.tools else None
 
         session_config = build_session_config(
             role=record.role,
@@ -993,11 +1003,7 @@ class AgentManager:
                     system_message=system_message,
                     working_directory=str(record.worktree_path or self.repo_root),
                     runtime_config=self.config.runtime,
-                    tools=self._tools.get_tools(
-                        record.agent_id,
-                        names=role_config.tools if role_config else None,
-                        is_stateless=is_ephemeral,
-                    ),
+                    tools=tools,
                     hooks=hooks,
                     custom_agents=custom_agents,
                     mcp_servers=mcp_servers,

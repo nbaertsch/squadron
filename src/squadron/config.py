@@ -82,7 +82,6 @@ class AgentRoleConfig(BaseModel):
     lifecycle: Literal["ephemeral", "persistent"] = "persistent"
     triggers: list[AgentTrigger] = Field(default_factory=list)  # Event triggers for this agent
     subagents: list[str] = Field(default_factory=list)  # Other agent roles available as subagents
-    tools: list[str] | None = None  # Explicit tool whitelist; None → lifecycle-based defaults
     branch_template: str | None = (
         None  # e.g. "feat/issue-{issue_number}"; None → auto from BranchNamingConfig
     )

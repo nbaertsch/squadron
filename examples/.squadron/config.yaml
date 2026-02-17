@@ -35,7 +35,6 @@ agent_roles:
     agent_definition: agents/pm.md
     singleton: true
     lifecycle: ephemeral
-    # tools: [create_issue, assign_issue, label_issue, comment_on_issue, read_issue, check_registry]
     triggers:
       - event: "issues.opened"
       # Comments are routed via @pm / /pm mentions (Layer 2 routing).

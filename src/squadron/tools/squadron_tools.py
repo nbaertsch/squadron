@@ -67,6 +67,9 @@ ALL_TOOL_NAMES = [
     "list_issue_comments",
 ]
 
+# O(1) lookup set for splitting .md tool lists into custom vs SDK built-in
+ALL_TOOL_NAMES_SET = frozenset(ALL_TOOL_NAMES)
+
 # Default tool sets by lifecycle type (used when no explicit tools list is configured)
 DEFAULT_TOOLS_PERSISTENT = [
     "check_for_events",
