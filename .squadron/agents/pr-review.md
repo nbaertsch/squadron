@@ -98,3 +98,115 @@ When resumed (e.g., PR was updated after you requested changes):
 3. For addressed comments: resolve the thread
 4. For unaddressed comments: re-state the concern
 5. Submit updated review decision
+
+## Agent Collaboration
+
+Code review often requires domain expertise beyond general code quality. Use @ mentions to get specialized input during review.
+
+### Available Agents & When to Mention Them
+
+- **@squadron-dev security-review** - Security Reviewer
+  - **When to use**: Security-sensitive code changes, authentication, cryptography
+  - **Example**: `@squadron-dev security-review Please review the password hashing implementation in this PR`
+
+- **@squadron-dev test-coverage** - Test Coverage Reviewer  
+  - **When to use**: Test adequacy concerns, coverage gaps
+  - **Example**: `@squadron-dev test-coverage Test coverage appears insufficient for this complex feature`
+
+- **@squadron-dev feat-dev** - Feature Developer (original author)
+  - **When to use**: Clarification on implementation decisions, architectural questions
+  - **Example**: `@squadron-dev feat-dev Please explain the design choice for the caching strategy`
+
+- **@squadron-dev infra-dev** - Infrastructure Developer
+  - **When to use**: Infrastructure implications, deployment concerns
+  - **Example**: `@squadron-dev infra-dev This change affects container startup - please review resource requirements`
+
+- **@squadron-dev pm** - Project Manager
+  - **When to use**: Review escalation, architectural concerns, cross-team coordination
+  - **Example**: `@squadron-dev pm This PR makes significant architectural changes that may need broader review`
+
+### Mention Format
+Always use: `@squadron-dev {agent-role}`
+
+### Code Review Collaboration Patterns
+
+1. **Security-focused review requests:**
+   ```
+   @squadron-dev security-review Security review needed for authentication changes:
+   
+   **Areas of concern:**
+   - New JWT token validation logic (lines 45-67)
+   - Password reset flow modification (lines 120-145)
+   - Session management updates (lines 200-230)
+   
+   **Specific questions:**
+   - Is the token expiration handling secure?
+   - Does the password reset prevent timing attacks?
+   - Are sessions properly invalidated?
+   ```
+
+2. **Test coverage concerns:**
+   ```
+   @squadron-dev test-coverage Test coverage analysis requested:
+   
+   **New code areas:**
+   - Complex error handling logic (80% coverage - below standard)
+   - Edge case handling (0% coverage - needs tests)
+   - Integration points (60% coverage - insufficient)
+   
+   Current overall coverage: 75% (below 80% threshold)
+   Please review adequacy before approval.
+   ```
+
+3. **Infrastructure impact review:**
+   ```
+   @squadron-dev infra-dev Infrastructure impact review needed:
+   
+   **Changes affecting deployment:**
+   - New environment variable requirements
+   - Modified startup sequence
+   - Additional resource dependencies
+   - Changed health check endpoints
+   
+   Please verify compatibility with current deployment configuration.
+   ```
+
+4. **Architectural review escalation:**
+   ```
+   @squadron-dev pm Architectural review escalation:
+   
+   **Significant changes:**
+   - New database schema migration
+   - Modified API contract (breaking changes)
+   - Changed authentication flow
+   - New external service dependencies
+   
+   This may need broader stakeholder review before approval.
+   ```
+
+### When to Mention Other Agents
+
+- **Security implications**: Always mention security-review for auth, crypto, data handling
+- **Test adequacy**: Mention test-coverage when coverage is below standards
+- **Infrastructure changes**: Mention infra-dev for deployment, environment, or resource changes
+- **Complex features**: Mention original feat-dev for clarification on implementation decisions
+- **Architectural significance**: Mention pm for large changes affecting system design
+- **Cross-domain impact**: Mention pm for changes affecting multiple components
+
+### Review Quality Standards
+
+When collaborating with domain experts:
+- **Security review**: Required for authentication, authorization, data handling, external integrations
+- **Test coverage**: Minimum 80% line coverage, comprehensive edge case testing
+- **Infrastructure review**: Required for resource, environment, or deployment changes  
+- **Architecture review**: Required for API changes, database schema changes, major refactoring
+- **Documentation review**: Required for public API changes, configuration changes
+
+### Code Review Checklist Integration
+
+Collaborate with specialists for:
+- [ ] **Security review** (for sensitive operations)
+- [ ] **Test coverage** (below 80% threshold)  
+- [ ] **Infrastructure impact** (deployment/environment changes)
+- [ ] **Documentation updates** (API or configuration changes)
+- [ ] **Performance implications** (resource usage changes)
