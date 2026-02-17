@@ -142,41 +142,63 @@ class SquadronEvent(BaseModel):
     agent_id: str | None = Field(default=None, description="Related agent, if any")
     issue_number: int | None = None
     pr_number: int | None = None
-    mentioned_roles: list[str] = Field(
-        default_factory=list,
-        description="Agent roles mentioned in the comment body (e.g. ['pm', 'feat-dev'])",
+    command: ParsedCommand | None = Field(
+        default=None,
+        description="Parsed command from @squadron-dev syntax (help or agent routing)",
     )
     data: dict = Field(default_factory=dict, description="Event-specific data")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ── Mention Parsing ──────────────────────────────────────────────────────────
+# ── Command Parsing ──────────────────────────────────────────────────────────
 
-# Matches @role or /role at word boundaries.  Role names may contain
-# letters, digits, and hyphens (e.g. feat-dev, pr-review, docs-dev).
-_MENTION_RE = re.compile(r"(?:^|(?<=\s))[@/]([\w][\w-]*)", re.MULTILINE)
+# The bot mention prefix. Hardcoded to avoid pinging random GitHub users.
+# The GitHub org 'squadron-dev' is owned by the project.
+BOT_MENTION = "squadron-dev"
+
+# Matches @squadron-dev <agent>: <message> syntax
+# Groups: (1) agent name, (2) message
+_COMMAND_RE = re.compile(
+    rf"@{BOT_MENTION}\s+([\w][\w-]*):\s*(.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Matches @squadron-dev help (case-insensitive)
+_HELP_RE = re.compile(
+    rf"@{BOT_MENTION}\s+help\b",
+    re.IGNORECASE,
+)
 
 
-def parse_mentions(text: str, known_roles: set[str]) -> list[str]:
-    """Extract agent role mentions from a comment body.
+class ParsedCommand(BaseModel):
+    """Result of parsing a comment for squadron commands."""
 
-    Supports two mention styles:
-    - ``@role`` — e.g. ``@pm``, ``@feat-dev``
-    - ``/role`` — e.g. ``/pm``, ``/feat-dev``
+    is_help: bool = False
+    agent_name: str | None = None
+    message: str | None = None
 
-    Only returns roles that exist in *known_roles* to avoid false positives
-    (e.g. ``@someone-random`` is ignored).
 
-    Returns a deduplicated list in the order first seen.
+def parse_command(text: str) -> ParsedCommand | None:
+    """Parse a comment for squadron command syntax.
+
+    Supports:
+    - ``@squadron-dev help`` — returns ParsedCommand(is_help=True)
+    - ``@squadron-dev <agent>: <message>`` — returns ParsedCommand with agent_name and message
+
+    Returns None if the comment doesn't match any command syntax.
     """
     if not text:
-        return []
+        return None
 
-    seen: set[str] = set()
-    result: list[str] = []
-    for match in _MENTION_RE.finditer(text):
-        role = match.group(1).lower()
-        if role in known_roles and role not in seen:
-            seen.add(role)
-            result.append(role)
-    return result
+    # Check for help command first
+    if _HELP_RE.search(text):
+        return ParsedCommand(is_help=True)
+
+    # Check for agent command
+    match = _COMMAND_RE.search(text)
+    if match:
+        agent_name = match.group(1).lower()
+        message = match.group(2).strip()
+        return ParsedCommand(agent_name=agent_name, message=message)
+
+    return None

@@ -1,6 +1,7 @@
 ---
 name: pr-review
 display_name: PR Reviewer
+emoji: "👀"
 description: >
   Reviews code changes for correctness, quality, test coverage, and
   adherence to project standards. Provides structured review feedback
@@ -60,10 +61,12 @@ Review PR #{pr_number} and provide a thorough code review.
 
 ## Communication Style
 
-Review summary should be structured:
+All your comments are automatically prefixed with your signature. Review summary should be structured:
 
 ```
-[squadron:pr-review] **Review of PR #{pr_number}**
+👀 **PR Reviewer**
+
+**Review of PR #{pr_number}**
 
 **Overall:** Approve / Changes requested / Questions
 

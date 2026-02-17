@@ -219,6 +219,7 @@ Branch: `{branch_name}`, base: `{base_branch}`.
 | `name` | `CustomAgentConfig.name` | Agent identifier |
 | `display_name` | `CustomAgentConfig.display_name` | Human-readable name |
 | `description` | `CustomAgentConfig.description` | What the agent does |
+| `emoji` | *(Squadron extension)* | Emoji prefix for comments (default: 🤖) |
 | `infer` | `CustomAgentConfig.infer` | Whether SDK infers when to delegate |
 | `tools` | `CustomAgentConfig.tools` | Available tool names |
 | `subagents` | *(Squadron extension)* | Names of child agents |
@@ -246,6 +247,60 @@ CREATED → ACTIVE → SLEEPING → ACTIVE → COMPLETED
 | `COMPLETED` | Work done, PR merged, resources freed |
 | `ESCALATED` | Circuit breaker tripped or unhandled error |
 | `FAILED` | Lost state on restart — requires human re-trigger |
+
+## Interacting with Agents
+
+Users and agents can route work to specific agents using the `@squadron-dev` command syntax in issue or PR comments.
+
+### Command Syntax
+
+```
+@squadron-dev <agent>: <message>
+```
+
+**Examples:**
+
+```
+@squadron-dev pm: please triage this issue
+@squadron-dev feat-dev: implement the feature described above
+@squadron-dev pr-review: please review this PR
+```
+
+### Help Command
+
+To see all available agents:
+
+```
+@squadron-dev help
+```
+
+This posts a table with agent names, descriptions, and available tools.
+
+### Agent Responses
+
+Agent comments are automatically prefixed with an emoji and display name signature:
+
+```
+🎯 **Project Manager**
+
+**Triage complete**
+
+- **Type:** feature
+- **Priority:** medium
+- **Assignment:** feat-dev agent (auto-spawned via label)
+```
+
+### Available Agents
+
+| Agent | Description |
+|-------|-------------|
+| `pm` | Central coordinator — triages issues, assigns work |
+| `feat-dev` | Implements features — writes code, tests, opens PRs |
+| `bug-fix` | Diagnoses and fixes bugs with regression tests |
+| `pr-review` | Reviews PRs for code quality |
+| `security-review` | Reviews PRs for security vulnerabilities |
+| `docs-dev` | Writes and updates documentation |
+| `test-coverage` | Reviews test coverage adequacy |
 
 ## Tools
 

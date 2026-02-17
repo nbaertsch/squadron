@@ -63,6 +63,7 @@ class AgentManager:
             owner=config.project.owner,
             repo=config.project.repo,
             config=config,
+            agent_definitions=agent_definitions,
             pre_sleep_hook=self._wip_commit_and_push,
         )
 
@@ -104,8 +105,8 @@ class AgentManager:
         # that appear in agent_roles.triggers
         self._register_trigger_handlers()
 
-        # Register mention-based routing for comment events (Layer 2)
-        self.router.on(SquadronEventType.ISSUE_COMMENT, self._handle_mention_routing)
+        # Register command-based routing for comment events (Layer 2)
+        self.router.on(SquadronEventType.ISSUE_COMMENT, self._handle_command_routing)
 
         # Register lifecycle handler for issue close (unblocking)
         self.router.on(SquadronEventType.ISSUE_CLOSED, self._handle_issue_closed)
@@ -424,7 +425,7 @@ class AgentManager:
                         self.config.project.owner,
                         self.config.project.repo,
                         agent.issue_number,
-                        f"**[squadron:{agent.role}]** {reason} Task complete.",
+                        f"{self._agent_signature(agent.role)}{reason} Task complete.",
                     )
                 except Exception:
                     logger.debug("Failed to post completion comment for %s", agent.agent_id)
@@ -495,7 +496,7 @@ class AgentManager:
                         self.config.project.owner,
                         self.config.project.repo,
                         agent.issue_number,
-                        f"**[squadron:{agent.role}]** PR #{target_pr} opened. "
+                        f"{self._agent_signature(agent.role)}PR #{target_pr} opened. "
                         "Going to sleep while waiting for review feedback.",
                     )
                 except Exception:
@@ -1297,7 +1298,7 @@ class AgentManager:
                     self.config.project.owner,
                     self.config.project.repo,
                     agent.issue_number,
-                    f"**[squadron:{agent.role}]** ⚠️ **Agent timed out** — exceeded maximum "
+                    f"{self._agent_signature(agent.role)}⚠️ **Agent timed out** — exceeded maximum "
                     f"active duration ({max_seconds}s). Escalating to human.\n\n"
                     f"Agent `{agent_id}` has been stopped. Branch `{agent.branch}` "
                     f"is preserved for manual pickup.",
@@ -1634,14 +1635,14 @@ class AgentManager:
         match = re.search(r"(?:closes|fixes|resolves)\s+#(\d+)", body, re.IGNORECASE)
         return int(match.group(1)) if match else None
 
-    # ── Mention-Based Routing (Layer 2) ──────────────────────────────────
+    # ── Command-Based Routing (Layer 2) ──────────────────────────────────
 
     def _get_sender_agent_role(self, event: SquadronEvent) -> str | None:
         """Determine if the comment sender is a squadron agent, and return its role.
 
         Uses the bot_username from config to detect bot-authored comments,
-        then checks the comment prefix (``[squadron:role]``) to identify
-        which agent role posted it.  Returns ``None`` for human senders.
+        then extracts role from the emoji + display_name signature format.
+        Returns ``None`` for human senders.
         """
         import re as _re
 
@@ -1658,89 +1659,158 @@ class AgentManager:
         if not is_bot:
             return None
 
-        # Extract role from comment body prefix: [squadron:role]
+        # Extract role from comment body — match display_name against known agents
         body = comment_data.get("body", "")
-        match = _re.match(r"\*?\*?\[squadron[:\s]*(\S+?)\]", body)
-        if match:
-            return match.group(1).lower()
+
+        # Try to match emoji + **Display Name** pattern at start
+        for role_name, agent_def in self.agent_definitions.items():
+            display_name = agent_def.display_name or role_name
+            emoji = agent_def.emoji
+            # Match pattern like "🎯 **Project Manager**" or just "**Project Manager**"
+            pattern = rf"^{_re.escape(emoji)}?\s*\*\*{_re.escape(display_name)}\*\*"
+            if _re.match(pattern, body, _re.IGNORECASE):
+                return role_name
 
         return None
 
-    async def _handle_mention_routing(self, event: SquadronEvent) -> None:
-        """Route comment events based on @role / /role mentions.
+    async def _handle_command_routing(self, event: SquadronEvent) -> None:
+        """Route comment events based on @squadron-dev commands.
 
-        This is Layer 2 routing — conversational, mention-based dispatch:
+        This is Layer 2 routing — command-based dispatch:
 
-        1. Parse ``@role`` or ``/role`` mentions from the comment body
-           (already populated on ``event.mentioned_roles`` by the router).
-        2. Apply self-loop guard: if the comment was posted by a squadron
-           agent of role X, filter out role X from the mention list.  This
-           prevents the PM from re-triggering itself when it posts a comment
-           mentioning ``@pm``, while still allowing PM to trigger ``@feat-dev``.
-        3. For each mentioned role:
-           - Ephemeral roles → spawn a new agent
-           - Persistent roles with a SLEEPING agent for this issue → wake it
-           - Persistent roles with an ACTIVE agent → deliver event to inbox
-           - Persistent roles with no agent → spawn a new one
+        1. Parse ``@squadron-dev <agent>: <message>`` or ``@squadron-dev help``
+           from the comment body (already populated on ``event.command``).
+        2. Handle help command: post markdown table of available agents.
+        3. Handle agent command: validate agent exists and route accordingly.
+        4. Apply self-loop guard: if the comment was posted by a squadron
+           agent of role X, don't let it re-trigger itself.
 
-        Comments with no role mentions are silently ignored.
+        Comments without @squadron-dev commands are silently ignored.
         """
-        if not event.mentioned_roles:
+        if not event.command:
             logger.debug(
-                "Comment on issue #%s has no role mentions — skipping",
+                "Comment on issue #%s has no @squadron-dev command — skipping",
                 event.issue_number,
             )
             return
 
         if event.issue_number is None:
-            logger.warning("Comment event has no issue_number — skipping mention routing")
+            logger.warning("Comment event has no issue_number — skipping command routing")
+            return
+
+        # Handle help command
+        if event.command.is_help:
+            await self._handle_help_command(event)
+            return
+
+        # Handle agent routing command
+        agent_name = event.command.agent_name
+        if not agent_name:
+            logger.warning("Command parsed but no agent_name — skipping")
             return
 
         # Self-loop guard: determine which role (if any) posted this comment
         sender_role = self._get_sender_agent_role(event)
-
-        for role_name in event.mentioned_roles:
-            # Self-loop guard: skip if the bot posted this comment as this role
-            if sender_role and sender_role == role_name:
-                logger.info(
-                    "Self-loop guard: skipping @%s mention (comment authored by same role)",
-                    role_name,
-                )
-                continue
-
-            role_config = self.config.agent_roles.get(role_name)
-            if not role_config:
-                logger.debug("Mentioned role @%s not in config — ignoring", role_name)
-                continue
-
+        if sender_role and sender_role == agent_name:
             logger.info(
-                "Mention routing: @%s mentioned on issue #%d (sender_role=%s)",
-                role_name,
-                event.issue_number,
-                sender_role or "human",
+                "Self-loop guard: skipping @squadron-dev %s command (posted by same agent)",
+                agent_name,
             )
+            return
 
-            if role_config.is_ephemeral:
-                # Ephemeral roles: always spawn a new agent
-                await self._mention_spawn(role_name, role_config, event)
+        # Validate agent exists in config (routable agents only)
+        role_config = self.config.agent_roles.get(agent_name)
+        if not role_config:
+            await self._post_unknown_agent_error(event, agent_name)
+            return
+
+        logger.info(
+            "Command routing: @squadron-dev %s: on issue #%d (sender_role=%s)",
+            agent_name,
+            event.issue_number,
+            sender_role or "human",
+        )
+
+        if role_config.is_ephemeral:
+            await self._command_spawn(agent_name, role_config, event)
+        else:
+            await self._command_wake_or_spawn(agent_name, role_config, event)
+
+    async def _handle_help_command(self, event: SquadronEvent) -> None:
+        """Handle @squadron-dev help — post markdown table of available agents."""
+        assert event.issue_number is not None
+
+        lines = ["📋 **Available Agents**", ""]
+        lines.append("| Agent | Description | Tools |")
+        lines.append("|-------|-------------|-------|")
+
+        # Only list agents that are routable (defined in config.yaml agent_roles)
+        for role_name in sorted(self.config.agent_roles.keys()):
+            agent_def = self.agent_definitions.get(role_name)
+            if agent_def:
+                description = agent_def.description or "No description"
+                # Truncate long descriptions for table display
+                if len(description) > 80:
+                    description = description[:77] + "..."
+                # Clean up multiline descriptions
+                description = " ".join(description.split())
+                tools = ", ".join(agent_def.tools or []) or "default"
+                lines.append(f"| `{role_name}` | {description} | {tools} |")
             else:
-                # Persistent roles: wake, deliver, or spawn
-                await self._mention_wake_or_spawn(role_name, role_config, event)
+                lines.append(f"| `{role_name}` | *(definition not found)* | — |")
 
-    async def _mention_spawn(
+        lines.append("")
+        lines.append("**Usage:** `@squadron-dev <agent>: <your message>`")
+        lines.append("")
+        lines.append("**Example:** `@squadron-dev pm: triage this issue`")
+
+        await self.github.comment_on_issue(
+            self.config.project.owner,
+            self.config.project.repo,
+            event.issue_number,
+            "\n".join(lines),
+        )
+        logger.info("Posted help response on issue #%d", event.issue_number)
+
+    async def _post_unknown_agent_error(self, event: SquadronEvent, agent_name: str) -> None:
+        """Post error message when unknown agent is requested."""
+        assert event.issue_number is not None
+
+        available = sorted(self.config.agent_roles.keys())
+        available_str = ", ".join(f"`{a}`" for a in available)
+
+        message = (
+            f"❌ **Unknown agent:** `{agent_name}`\n\n"
+            f"**Available agents:** {available_str}\n\n"
+            f"Use `@squadron-dev help` to see agent descriptions."
+        )
+
+        await self.github.comment_on_issue(
+            self.config.project.owner,
+            self.config.project.repo,
+            event.issue_number,
+            message,
+        )
+        logger.info(
+            "Posted unknown agent error for '%s' on issue #%d",
+            agent_name,
+            event.issue_number,
+        )
+
+    async def _command_spawn(
         self,
         role_name: str,
         role_config: Any,
         event: SquadronEvent,
     ) -> None:
-        """Spawn an ephemeral agent via mention routing."""
+        """Spawn an ephemeral agent via command routing."""
         # Singleton guard — same as config triggers
         if role_config.singleton:
             all_active = await self.registry.get_all_active_agents()
             active_of_role = [a for a in all_active if a.role == role_name]
             if active_of_role:
                 logger.info(
-                    "Singleton role %s already has active agent %s — skipping mention spawn",
+                    "Singleton role %s already has active agent %s — skipping command spawn",
                     role_name,
                     active_of_role[0].agent_id,
                 )
@@ -1748,7 +1818,7 @@ class AgentManager:
 
         assert event.issue_number is not None
         logger.info(
-            "Mention spawn: creating %s for issue #%d",
+            "Command spawn: creating %s for issue #%d",
             role_name,
             event.issue_number,
         )
@@ -1756,13 +1826,13 @@ class AgentManager:
         if record:
             self.last_spawn_time = datetime.now(timezone.utc).isoformat()
 
-    async def _mention_wake_or_spawn(
+    async def _command_wake_or_spawn(
         self,
         role_name: str,
         role_config: Any,
         event: SquadronEvent,
     ) -> None:
-        """Handle mention of a persistent role: wake if sleeping, deliver if active, spawn if new."""
+        """Handle command to a persistent role: wake if sleeping, deliver if active, spawn if new."""
         assert event.issue_number is not None
 
         # Look for existing agents of this role for this issue
@@ -1773,17 +1843,17 @@ class AgentManager:
             agent = role_agents[0]  # most recent
 
             if agent.status == AgentStatus.SLEEPING:
-                # Wake the sleeping agent with this comment as context
+                # Wake the sleeping agent with this command as context
                 wake_event = SquadronEvent(
                     event_type=SquadronEventType.WAKE_AGENT,
                     issue_number=event.issue_number,
                     pr_number=event.pr_number,
                     agent_id=agent.agent_id,
-                    mentioned_roles=event.mentioned_roles,
+                    command=event.command,
                     data=event.data,
                 )
                 logger.info(
-                    "Mention wake: @%s → waking %s on issue #%d",
+                    "Command wake: %s → waking %s on issue #%d",
                     role_name,
                     agent.agent_id,
                     event.issue_number,
@@ -1796,37 +1866,37 @@ class AgentManager:
                 if inbox is not None:
                     await inbox.put(event)
                     logger.info(
-                        "Mention deliver: @%s → queued event for active agent %s",
+                        "Command deliver: %s → queued event for active agent %s",
                         role_name,
                         agent.agent_id,
                     )
                 else:
                     logger.warning(
-                        "Mention deliver: @%s → agent %s is ACTIVE but has no inbox",
+                        "Command deliver: %s → agent %s is ACTIVE but has no inbox",
                         role_name,
                         agent.agent_id,
                     )
             else:
                 logger.debug(
-                    "Mention: @%s → agent %s is in terminal state %s — spawning new",
+                    "Command: %s → agent %s is in terminal state %s — spawning new",
                     role_name,
                     agent.agent_id,
                     agent.status,
                 )
-                await self._mention_spawn_persistent(role_name, event)
+                await self._command_spawn_persistent(role_name, event)
         else:
             # No agent exists for this role + issue → spawn
-            await self._mention_spawn_persistent(role_name, event)
+            await self._command_spawn_persistent(role_name, event)
 
-    async def _mention_spawn_persistent(
+    async def _command_spawn_persistent(
         self,
         role_name: str,
         event: SquadronEvent,
     ) -> None:
-        """Spawn a new persistent agent via mention routing."""
+        """Spawn a new persistent agent via command routing."""
         assert event.issue_number is not None
         logger.info(
-            "Mention spawn (persistent): creating %s for issue #%d",
+            "Command spawn (persistent): creating %s for issue #%d",
             role_name,
             event.issue_number,
         )
@@ -1835,6 +1905,21 @@ class AgentManager:
             self.last_spawn_time = datetime.now(timezone.utc).isoformat()
 
     # ── Helpers ──────────────────────────────────────────────────────────
+
+    def _agent_signature(self, role: str) -> str:
+        """Build the agent signature prefix: emoji + display_name on its own line.
+
+        Format: "🎯 **Project Manager**\n\n"
+        Falls back to "🤖 **role**\n\n" if agent definition not found.
+        """
+        agent_def = self.agent_definitions.get(role)
+        if agent_def:
+            emoji = agent_def.emoji
+            display_name = agent_def.display_name or role
+        else:
+            emoji = "🤖"
+            display_name = role
+        return f"{emoji} **{display_name}**\n\n"
 
     async def _build_stateless_prompt(
         self,

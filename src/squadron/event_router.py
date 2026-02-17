@@ -6,15 +6,16 @@ Runs as an async consumer loop.  Two routing layers:
   PR opened/closed/merged, issue labeled/closed/reopened, push, etc.
   These fire based on ``config.yaml agent_roles.triggers``.
 
-**Layer 2 — Conversational routing** (mention-based):
-  ``issue_comment.created`` events are parsed for ``@role`` / ``/role``
-  mentions.  Only the mentioned roles are invoked — comments without
-  role mentions are ignored.  A self-loop guard prevents an agent from
-  re-triggering its own role via its own comments.
+**Layer 2 — Command-based routing**:
+  ``issue_comment.created`` events are parsed for ``@squadron-dev`` commands:
+  - ``@squadron-dev help`` — lists available agents
+  - ``@squadron-dev <agent>: <message>`` — routes to specific agent
+
+  A self-loop guard prevents an agent from re-triggering itself.
 
 Other responsibilities:
 - Webhook deduplication (X-GitHub-Delivery UUID)
-- Mention parsing (populated on ``SquadronEvent.mentioned_roles``)
+- Command parsing (populated on ``SquadronEvent.command``)
 
 See event-routing.md, AD-013 for design details.
 """
@@ -26,7 +27,13 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 
-from squadron.models import GitHubEvent, SquadronEvent, SquadronEventType, parse_mentions
+from squadron.models import (
+    GitHubEvent,
+    ParsedCommand,
+    SquadronEvent,
+    SquadronEventType,
+    parse_command,
+)
 
 if TYPE_CHECKING:
     from squadron.config import SquadronConfig
@@ -122,10 +129,10 @@ class EventRouter:
         """Route a single GitHub event.
 
         Structural events (PR, label, issue lifecycle) are routed via
-        config-driven triggers.  Comment events are routed via mention
-        parsing — only comments that ``@role`` or ``/role``-mention a
-        known agent role are dispatched.  A self-loop guard in the
-        AgentManager prevents an agent from re-triggering itself.
+        config-driven triggers.  Comment events are routed via command
+        parsing — only comments with ``@squadron-dev <agent>: <message>``
+        or ``@squadron-dev help`` syntax are dispatched.  A self-loop
+        guard in the AgentManager prevents an agent from re-triggering itself.
         """
         # 1. Webhook deduplication
         if await self.registry.has_seen_event(event.delivery_id):
@@ -150,8 +157,8 @@ class EventRouter:
     ) -> SquadronEvent:
         """Convert a GitHub event to an internal SquadronEvent.
 
-        For comment events, parses ``@role`` / ``/role`` mentions from
-        the comment body and populates ``mentioned_roles``.
+        For comment events, parses ``@squadron-dev <agent>: <message>``
+        command syntax and populates ``command``.
         """
         issue_number = None
         pr_number = None
@@ -164,19 +171,18 @@ class EventRouter:
         if event.payload.get("issue", {}).get("pull_request"):
             pr_number = event.payload["issue"]["number"]
 
-        # Parse @role / /role mentions from comment body
-        mentioned_roles: list[str] = []
+        # Parse @squadron-dev command syntax from comment body
+        command: ParsedCommand | None = None
         if event_type == SquadronEventType.ISSUE_COMMENT:
             comment_body = (event.comment or {}).get("body", "")
-            known_roles = set(self.config.agent_roles.keys())
-            mentioned_roles = parse_mentions(comment_body, known_roles)
+            command = parse_command(comment_body)
 
         return SquadronEvent(
             event_type=event_type,
             source_delivery_id=event.delivery_id,
             issue_number=issue_number,
             pr_number=pr_number,
-            mentioned_roles=mentioned_roles,
+            command=command,
             data={
                 "action": event.action,
                 "sender": event.sender,

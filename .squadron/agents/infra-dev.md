@@ -1,6 +1,7 @@
 ---
 name: infra-dev
 display_name: Infrastructure Developer
+emoji: "🏗️"
 description: >
   Works on CI/CD pipelines, deployment configurations, Dockerfiles, Bicep/IaC
   templates, and other infrastructure concerns. Opens PRs with infra changes.

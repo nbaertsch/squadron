@@ -593,7 +593,7 @@ class TestCleanupAgent:
 
 
 class TestCommentOnIssue:
-    async def test_posts_comment_with_role_prefix(self, registry: AgentRegistry):
+    async def test_posts_comment_with_agent_signature(self, registry: AgentRegistry):
         agent = _make_agent()
         await registry.create_agent(agent)
         github = _make_github_mock()
@@ -609,8 +609,10 @@ class TestCommentOnIssue:
         assert "Posted comment" in result
         github.comment_on_issue.assert_called_once()
         call_args = github.comment_on_issue.call_args
-        # Should include role prefix
-        assert f"[squadron:{agent.role}]" in call_args[1].get("body", call_args[0][-1])
+        body = call_args[1].get("body", call_args[0][-1])
+        # Should include emoji + display_name signature (or default 🤖 **role**)
+        assert "🤖 **" in body or "**" in body
+        assert agent.role in body
 
 
 class TestSubmitPRReview:

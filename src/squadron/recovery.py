@@ -72,7 +72,7 @@ async def recover_on_startup(
                         config.project.owner,
                         config.project.repo,
                         agent.issue_number,
-                        f"**[squadron:{agent.role}]** ⚠️ Agent lost due to server restart. "
+                        f"🤖 **{agent.role}**\n\n⚠️ Agent lost due to server restart. "
                         f"Status changed from {status.value} → failed. "
                         "A human may need to re-trigger this work.",
                     )

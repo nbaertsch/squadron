@@ -320,14 +320,17 @@ class TestCheckRegistry:
 
 
 class TestCommentOnIssue:
-    async def test_posts_prefixed_comment(self, tools, agent):
+    async def test_posts_comment_with_agent_signature(self, tools, agent):
         params = CommentOnIssueParams(issue_number=42, body="Working on this now")
         result = await tools.comment_on_issue("test-agent-1", params)
 
         tools.github.comment_on_issue.assert_called()
         call_args = tools.github.comment_on_issue.call_args[0]
-        assert "squadron:feat-dev" in call_args[3]
-        assert "Working on this now" in call_args[3]
+        body = call_args[3]
+        # Should include emoji + display_name signature (or default 🤖 **role**)
+        assert "🤖 **" in body or "**" in body
+        assert "feat-dev" in body
+        assert "Working on this now" in body
         assert "#42" in result
 
 

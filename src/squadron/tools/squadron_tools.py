@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 if TYPE_CHECKING:
     import asyncio
 
-    from squadron.config import SquadronConfig
+    from squadron.config import AgentDefinition, SquadronConfig
     from squadron.github_client import GitHubClient
     from squadron.models import AgentRecord
     from squadron.registry import AgentRegistry
@@ -230,6 +230,7 @@ class SquadronTools:
         repo: str,
         *,
         config: SquadronConfig | None = None,
+        agent_definitions: dict[str, AgentDefinition] | None = None,
         pre_sleep_hook: Callable[[AgentRecord], Awaitable[None]] | None = None,
     ):
         self.registry = registry
@@ -238,7 +239,23 @@ class SquadronTools:
         self.owner = owner
         self.repo = repo
         self.config = config
+        self.agent_definitions = agent_definitions or {}
         self._pre_sleep_hook = pre_sleep_hook
+
+    def _agent_signature(self, role: str) -> str:
+        """Build the agent signature prefix: emoji + display_name on its own line.
+
+        Format: "🎯 **Project Manager**\n\n"
+        Falls back to "🤖 **role**\n\n" if agent definition not found.
+        """
+        agent_def = self.agent_definitions.get(role)
+        if agent_def:
+            emoji = agent_def.emoji
+            display_name = agent_def.display_name or role
+        else:
+            emoji = "🤖"
+            display_name = role
+        return f"{emoji} **{display_name}**\n\n"
 
     # ── Framework Tools (agent lifecycle) ────────────────────────────────
 
@@ -297,7 +314,7 @@ class SquadronTools:
                 self.owner,
                 self.repo,
                 agent.issue_number,
-                f"**[squadron:{agent.role}]** Blocked by #{params.blocker_issue}: {params.reason}\n\nGoing to sleep until the blocker is resolved.",
+                f"{self._agent_signature(agent.role)}Blocked by #{params.blocker_issue}: {params.reason}\n\nGoing to sleep until the blocker is resolved.",
             )
 
         return (
@@ -324,7 +341,7 @@ class SquadronTools:
                 self.owner,
                 self.repo,
                 agent.issue_number,
-                f"**[squadron:{agent.role}]** Task complete: {params.summary}",
+                f"{self._agent_signature(agent.role)}Task complete: {params.summary}",
             )
 
         return (
@@ -380,7 +397,7 @@ class SquadronTools:
                 self.owner,
                 self.repo,
                 agent.issue_number,
-                f"**[squadron:{agent.role}]** Discovered a blocker — created #{new_issue_number}: {params.title}\n\nGoing to sleep until it's resolved.",
+                f"{self._agent_signature(agent.role)}Discovered a blocker — created #{new_issue_number}: {params.title}\n\nGoing to sleep until it's resolved.",
             )
 
         return (
@@ -416,7 +433,7 @@ class SquadronTools:
                 self.repo,
                 agent.issue_number,
                 (
-                    f"**[squadron:{agent.role}]** ⚠️ **Escalation — needs human attention**\n\n"
+                    f"{self._agent_signature(agent.role)}⚠️ **Escalation — needs human attention**\n\n"
                     f"**Category:** {params.category}\n"
                     f"**Reason:** {params.reason}\n\n"
                     "This task has been escalated and the agent has stopped. "
@@ -674,9 +691,9 @@ class SquadronTools:
     # ── Shared Tools ─────────────────────────────────────────────────────
 
     async def comment_on_issue(self, agent_id: str, params: CommentOnIssueParams) -> str:
-        """Post a comment on a GitHub issue with role prefix."""
+        """Post a comment on a GitHub issue with agent signature."""
         agent = await self.registry.get_agent(agent_id)
-        prefix = f"**[squadron:{agent.role}]** " if agent else ""
+        prefix = self._agent_signature(agent.role) if agent else ""
 
         await self.github.comment_on_issue(
             self.owner,

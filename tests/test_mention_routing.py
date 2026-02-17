@@ -1,11 +1,13 @@
-"""Tests for mention-based comment routing (Layer 2).
+"""Tests for command-based comment routing (Layer 2).
 
 Validates:
-- parse_mentions() extracts @role and /role from comment text
+- parse_command() extracts @squadron-dev <agent>: <message> syntax
+- parse_command() detects @squadron-dev help
 - Self-loop guard prevents agents from re-triggering themselves
-- Mention routing spawns, wakes, or delivers events correctly
-- Comments without mentions are silently ignored
-- End-to-end: comment event → EventRouter → AgentManager mention handler
+- Command routing spawns, wakes, or delivers events correctly
+- Help command posts agent list
+- Unknown agent error handling
+- Comments without @squadron-dev commands are silently ignored
 """
 
 from __future__ import annotations
@@ -32,79 +34,76 @@ from squadron.models import (
     GitHubEvent,
     SquadronEvent,
     SquadronEventType,
-    parse_mentions,
+    parse_command,
 )
 from squadron.registry import AgentRegistry
 
 
-# ── parse_mentions() unit tests ──────────────────────────────────────────────
+# ── parse_command() unit tests ──────────────────────────────────────────────
 
 
-class TestParseMentions:
-    """Unit tests for parse_mentions()."""
+class TestParseCommand:
+    """Unit tests for parse_command()."""
 
-    KNOWN_ROLES = {"pm", "feat-dev", "bug-fix", "pr-review", "docs-dev", "security-review"}
+    def test_agent_command_basic(self):
+        result = parse_command("@squadron-dev pm: please triage this")
+        assert result is not None
+        assert result.is_help is False
+        assert result.agent_name == "pm"
+        assert result.message == "please triage this"
 
-    def test_at_mention_single(self):
-        assert parse_mentions("Hey @pm can you triage this?", self.KNOWN_ROLES) == ["pm"]
+    def test_agent_command_with_hyphen(self):
+        result = parse_command("@squadron-dev feat-dev: implement the feature")
+        assert result is not None
+        assert result.agent_name == "feat-dev"
+        assert result.message == "implement the feature"
 
-    def test_slash_mention_single(self):
-        assert parse_mentions("/pm please triage", self.KNOWN_ROLES) == ["pm"]
+    def test_help_command(self):
+        result = parse_command("@squadron-dev help")
+        assert result is not None
+        assert result.is_help is True
+        assert result.agent_name is None
 
-    def test_multiple_mentions(self):
-        text = "@pm please assign this to @feat-dev for implementation"
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["pm", "feat-dev"]
+    def test_help_command_case_insensitive(self):
+        result = parse_command("@Squadron-Dev HELP")
+        assert result is not None
+        assert result.is_help is True
 
-    def test_mixed_at_and_slash(self):
-        text = "@pm and /docs-dev need to look at this"
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["pm", "docs-dev"]
+    def test_no_command(self):
+        result = parse_command("Just a regular comment")
+        assert result is None
 
-    def test_unknown_role_ignored(self):
-        text = "@random-person please check @pm"
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["pm"]
+    def test_empty_string(self):
+        result = parse_command("")
+        assert result is None
 
-    def test_no_mentions(self):
-        assert parse_mentions("Just a regular comment", self.KNOWN_ROLES) == []
+    def test_command_case_insensitive(self):
+        result = parse_command("@SQUADRON-DEV PM: do stuff")
+        assert result is not None
+        assert result.agent_name == "pm"
 
-    def test_empty_text(self):
-        assert parse_mentions("", self.KNOWN_ROLES) == []
+    def test_command_multiline_message(self):
+        result = parse_command("@squadron-dev pm: triage this\n\nMore details here")
+        assert result is not None
+        assert result.agent_name == "pm"
+        assert "triage this" in result.message
+        assert "More details here" in result.message
 
-    def test_none_text(self):
-        # parse_mentions handles empty strings; None would be a caller error
-        # but we guard for it
-        assert parse_mentions("", set()) == []
+    def test_command_in_middle_of_text(self):
+        result = parse_command("Hey team, @squadron-dev pm: can you look at this?")
+        assert result is not None
+        assert result.agent_name == "pm"
 
-    def test_deduplication(self):
-        text = "@pm do this. Also @pm check that."
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["pm"]
+    def test_mention_without_colon_not_matched(self):
+        """@squadron-dev agent without colon should not match."""
+        result = parse_command("@squadron-dev pm please help")
+        assert result is None
 
-    def test_hyphenated_roles(self):
-        text = "@feat-dev and @security-review"
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["feat-dev", "security-review"]
-
-    def test_case_insensitive(self):
-        text = "@PM please triage"
-        # Role matching is case-insensitive (lowered)
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["pm"]
-
-    def test_mention_at_line_start(self):
-        text = "@feat-dev\nPlease implement this feature"
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["feat-dev"]
-
-    def test_mention_in_code_block_still_matches(self):
-        # We parse naively — code blocks are not excluded.
-        # This is acceptable: users rarely put @mentions in code blocks.
-        text = "```\n@pm do something\n```"
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["pm"]
-
-    def test_mention_with_punctuation_after(self):
-        text = "@pm, can you look at this? And @feat-dev."
-        assert parse_mentions(text, self.KNOWN_ROLES) == ["pm", "feat-dev"]
-
-    def test_email_address_not_matched(self):
-        # user@pm should NOT match (no word boundary before @)
-        text = "Email user@pm.com for details"
-        assert parse_mentions(text, self.KNOWN_ROLES) == []
+    def test_help_with_trailing_text(self):
+        """@squadron-dev help followed by other text still matches."""
+        result = parse_command("@squadron-dev help please show agents")
+        assert result is not None
+        assert result.is_help is True
 
 
 # ── Self-loop guard unit tests ───────────────────────────────────────────────
@@ -133,12 +132,16 @@ class TestSelfLoopGuard:
                 ),
             },
         )
+        agent_defs = {
+            "pm": MagicMock(display_name="Project Manager", emoji="🎯"),
+            "feat-dev": MagicMock(display_name="Feature Developer", emoji="👨‍💻"),
+        }
         manager = AgentManager(
             config=config,
             registry=MagicMock(),
             github=MagicMock(),
             router=MagicMock(),
-            agent_definitions={},
+            agent_definitions=agent_defs,
             repo_root=Path("/tmp"),
         )
         return manager
@@ -151,7 +154,7 @@ class TestSelfLoopGuard:
                 "payload": {
                     "comment": {
                         "user": {"login": "alice", "type": "User"},
-                        "body": "Hey @pm what's up?",
+                        "body": "@squadron-dev pm: what's up?",
                     }
                 }
             },
@@ -166,7 +169,7 @@ class TestSelfLoopGuard:
                 "payload": {
                     "comment": {
                         "user": {"login": "squadron-dev[bot]", "type": "Bot"},
-                        "body": "**[squadron:pm]** Triage complete.",
+                        "body": "🎯 **Project Manager**\n\nTriage complete.",
                     }
                 }
             },
@@ -181,7 +184,7 @@ class TestSelfLoopGuard:
                 "payload": {
                     "comment": {
                         "user": {"login": "squadron-dev[bot]", "type": "Bot"},
-                        "body": "**[squadron:feat-dev]** Working on implementation.",
+                        "body": "👨‍💻 **Feature Developer**\n\nWorking on implementation.",
                     }
                 }
             },
@@ -204,7 +207,7 @@ class TestSelfLoopGuard:
         assert manager._get_sender_agent_role(event) is None
 
 
-# ── Mention routing integration tests ────────────────────────────────────────
+# ── Command routing integration tests ────────────────────────────────────────
 
 
 @pytest_asyncio.fixture
@@ -216,8 +219,8 @@ async def registry(tmp_path):
     await reg.close()
 
 
-def _mention_config() -> SquadronConfig:
-    """Config for mention routing tests."""
+def _command_config() -> SquadronConfig:
+    """Config for command routing tests."""
     return SquadronConfig(
         project=ProjectConfig(
             name="test-project",
@@ -275,14 +278,44 @@ def _comment_event(
     )
 
 
+def _make_agent_defs():
+    """Create mock agent definitions with display_name and emoji."""
+    return {
+        "pm": MagicMock(
+            prompt="test prompt",
+            raw_content="test",
+            tools=None,
+            display_name="Project Manager",
+            emoji="🎯",
+            description="Triages issues",
+        ),
+        "feat-dev": MagicMock(
+            prompt="test",
+            raw_content="test",
+            tools=None,
+            display_name="Feature Developer",
+            emoji="👨‍💻",
+            description="Implements features",
+        ),
+        "docs-dev": MagicMock(
+            prompt="test",
+            raw_content="test",
+            tools=None,
+            display_name="Documentation Developer",
+            emoji="📝",
+            description="Writes documentation",
+        ),
+    }
+
+
 @pytest.mark.asyncio
-class TestMentionRouting:
-    """Integration tests for mention-based routing through EventRouter → AgentManager."""
+class TestCommandRouting:
+    """Integration tests for command-based routing through EventRouter → AgentManager."""
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_comment_with_pm_mention_spawns_pm(self, mock_copilot_cls, registry, tmp_path):
-        """Human @pm mention spawns an ephemeral PM agent."""
-        config = _mention_config()
+    async def test_command_with_pm_spawns_pm(self, mock_copilot_cls, registry, tmp_path):
+        """@squadron-dev pm: spawns an ephemeral PM agent."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -299,15 +332,13 @@ class TestMentionRouting:
             registry=registry,
             github=AsyncMock(),
             router=router,
-            agent_definitions={
-                "pm": MagicMock(prompt="test prompt", raw_content="test", tools=None)
-            },
+            agent_definitions=_make_agent_defs(),
             repo_root=Path(tmp_path),
         )
         await manager.start()
 
-        # Route a comment event with @pm mention
-        event = _comment_event("@pm please triage this issue", issue_number=10)
+        # Route a command event
+        event = _comment_event("@squadron-dev pm: please triage this issue", issue_number=10)
         await router._route_event(event)
 
         # PM agent should be created
@@ -319,9 +350,9 @@ class TestMentionRouting:
         await manager.stop()
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_comment_without_mention_ignored(self, mock_copilot_cls, registry, tmp_path):
-        """Comment with no role mentions does not spawn any agents."""
-        config = _mention_config()
+    async def test_comment_without_command_ignored(self, mock_copilot_cls, registry, tmp_path):
+        """Comment without @squadron-dev command does not spawn any agents."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -335,7 +366,7 @@ class TestMentionRouting:
         )
         await manager.start()
 
-        event = _comment_event("Just a regular comment, no mentions", issue_number=10)
+        event = _comment_event("Just a regular comment, no commands", issue_number=10)
         await router._route_event(event)
 
         agents = await registry.get_agents_for_issue(10)
@@ -345,8 +376,8 @@ class TestMentionRouting:
     async def test_self_loop_guard_blocks_pm_retriggering_itself(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """PM comment mentioning @pm does NOT re-trigger PM (self-loop guard)."""
-        config = _mention_config()
+        """PM posting @squadron-dev pm: does NOT re-trigger PM (self-loop guard)."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -355,14 +386,14 @@ class TestMentionRouting:
             registry=registry,
             github=AsyncMock(),
             router=router,
-            agent_definitions={},
+            agent_definitions=_make_agent_defs(),
             repo_root=Path(tmp_path),
         )
         await manager.start()
 
-        # Simulate bot-authored comment from PM role
+        # Simulate bot-authored comment from PM role with new signature format
         event = _comment_event(
-            body="**[squadron:pm]** Triage complete. @pm should follow up.",
+            body="🎯 **Project Manager**\n\nTriage complete. @squadron-dev pm: should follow up.",
             issue_number=10,
             sender_login="squadron-dev[bot]",
             sender_type="Bot",
@@ -375,11 +406,11 @@ class TestMentionRouting:
         assert len(pm_agents) == 0
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_pm_mentioning_feat_dev_spawns_feat_dev(
+    async def test_pm_commanding_feat_dev_spawns_feat_dev(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """PM comment mentioning @feat-dev DOES spawn feat-dev (cross-role allowed)."""
-        config = _mention_config()
+        """PM posting @squadron-dev feat-dev: DOES spawn feat-dev (cross-role allowed)."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -396,16 +427,14 @@ class TestMentionRouting:
             registry=registry,
             github=AsyncMock(),
             router=router,
-            agent_definitions={
-                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None)
-            },
+            agent_definitions=_make_agent_defs(),
             repo_root=Path(tmp_path),
         )
         await manager.start()
 
-        # PM posts comment mentioning @feat-dev
+        # PM posts command for feat-dev
         event = _comment_event(
-            body="**[squadron:pm]** @feat-dev please implement the feature described above.",
+            body="🎯 **Project Manager**\n\n@squadron-dev feat-dev: please implement the feature.",
             issue_number=10,
             sender_login="squadron-dev[bot]",
             sender_type="Bot",
@@ -422,11 +451,11 @@ class TestMentionRouting:
         await manager.stop()
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_mention_wakes_sleeping_persistent_agent(
+    async def test_command_wakes_sleeping_persistent_agent(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """Mentioning @feat-dev wakes a sleeping feat-dev agent for the same issue."""
-        config = _mention_config()
+        """@squadron-dev feat-dev: wakes a sleeping feat-dev agent for the same issue."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -448,9 +477,7 @@ class TestMentionRouting:
             registry=registry,
             github=AsyncMock(),
             router=router,
-            agent_definitions={
-                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None)
-            },
+            agent_definitions=_make_agent_defs(),
             repo_root=Path(tmp_path),
         )
         await manager.start()
@@ -466,9 +493,9 @@ class TestMentionRouting:
         )
         await registry.create_agent(sleeping_agent)
 
-        # Human mentions @feat-dev
+        # Human commands feat-dev
         event = _comment_event(
-            body="@feat-dev please continue working on this",
+            body="@squadron-dev feat-dev: please continue working on this",
             issue_number=10,
         )
         await router._route_event(event)
@@ -481,11 +508,11 @@ class TestMentionRouting:
         await manager.stop()
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_mention_delivers_to_active_agent_inbox(
+    async def test_command_delivers_to_active_agent_inbox(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """Mentioning @feat-dev when it's ACTIVE delivers event to its inbox."""
-        config = _mention_config()
+        """@squadron-dev feat-dev: when it's ACTIVE delivers event to its inbox."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -511,9 +538,9 @@ class TestMentionRouting:
         await registry.create_agent(active_agent)
         manager.agent_inboxes["feat-dev-issue-10"] = asyncio.Queue()
 
-        # Human mentions @feat-dev
+        # Human commands feat-dev
         event = _comment_event(
-            body="@feat-dev can you check the test results?",
+            body="@squadron-dev feat-dev: can you check the test results?",
             issue_number=10,
         )
         await router._route_event(event)
@@ -522,14 +549,15 @@ class TestMentionRouting:
         inbox = manager.agent_inboxes["feat-dev-issue-10"]
         assert not inbox.empty()
         queued_event = await inbox.get()
-        assert queued_event.mentioned_roles == ["feat-dev"]
+        assert queued_event.command is not None
+        assert queued_event.command.agent_name == "feat-dev"
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_mention_spawns_new_persistent_agent_if_none_exists(
+    async def test_command_spawns_new_persistent_agent_if_none_exists(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """Mentioning @feat-dev when no agent exists for the issue spawns a new one."""
-        config = _mention_config()
+        """@squadron-dev feat-dev: when no agent exists for the issue spawns a new one."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -546,15 +574,13 @@ class TestMentionRouting:
             registry=registry,
             github=AsyncMock(),
             router=router,
-            agent_definitions={
-                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None)
-            },
+            agent_definitions=_make_agent_defs(),
             repo_root=Path(tmp_path),
         )
         await manager.start()
 
         event = _comment_event(
-            body="@feat-dev can you implement this?",
+            body="@squadron-dev feat-dev: can you implement this?",
             issue_number=10,
         )
         await router._route_event(event)
@@ -566,93 +592,78 @@ class TestMentionRouting:
         await manager.stop()
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_slash_mention_works_same_as_at(self, mock_copilot_cls, registry, tmp_path):
-        """/pm mention works identically to @pm."""
-        config = _mention_config()
+    async def test_help_command_posts_agent_list(self, mock_copilot_cls, registry, tmp_path):
+        """@squadron-dev help posts a markdown table of available agents."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
-
-        mock_copilot = AsyncMock()
-        mock_copilot.create_session = AsyncMock(
-            return_value=MagicMock(
-                send_and_wait=AsyncMock(return_value=MagicMock(type=MagicMock(value="text"))),
-            )
-        )
-        mock_copilot_cls.return_value = mock_copilot
+        github = AsyncMock()
 
         manager = AgentManager(
             config=config,
             registry=registry,
-            github=AsyncMock(),
+            github=github,
             router=router,
-            agent_definitions={"pm": MagicMock(prompt="test", raw_content="test", tools=None)},
-            repo_root=Path(tmp_path),
-        )
-        await manager.start()
-
-        event = _comment_event("/pm triage this please", issue_number=10)
-        await router._route_event(event)
-
-        agents = await registry.get_agents_for_issue(10)
-        pm_agents = [a for a in agents if a.role == "pm"]
-        assert len(pm_agents) == 1
-
-        await manager.stop()
-
-    @patch("squadron.agent_manager.CopilotAgent")
-    async def test_multiple_mentions_spawn_multiple_agents(
-        self, mock_copilot_cls, registry, tmp_path
-    ):
-        """Comment mentioning @pm and @feat-dev spawns both agents."""
-        config = _mention_config()
-        event_queue = asyncio.Queue()
-        router = EventRouter(event_queue, registry, config)
-
-        mock_copilot = AsyncMock()
-        mock_copilot.create_session = AsyncMock(
-            return_value=MagicMock(
-                send_and_wait=AsyncMock(return_value=MagicMock(type=MagicMock(value="text"))),
-            )
-        )
-        mock_copilot_cls.return_value = mock_copilot
-
-        manager = AgentManager(
-            config=config,
-            registry=registry,
-            github=AsyncMock(),
-            router=router,
-            agent_definitions={
-                "pm": MagicMock(prompt="test", raw_content="test", tools=None),
-                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None),
-            },
+            agent_definitions=_make_agent_defs(),
             repo_root=Path(tmp_path),
         )
         await manager.start()
 
         event = _comment_event(
-            body="@pm please triage and @feat-dev start work",
+            body="@squadron-dev help",
             issue_number=10,
         )
         await router._route_event(event)
 
-        # Give background agent tasks a moment to start, then stop cleanly
-        await asyncio.sleep(0.1)
-        await manager.stop()
+        # Should have posted a comment
+        github.comment_on_issue.assert_called_once()
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "Available Agents" in body
+        assert "pm" in body.lower()
+        assert "feat-dev" in body.lower()
 
-        # Check both active AND completed agents (ephemeral PM may have
-        # already finished its one-shot run before we check)
-        active = await registry.get_agents_for_issue(10)
-        recent = await registry.get_recent_agents(limit=10)
-        roles = {a.role for a in active} | {a.role for a in recent if a.issue_number == 10}
-        assert "pm" in roles
-        assert "feat-dev" in roles
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_unknown_agent_posts_error(self, mock_copilot_cls, registry, tmp_path):
+        """@squadron-dev unknown-agent: posts an error with available agents."""
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(
+            body="@squadron-dev nonexistent-agent: do something",
+            issue_number=10,
+        )
+        await router._route_event(event)
+
+        # Should have posted an error comment
+        github.comment_on_issue.assert_called_once()
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "Unknown agent" in body
+        assert "nonexistent-agent" in body
+
+        # No agent should be spawned
+        agents = await registry.get_agents_for_issue(10)
+        assert len(agents) == 0
 
     @patch("squadron.agent_manager.CopilotAgent")
     async def test_singleton_guard_prevents_duplicate_ephemeral(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """Singleton PM: second @pm mention while first PM is active is blocked."""
-        config = _mention_config()
+        """Singleton PM: second @squadron-dev pm: while first PM is active is blocked."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -677,8 +688,8 @@ class TestMentionRouting:
         )
         await registry.create_agent(active_pm)
 
-        # Another @pm mention should be blocked by singleton guard
-        event = _comment_event("@pm triage this too", issue_number=10)
+        # Another command should be blocked by singleton guard
+        event = _comment_event("@squadron-dev pm: triage this too", issue_number=10)
         await router._route_event(event)
 
         # Only the original PM agent should exist
@@ -688,13 +699,12 @@ class TestMentionRouting:
         assert pm_agents[0].agent_id == "pm-issue-5-12345"
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_mention_respawns_after_completed_agent(
+    async def test_command_respawns_after_completed_agent(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """Issue #13 regression: mentioning @feat-dev when a COMPLETED agent exists
-        for the same role+issue should clean up the stale record and spawn fresh,
-        not crash with sqlite3.IntegrityError."""
-        config = _mention_config()
+        """Issue #13 regression: commanding @squadron-dev feat-dev: when a COMPLETED agent
+        exists for the same role+issue should clean up the stale record and spawn fresh."""
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -711,9 +721,7 @@ class TestMentionRouting:
             registry=registry,
             github=AsyncMock(),
             router=router,
-            agent_definitions={
-                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None)
-            },
+            agent_definitions=_make_agent_defs(),
             repo_root=Path(tmp_path),
         )
         await manager.start()
@@ -728,14 +736,9 @@ class TestMentionRouting:
         )
         await registry.create_agent(completed)
 
-        # Verify the stale record is in the DB
-        stale = await registry.get_agent("feat-dev-issue-12")
-        assert stale is not None
-        assert stale.status == AgentStatus.COMPLETED
-
-        # Mention @feat-dev on the same issue — should NOT crash with IntegrityError
+        # Command should respawn cleanly
         event = _comment_event(
-            body="@feat-dev please revisit this",
+            body="@squadron-dev feat-dev: please revisit this",
             issue_number=12,
         )
         await router._route_event(event)
@@ -748,77 +751,39 @@ class TestMentionRouting:
 
         await manager.stop()
 
-    @patch("squadron.agent_manager.CopilotAgent")
-    async def test_mention_respawns_after_failed_agent(self, mock_copilot_cls, registry, tmp_path):
-        """Similar to #13 but for FAILED status — stale record should be cleaned up."""
-        config = _mention_config()
-        event_queue = asyncio.Queue()
-        router = EventRouter(event_queue, registry, config)
 
-        mock_copilot = AsyncMock()
-        mock_copilot.create_session = AsyncMock(
-            return_value=MagicMock(
-                send_and_wait=AsyncMock(return_value=MagicMock(type=MagicMock(value="text"))),
-            )
-        )
-        mock_copilot_cls.return_value = mock_copilot
-
-        manager = AgentManager(
-            config=config,
-            registry=registry,
-            github=AsyncMock(),
-            router=router,
-            agent_definitions={
-                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None)
-            },
-            repo_root=Path(tmp_path),
-        )
-        await manager.start()
-
-        # Pre-create a FAILED agent
-        failed = AgentRecord(
-            agent_id="feat-dev-issue-7",
-            role="feat-dev",
-            issue_number=7,
-            session_id="squadron-feat-dev-issue-7",
-            status=AgentStatus.FAILED,
-        )
-        await registry.create_agent(failed)
-
-        # Mention should respawn cleanly
-        event = _comment_event(
-            body="@feat-dev try again please",
-            issue_number=7,
-        )
-        await router._route_event(event)
-
-        agents = await registry.get_agents_for_issue(7)
-        feat_agents = [a for a in agents if a.role == "feat-dev"]
-        assert len(feat_agents) == 1
-        assert feat_agents[0].status == AgentStatus.ACTIVE
-
-        await manager.stop()
-
-
-# ── EventRouter mention parsing tests ────────────────────────────────────────
+# ── EventRouter command parsing tests ────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-class TestEventRouterMentionParsing:
-    """Tests that EventRouter populates mentioned_roles on SquadronEvent."""
+class TestEventRouterCommandParsing:
+    """Tests that EventRouter populates command on SquadronEvent."""
 
-    async def test_comment_event_populates_mentioned_roles(self, registry):
-        config = _mention_config()
+    async def test_comment_event_populates_command(self, registry):
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
-        event = _comment_event("@pm please look at this @feat-dev", issue_number=10)
+        event = _comment_event("@squadron-dev pm: please look at this", issue_number=10)
         internal_event = router._to_squadron_event(event, SquadronEventType.ISSUE_COMMENT)
 
-        assert internal_event.mentioned_roles == ["pm", "feat-dev"]
+        assert internal_event.command is not None
+        assert internal_event.command.agent_name == "pm"
+        assert "please look at this" in internal_event.command.message
 
-    async def test_non_comment_event_has_empty_mentions(self, registry):
-        config = _mention_config()
+    async def test_help_command_detected(self, registry):
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+
+        event = _comment_event("@squadron-dev help", issue_number=10)
+        internal_event = router._to_squadron_event(event, SquadronEventType.ISSUE_COMMENT)
+
+        assert internal_event.command is not None
+        assert internal_event.command.is_help is True
+
+    async def test_non_comment_event_has_no_command(self, registry):
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
@@ -830,14 +795,14 @@ class TestEventRouterMentionParsing:
         )
         internal_event = router._to_squadron_event(event, SquadronEventType.ISSUE_OPENED)
 
-        assert internal_event.mentioned_roles == []
+        assert internal_event.command is None
 
-    async def test_comment_with_unknown_roles_ignored(self, registry):
-        config = _mention_config()
+    async def test_comment_without_command_has_no_command(self, registry):
+        config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
 
-        event = _comment_event("@unknown-agent please help", issue_number=10)
+        event = _comment_event("just a regular comment", issue_number=10)
         internal_event = router._to_squadron_event(event, SquadronEventType.ISSUE_COMMENT)
 
-        assert internal_event.mentioned_roles == []
+        assert internal_event.command is None

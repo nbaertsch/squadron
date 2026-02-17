@@ -1,6 +1,7 @@
 ---
 name: code-search
 display_name: Code Search Agent
+emoji: "🔍"
 description: >
   Searches the codebase to find relevant files, patterns, and implementations.
   Used as a subagent by feat-dev and bug-fix agents to locate code before

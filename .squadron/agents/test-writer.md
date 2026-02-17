@@ -1,6 +1,7 @@
 ---
 name: test-writer
 display_name: Test Writer Agent
+emoji: "✅"
 description: >
   Writes tests for new or existing code. Used as a subagent by feat-dev
   to ensure adequate test coverage for implementations.

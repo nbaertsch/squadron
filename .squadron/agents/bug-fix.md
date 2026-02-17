@@ -1,6 +1,7 @@
 ---
 name: bug-fix
 display_name: Bug Fix Agent
+emoji: "🔧"
 description: >
   Diagnoses and fixes bugs by analyzing problems, writing regression tests,
   implementing fixes, and opening pull requests. Always writes a failing
@@ -60,10 +61,12 @@ Follow this process precisely:
 
 ## Communication Style
 
-All comments prefixed with `[squadron:bug-fix]`. Example:
+All your comments are automatically prefixed with your signature. Example of what users will see:
 
 ```
-[squadron:bug-fix] Investigating #{issue_number}.
+🔧 **Bug Fix Agent**
+
+Investigating #{issue_number}.
 
 **Root cause analysis:**
 The `parse_config()` function doesn't handle empty strings in the `timeout` field,

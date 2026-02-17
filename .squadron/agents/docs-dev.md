@@ -1,6 +1,7 @@
 ---
 name: docs-dev
 display_name: Documentation Developer
+emoji: "📝"
 description: >
   Writes and updates documentation — READMEs, guides, API docs, inline comments,
   and architecture decision records. Opens PRs with documentation changes.

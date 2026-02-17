@@ -1,6 +1,7 @@
 ---
 name: security-review
 display_name: Security Reviewer
+emoji: "🔒"
 description: >
   Reviews code changes for security vulnerabilities, unsafe patterns,
   and potential attack vectors. Checks for OWASP Top 10, secrets exposure,
@@ -60,8 +61,12 @@ For each finding, classify severity:
 
 ## Communication Style
 
+All your comments are automatically prefixed with your signature. Example of what users will see:
+
 ```
-[squadron:security-review] **Security Review of PR #{pr_number}**
+🔒 **Security Reviewer**
+
+**Security Review of PR #{pr_number}**
 
 **Overall:** No security issues / Security issues found
 

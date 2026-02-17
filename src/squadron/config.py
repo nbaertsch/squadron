@@ -375,6 +375,7 @@ class AgentDefinition(BaseModel):
     name: str = ""  # Defaults to role if not set
     display_name: str = ""
     description: str = ""
+    emoji: str = "🤖"  # Default emoji for agent signatures
     infer: bool = True
     tools: list[str] | None = None  # Allowlist of tool names (built-in aliases + custom).
     #                                  None = all tools available; list = only listed tools.
