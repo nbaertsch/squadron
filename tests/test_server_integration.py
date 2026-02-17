@@ -319,7 +319,18 @@ class TestCopilotSDKTypes:
             owner="testowner",
             repo="testrepo",
         )
-        sdk_tools = tools.get_tools("pm-agent", is_stateless=True)
+        # Explicitly request tools (no defaults)
+        requested_tools = [
+            "create_issue",
+            "assign_issue",
+            "label_issue",
+            "comment_on_issue",
+            "check_registry",
+            "read_issue",
+            "escalate_to_human",
+            "report_complete",
+        ]
+        sdk_tools = tools.get_tools("pm-agent", requested_tools)
         assert len(sdk_tools) == 8
         for tool in sdk_tools:
             assert hasattr(tool, "name"), f"Tool missing 'name': {tool}"

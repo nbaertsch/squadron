@@ -178,12 +178,8 @@ class TestPMTools:
     async def test_get_tools_returns_list(self, registry):
         tools = self._make_tools(registry)
 
-        sdk_tools = tools.get_tools("pm-agent", is_stateless=True)
-
-        assert len(sdk_tools) == 8
-        # Verify each tool is callable and has the expected names
-        tool_names = [t.name for t in sdk_tools]
-        expected = {
+        # Explicitly request the tools we want (no defaults)
+        requested_tools = [
             "create_issue",
             "assign_issue",
             "label_issue",
@@ -192,8 +188,13 @@ class TestPMTools:
             "read_issue",
             "escalate_to_human",
             "report_complete",
-        }
-        assert set(tool_names) == expected, f"Tool names mismatch: {tool_names}"
+        ]
+        sdk_tools = tools.get_tools("pm-agent", requested_tools)
+
+        assert len(sdk_tools) == 8
+        # Verify each tool is callable and has the expected names
+        tool_names = [t.name for t in sdk_tools]
+        assert set(tool_names) == set(requested_tools), f"Tool names mismatch: {tool_names}"
 
 
 # ── Escalate to Human ───────────────────────────────────────────────────────

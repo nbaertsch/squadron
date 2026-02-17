@@ -54,6 +54,7 @@ ALL_TOOL_NAMES = [
     "comment_on_issue",
     "submit_pr_review",
     "open_pr",
+    "git_push",
     "create_issue",
     "assign_issue",
     "label_issue",
@@ -69,29 +70,6 @@ ALL_TOOL_NAMES = [
 
 # O(1) lookup set for splitting .md tool lists into custom vs SDK built-in
 ALL_TOOL_NAMES_SET = frozenset(ALL_TOOL_NAMES)
-
-# Default tool sets by lifecycle type (used when no explicit tools list is configured)
-DEFAULT_TOOLS_PERSISTENT = [
-    "check_for_events",
-    "report_blocked",
-    "report_complete",
-    "create_blocker_issue",
-    "escalate_to_human",
-    "comment_on_issue",
-    "submit_pr_review",
-    "open_pr",
-]
-
-DEFAULT_TOOLS_EPHEMERAL = [
-    "create_issue",
-    "assign_issue",
-    "label_issue",
-    "comment_on_issue",
-    "read_issue",
-    "check_registry",
-    "escalate_to_human",
-    "report_complete",
-]
 
 
 # ── Tool Parameter Models ────────────────────────────────────────────────────
@@ -210,6 +188,15 @@ class ListIssueCommentsParams(BaseModel):
     limit: int = Field(default=20, description="Number of comments to return (most recent last)")
 
 
+class GitPushParams(BaseModel):
+    """Push commits to the remote repository."""
+
+    force: bool = Field(
+        default=False,
+        description="Use force push (--force-with-lease). Only use if explicitly needed.",
+    )
+
+
 # ── Unified Tool Implementations ─────────────────────────────────────────────
 
 
@@ -232,6 +219,8 @@ class SquadronTools:
         config: SquadronConfig | None = None,
         agent_definitions: dict[str, AgentDefinition] | None = None,
         pre_sleep_hook: Callable[[AgentRecord], Awaitable[None]] | None = None,
+        git_push_callback: Callable[[AgentRecord, bool], Awaitable[tuple[int, str, str]]]
+        | None = None,
     ):
         self.registry = registry
         self.github = github
@@ -241,6 +230,7 @@ class SquadronTools:
         self.config = config
         self.agent_definitions = agent_definitions or {}
         self._pre_sleep_hook = pre_sleep_hook
+        self._git_push_callback = git_push_callback
 
     def _agent_signature(self, role: str) -> str:
         """Build the agent signature prefix: emoji + display_name on its own line.
@@ -479,6 +469,36 @@ class SquadronTools:
 
         return f"Opened PR #{pr_number}: {params.title}"
 
+    async def git_push(self, agent_id: str, params: GitPushParams) -> str:
+        """Push commits to the remote repository using GitHub App authentication.
+
+        This tool provides authenticated git push without exposing credentials
+        to the agent's bash environment. Only agents with this tool explicitly
+        granted can push code.
+        """
+        if not self._git_push_callback:
+            return "Error: git_push not configured — contact system administrator"
+
+        agent = await self.registry.get_agent(agent_id)
+        if agent is None:
+            return f"Error: agent {agent_id} not found"
+
+        if not agent.worktree_path:
+            return "Error: no worktree configured for this agent"
+
+        if not agent.branch:
+            return "Error: no branch configured for this agent"
+
+        try:
+            returncode, stdout, stderr = await self._git_push_callback(agent, params.force)
+            if returncode == 0:
+                return f"Successfully pushed branch `{agent.branch}` to origin"
+            else:
+                return f"Push failed (exit {returncode}): {stderr or stdout}"
+        except Exception as e:
+            logger.exception("git_push failed for agent %s", agent_id)
+            return f"Push failed: {e}"
+
     # ── PM Tools (issue management) ──────────────────────────────────────
 
     async def create_issue(self, agent_id: str, params: CreateIssueParams) -> str:
@@ -709,20 +729,16 @@ class SquadronTools:
         self,
         agent_id: str,
         names: list[str] | None = None,
-        *,
-        is_stateless: bool = False,
     ) -> list:
         """Return SDK-compatible Tool objects for the specified tool names.
 
         Args:
             agent_id: The agent these tools are bound to.
-            names: Explicit list of tool names to include. If None, falls
-                   back to lifecycle-based defaults.
-            is_stateless: Used for default selection when names is None.
-                          True → ephemeral/PM defaults, False → persistent/dev defaults.
+            names: Explicit list of tool names to include. If None or empty,
+                   returns no Squadron tools (agent must declare tools in frontmatter).
         """
-        if names is None:
-            names = DEFAULT_TOOLS_EPHEMERAL if is_stateless else DEFAULT_TOOLS_PERSISTENT
+        if not names:
+            return []
 
         # Validate requested tool names
         invalid = set(names) - set(ALL_TOOL_NAMES)
@@ -803,6 +819,12 @@ class SquadronTools:
             "Open a new pull request from your working branch. Include a descriptive title, body referencing the issue (e.g. 'Fixes #42'), source branch, and target branch.",
             OpenPRParams,
             tools.open_pr,
+        )
+        _register(
+            "git_push",
+            "Push your committed changes to the remote repository. Use this before opening a PR. Only available to agents with push permissions.",
+            GitPushParams,
+            tools.git_push,
         )
         _register(
             "create_issue",

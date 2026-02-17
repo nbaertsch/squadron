@@ -65,6 +65,7 @@ class AgentManager:
             config=config,
             agent_definitions=agent_definitions,
             pre_sleep_hook=self._wip_commit_and_push,
+            git_push_callback=self._git_push_for_agent,
         )
 
         # Per-agent CopilotAgent instances (one CLI subprocess each)
@@ -951,15 +952,6 @@ class AgentManager:
         role_config = self.config.agent_roles.get(record.role)
         is_ephemeral = role_config.is_ephemeral if role_config else False
 
-        # Refresh GitHub App token in worktree for agent git operations (issue #16)
-        if record.worktree_path:
-            try:
-                await self._refresh_worktree_token(Path(record.worktree_path))
-            except Exception:
-                logger.warning(
-                    "Failed to refresh token for %s — git push may fail", record.agent_id
-                )
-
         # Interpolate template variables in agent definition prompt
         raw_prompt = agent_def.prompt or agent_def.raw_content
         system_message = self._interpolate_agent_def(raw_prompt, record, trigger_event)
@@ -989,13 +981,12 @@ class AgentManager:
             # full list as the allowlist; otherwise leave it open (None).
             sdk_available_tools = agent_def.tools
         else:
-            custom_tool_names = None  # → lifecycle-based defaults
-            sdk_available_tools = None  # → all tools visible
+            custom_tool_names = None  # → no Squadron tools (must be in frontmatter)
+            sdk_available_tools = None  # → all SDK tools visible
 
         tools = self._tools.get_tools(
             record.agent_id,
             names=custom_tool_names,
-            is_stateless=is_ephemeral,
         )
 
         session_config = build_session_config(
@@ -2099,9 +2090,6 @@ class AgentManager:
 
                 logger.info("Created worktree: %s → %s", record.branch, worktree_dir)
 
-            # Configure git credentials for agent push/fetch operations
-            await self._setup_worktree_credentials(worktree_dir)
-
         except Exception:
             logger.exception("Worktree creation failed, using repo root")
             return self.repo_root
@@ -2173,83 +2161,31 @@ class AgentManager:
 
         return env
 
-    async def _setup_worktree_credentials(self, worktree_dir: Path) -> None:
-        """Configure git credentials in a worktree for agent push/fetch operations.
+    async def _git_push_for_agent(
+        self, agent: AgentRecord, force: bool = False
+    ) -> tuple[int, str, str]:
+        """Push an agent's branch to the remote using GitHub App authentication.
 
-        Creates a credential helper script that reads the GitHub App token from
-        a file in the worktree. This allows agents using the Copilot SDK bash
-        tool to run `git push` without needing to know the token.
+        This is the callback for the git_push tool. It runs git push with
+        authentication injected via environment variables, ensuring the
+        token is never exposed to the agent's bash environment.
 
-        The token file is refreshed before each agent session starts.
+        Args:
+            agent: The agent record (must have worktree_path and branch set).
+            force: If True, use --force-with-lease for force push.
+
+        Returns:
+            Tuple of (returncode, stdout, stderr) from the git command.
         """
-        # Create .squadron directory for credentials
-        squadron_dir = worktree_dir / ".squadron"
-        squadron_dir.mkdir(exist_ok=True)
+        if not agent.worktree_path or not agent.branch:
+            return (1, "", "No worktree or branch configured")
 
-        # Create the credential helper script
-        helper_script = squadron_dir / "git-credential-helper.sh"
-        helper_content = """#!/bin/bash
-# Squadron git credential helper — reads token from .squadron/token file
-# This script is called by git when it needs credentials for push/fetch
+        worktree = Path(agent.worktree_path)
+        if not worktree.exists():
+            return (1, "", f"Worktree does not exist: {worktree}")
 
-TOKEN_FILE="$(dirname "$0")/token"
+        args = ["push", "origin", agent.branch]
+        if force:
+            args.insert(1, "--force-with-lease")
 
-if [ -f "$TOKEN_FILE" ]; then
-    echo "username=x-access-token"
-    cat "$TOKEN_FILE" | while read token; do echo "password=$token"; done
-else
-    echo "Squadron: Token file not found: $TOKEN_FILE" >&2
-    exit 1
-fi
-"""
-        helper_script.write_text(helper_content)
-        helper_script.chmod(0o755)
-
-        # Write initial token
-        await self._refresh_worktree_token(worktree_dir)
-
-        # Configure git to use our credential helper (worktree-local config)
-        # Using absolute path to the helper script
-        helper_path = str(helper_script.absolute())
-        await self._run_git_in(
-            worktree_dir,
-            "config",
-            "--local",
-            "credential.helper",
-            "",  # Clear any existing helpers first
-        )
-        await self._run_git_in(
-            worktree_dir,
-            "config",
-            "--local",
-            "--add",
-            "credential.helper",
-            helper_path,
-        )
-
-        # Add .squadron to .gitignore (if not already there)
-        gitignore = worktree_dir / ".gitignore"
-        gitignore_content = gitignore.read_text() if gitignore.exists() else ""
-        if ".squadron/" not in gitignore_content:
-            with gitignore.open("a") as f:
-                if not gitignore_content.endswith("\n"):
-                    f.write("\n")
-                f.write("# Squadron agent credentials (auto-generated)\n")
-                f.write(".squadron/\n")
-
-        logger.debug("Configured git credentials in worktree: %s", worktree_dir)
-
-    async def _refresh_worktree_token(self, worktree_dir: Path) -> None:
-        """Refresh the GitHub App token file in a worktree.
-
-        Called before each agent session starts to ensure the token is fresh.
-        GitHub App installation tokens are valid for 1 hour.
-        """
-        token = await self.github._ensure_token()
-
-        token_file = worktree_dir / ".squadron" / "token"
-        token_file.parent.mkdir(exist_ok=True)
-        token_file.write_text(token)
-        token_file.chmod(0o600)  # Owner read/write only
-
-        logger.debug("Refreshed token in worktree: %s", worktree_dir)
+        return await self._run_git_in(worktree, *args, timeout=120, auth=True)

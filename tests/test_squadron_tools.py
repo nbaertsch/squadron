@@ -18,8 +18,6 @@ from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
 from squadron.tools.squadron_tools import (
     ALL_TOOL_NAMES,
-    DEFAULT_TOOLS_EPHEMERAL,
-    DEFAULT_TOOLS_PERSISTENT,
     AssignIssueParams,
     CheckEventsParams,
     CheckRegistryParams,
@@ -101,13 +99,10 @@ class TestGetTools:
         result = tools.get_tools("agent-1", ["comment_on_issue", "open_pr"])
         assert len(result) == 2
 
-    def test_default_persistent(self, tools):
-        result = tools.get_tools("agent-1", None, is_stateless=False)
-        assert len(result) == len(DEFAULT_TOOLS_PERSISTENT)
-
-    def test_default_ephemeral(self, tools):
-        result = tools.get_tools("agent-1", None, is_stateless=True)
-        assert len(result) == len(DEFAULT_TOOLS_EPHEMERAL)
+    def test_none_returns_empty(self, tools):
+        """No tools in frontmatter → no Squadron tools (must be explicit)."""
+        result = tools.get_tools("agent-1", None)
+        assert len(result) == 0
 
     def test_invalid_tool_names_filtered(self, tools):
         result = tools.get_tools("agent-1", ["comment_on_issue", "nonexistent_tool"])
@@ -405,15 +400,8 @@ class TestPreSleepHook:
 
 class TestConstants:
     def test_all_tool_names_count(self):
-        assert len(ALL_TOOL_NAMES) == 19
+        assert len(ALL_TOOL_NAMES) == 20
 
-    def test_persistent_defaults_are_subset(self):
-        assert set(DEFAULT_TOOLS_PERSISTENT).issubset(set(ALL_TOOL_NAMES))
-
-    def test_ephemeral_defaults_are_subset(self):
-        assert set(DEFAULT_TOOLS_EPHEMERAL).issubset(set(ALL_TOOL_NAMES))
-
-    def test_comment_on_issue_in_both(self):
-        """comment_on_issue should be available to both lifecycles."""
-        assert "comment_on_issue" in DEFAULT_TOOLS_PERSISTENT
-        assert "comment_on_issue" in DEFAULT_TOOLS_EPHEMERAL
+    def test_git_push_in_all_tools(self):
+        """git_push should be available for explicit selection."""
+        assert "git_push" in ALL_TOOL_NAMES
