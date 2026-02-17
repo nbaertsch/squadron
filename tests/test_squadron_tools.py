@@ -62,7 +62,23 @@ async def tools(registry):
             "body": "Test body",
             "labels": [{"name": "feature"}],
             "assignees": [{"login": "user1"}],
+            "user": {"login": "issue-creator"},
+            "created_at": "2024-01-15T10:30:00Z"
         }
+    )
+    github.list_issue_comments = AsyncMock(
+        return_value=[
+            {
+                "user": {"login": "commenter1"},
+                "created_at": "2024-01-15T11:00:00Z",
+                "body": "This is a comment"
+            },
+            {
+                "user": {"login": "commenter2"}, 
+                "created_at": "2024-01-15T12:00:00Z",
+                "body": "Another comment"
+            }
+        ]
     )
     github.submit_pr_review = AsyncMock(return_value={"id": 100})
     github.create_pull_request = AsyncMock(return_value={"number": 50})
@@ -288,13 +304,42 @@ class TestLabelIssue:
 
 
 class TestReadIssue:
-    async def test_reads_issue(self, tools, agent):
+    async def test_reads_issue_with_comments(self, tools, agent):
         params = ReadIssueParams(issue_number=42)
         result = await tools.read_issue("test-agent-1", params)
 
+        # Verify both methods are called
         tools.github.get_issue.assert_called_once()
+        tools.github.list_issue_comments.assert_called_once_with(
+            "testowner", "testrepo", 42, per_page=100
+        )
+        
+        # Check that issue details are present
         assert "Test Issue" in result
         assert "feature" in result
+        assert "issue-creator" in result
+        assert "2024-01-15T10:30" in result
+        
+        # Check that comments are included
+        assert "Comments (2)" in result
+        assert "commenter1" in result
+        assert "commenter2" in result
+        assert "This is a comment" in result
+        assert "Another comment" in result
+
+    async def test_reads_issue_with_no_comments(self, tools, agent):
+        # Mock no comments scenario
+        tools.github.list_issue_comments.return_value = []
+        
+        params = ReadIssueParams(issue_number=42)
+        result = await tools.read_issue("test-agent-1", params)
+
+        tools.github.get_issue.assert_called()
+        tools.github.list_issue_comments.assert_called()
+        
+        assert "Test Issue" in result
+        assert "issue-creator" in result
+        assert "**Comments:** None" in result
 
 
 class TestCheckRegistry:
