@@ -223,6 +223,57 @@ class GitHubClient:
 
     # ── Issue Operations ─────────────────────────────────────────────────
 
+    async def list_issues(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        labels: str | None = None,
+        state: str = "open",
+        per_page: int = 100,
+    ) -> list[dict]:
+        """List issues for a repository, optionally filtered by labels.
+
+        Args:
+            labels: Comma-separated label names, e.g. ``"in-progress,blocked"``.
+            state: ``"open"``, ``"closed"``, or ``"all"``.
+        """
+        params: dict[str, str | int] = {"state": state, "per_page": per_page}
+        if labels:
+            params["labels"] = labels
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/issues",
+            params=params,
+        )
+        # Filter out pull requests (GitHub returns PRs in the issues endpoint)
+        return [i for i in resp.json() if "pull_request" not in i]
+
+    async def list_pull_requests(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "open",
+        head: str | None = None,
+        per_page: int = 100,
+    ) -> list[dict]:
+        """List pull requests for a repository.
+
+        Args:
+            state: ``"open"``, ``"closed"``, or ``"all"``.
+            head: Filter by head user/branch, e.g. ``"user:branch"``.
+        """
+        params: dict[str, str | int] = {"state": state, "per_page": per_page}
+        if head:
+            params["head"] = head
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls",
+            params=params,
+        )
+        return resp.json()
+
     async def get_issue(self, owner: str, repo: str, issue_number: int) -> dict:
         resp = await self._request("GET", f"/repos/{owner}/{repo}/issues/{issue_number}")
         return resp.json()
@@ -260,6 +311,17 @@ class GitHubClient:
             "POST",
             f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
             json={"body": body},
+        )
+        return resp.json()
+
+    async def list_issue_comments(
+        self, owner: str, repo: str, issue_number: int, *, per_page: int = 30
+    ) -> list[dict]:
+        """List comments on an issue (most recent last)."""
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+            params={"per_page": per_page},
         )
         return resp.json()
 
@@ -310,6 +372,30 @@ class GitHubClient:
             "POST",
             f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
             json=payload,
+        )
+        return resp.json()
+
+    async def get_pr_reviews(self, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """List reviews on a pull request.
+
+        Returns a list of review dicts with 'id', 'user', 'state', 'body',
+        'submitted_at' keys.  States: APPROVED, CHANGES_REQUESTED, COMMENTED.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+        )
+        return resp.json()
+
+    async def get_pr_review_comments(self, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """List inline review comments on a pull request.
+
+        Returns a list of comment dicts with 'path', 'line', 'body',
+        'user', 'created_at', 'diff_hunk' keys.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
         )
         return resp.json()
 
@@ -411,3 +497,49 @@ class GitHubClient:
                 if e.response.status_code == 422:  # Already exists
                     continue
                 raise
+
+    async def delete_branch(self, owner: str, repo: str, branch: str) -> bool:
+        """Delete a branch from the repository.
+
+        Args:
+            owner: Repository owner.
+            repo: Repository name.
+            branch: Branch name to delete (not the ref path, just the name).
+
+        Returns:
+            True if deleted successfully, False if branch didn't exist.
+        """
+        try:
+            await self._request(
+                "DELETE",
+                f"/repos/{owner}/{repo}/git/refs/heads/{branch}",
+            )
+            logger.info("Deleted branch %s/%s:%s", owner, repo, branch)
+            return True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 422:  # Reference does not exist
+                logger.debug("Branch %s does not exist (already deleted?)", branch)
+                return False
+            raise
+
+    async def get_combined_status(self, owner: str, repo: str, ref: str) -> dict:
+        """Get combined status for a reference (commit SHA or branch).
+
+        Returns dict with 'state' (success, pending, failure) and 'statuses' list.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/commits/{ref}/status",
+        )
+        return resp.json()
+
+    async def list_check_runs(self, owner: str, repo: str, ref: str) -> list[dict]:
+        """List check runs for a reference (commit SHA or branch).
+
+        Returns list of check run dicts with 'name', 'status', 'conclusion' keys.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
+        )
+        return resp.json().get("check_runs", [])

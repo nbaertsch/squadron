@@ -65,10 +65,10 @@ GitHub Webhooks ──▶ FastAPI Server ──▶ Event Router ──▶ PM Que
 | **Config** | `src/squadron/config.py` | YAML config + agent definition parsing |
 | **Registry** | `src/squadron/registry.py` | SQLite agent registry with blocker tracking |
 | **GitHub Client** | `src/squadron/github_client.py` | Async GitHub REST API (JWT → installation token) |
-| **Reconciliation** | `src/squadron/reconciliation.py` | Background loop for stuck agent detection |
+| **Reconciliation** | `src/squadron/reconciliation.py` | Background loop for stuck/orphaned agent detection |
+| **Recovery** | `src/squadron/recovery.py` | GitHub-based state reconstruction on restart |
 | **Models** | `src/squadron/models.py` | Pydantic models, enums, event types |
-| **PM Tools** | `src/squadron/tools/pm_tools.py` | `@define_tool` decorated PM tools |
-| **Framework Tools** | `src/squadron/tools/framework.py` | Tools for dev/review agents |
+| **Tools** | `src/squadron/tools/squadron_tools.py` | Unified `@define_tool` tools with per-role selection |
 
 ## Quick Start
 
@@ -219,6 +219,7 @@ Branch: `{branch_name}`, base: `{base_branch}`.
 | `name` | `CustomAgentConfig.name` | Agent identifier |
 | `display_name` | `CustomAgentConfig.display_name` | Human-readable name |
 | `description` | `CustomAgentConfig.description` | What the agent does |
+| `emoji` | *(Squadron extension)* | Emoji prefix for comments (default: 🤖) |
 | `infer` | `CustomAgentConfig.infer` | Whether SDK infers when to delegate |
 | `tools` | `CustomAgentConfig.tools` | Available tool names |
 | `subagents` | *(Squadron extension)* | Names of child agents |
@@ -235,7 +236,7 @@ CREATED → ACTIVE → SLEEPING → ACTIVE → COMPLETED
                        ↑                    │
                        └── (blocker resolved)│
                                             ↓
-                                        ESCALATED
+                                      ESCALATED / FAILED
 ```
 
 | State | Description |
@@ -245,30 +246,81 @@ CREATED → ACTIVE → SLEEPING → ACTIVE → COMPLETED
 | `SLEEPING` | Blocked on dependency — session preserved, task removed |
 | `COMPLETED` | Work done, PR merged, resources freed |
 | `ESCALATED` | Circuit breaker tripped or unhandled error |
+| `FAILED` | Lost state on restart — requires human re-trigger |
+
+## Interacting with Agents
+
+Users and agents can route work to specific agents using the `@squadron-dev` command syntax in issue or PR comments.
+
+### Command Syntax
+
+```
+@squadron-dev <agent>: <message>
+```
+
+**Examples:**
+
+```
+@squadron-dev pm: please triage this issue
+@squadron-dev feat-dev: implement the feature described above
+@squadron-dev pr-review: please review this PR
+```
+
+### Help Command
+
+To see all available agents:
+
+```
+@squadron-dev help
+```
+
+This posts a table with agent names, descriptions, and available tools.
+
+### Agent Responses
+
+Agent comments are automatically prefixed with an emoji and display name signature:
+
+```
+🎯 **Project Manager**
+
+**Triage complete**
+
+- **Type:** feature
+- **Priority:** medium
+- **Assignment:** feat-dev agent (auto-spawned via label)
+```
+
+### Available Agents
+
+| Agent | Description |
+|-------|-------------|
+| `pm` | Central coordinator — triages issues, assigns work |
+| `feat-dev` | Implements features — writes code, tests, opens PRs |
+| `bug-fix` | Diagnoses and fixes bugs with regression tests |
+| `pr-review` | Reviews PRs for code quality |
+| `security-review` | Reviews PRs for security vulnerabilities |
+| `docs-dev` | Writes and updates documentation |
+| `test-coverage` | Reviews test coverage adequacy |
 
 ## Tools
 
-### PM Tools
-| Tool | Description |
-|------|-------------|
-| `create_issue` | Create a new GitHub issue |
-| `assign_issue` | Assign an issue to a user |
-| `label_issue` | Add labels to an issue |
-| `comment_on_issue` | Post a comment on an issue |
-| `read_issue` | Read issue details |
-| `check_registry` | Query the agent registry |
+All 13 tools live in a unified `SquadronTools` registry. Each role gets only its configured subset via `tools:` in `config.yaml` (or lifecycle-based defaults if omitted).
 
-### Framework Tools (Dev/Review Agents)
-| Tool | Description |
-|------|-------------|
-| `check_for_events` | Poll for new instructions from inbox |
-| `report_blocked` | Declare a dependency, enter SLEEPING |
-| `report_complete` | Mark work as done, enter COMPLETED |
-| `create_blocker_issue` | Create a blocking issue + register dependency |
-| `escalate_to_human` | Escalate to human with notification |
-| `comment_on_issue` | Post comments on the tracked issue |
-| `submit_pr_review` | Submit a PR review (approve/request changes) |
-| `open_pr` | Open a pull request from the agent's branch |
+| Tool | Default For | Description |
+|------|-------------|-------------|
+| `check_for_events` | persistent | Poll for pending framework events |
+| `report_blocked` | persistent | Declare a dependency, enter SLEEPING |
+| `report_complete` | persistent | Mark work as done, enter COMPLETED |
+| `create_blocker_issue` | persistent | Create a blocking issue + register dependency |
+| `escalate_to_human` | persistent | Escalate to human with notification |
+| `comment_on_issue` | both | Post comments on a GitHub issue |
+| `submit_pr_review` | persistent | Submit a PR review (approve/request changes) |
+| `open_pr` | persistent | Open a pull request from the agent's branch |
+| `create_issue` | ephemeral | Create a new GitHub issue |
+| `assign_issue` | ephemeral | Assign an issue to users |
+| `label_issue` | ephemeral | Apply labels to an issue |
+| `read_issue` | ephemeral | Read an issue's full details |
+| `check_registry` | ephemeral | Query the agent registry for active agents |
 
 ## Testing
 
@@ -293,7 +345,7 @@ uv run pytest -m "not live"
 
 | Tier | Count | Credentials | Runs in CI? |
 |------|-------|-------------|-------------|
-| **Unit tests** | ~214 | None | Yes |
+| **Unit tests** | ~334 | None | Yes |
 | **E2E GitHub API** | ~26 | GitHub App secrets | Yes (with secrets configured) |
 | **E2E Copilot** | ~9 | Copilot CLI + GitHub App secrets | **No** — local only |
 | **Lifecycle E2E** | ~9 | Copilot CLI + GitHub App secrets | **No** — local only |
@@ -376,9 +428,9 @@ Squadron runs as a **standalone service** — you deploy a container instance an
 
 **Quick start:**
 1. Install the [Squadron GitHub App](https://github.com/apps/squadron-dev) on your repo
-2. Run `squadron init` to scaffold `.squadron/` config
-3. Copy the deployment workflow template into your repo
-4. Set secrets and deploy
+2. Copy `examples/.squadron/` into your repo root and customize
+3. Copy the deployment workflow template into `.github/workflows/`
+4. Set repository secrets and deploy
 
 See **[deploy/](deploy/)** for full instructions and workflow templates:
 

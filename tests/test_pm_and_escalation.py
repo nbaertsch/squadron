@@ -12,17 +12,17 @@ from squadron.config import (
     ProjectConfig,
     SquadronConfig,
 )
-from squadron.models import AgentRecord, AgentRole, AgentStatus, SquadronEvent, SquadronEventType
+from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEventType
 from squadron.registry import AgentRegistry
-from squadron.tools.framework import EscalateToHumanParams, FrameworkTools
-from squadron.tools.pm_tools import (
+from squadron.tools.squadron_tools import (
     AssignIssueParams,
     CheckRegistryParams,
     CommentOnIssueParams,
     CreateIssueParams,
+    EscalateToHumanParams,
     LabelIssueParams,
-    PMTools,
     ReadIssueParams,
+    SquadronTools,
 )
 
 
@@ -40,7 +40,7 @@ async def registry(tmp_path):
 
 def _make_agent(
     agent_id: str = "feat-dev-issue-42",
-    role: AgentRole = AgentRole.FEAT_DEV,
+    role: str = "feat-dev",
     issue_number: int = 42,
     status: AgentStatus = AgentStatus.ACTIVE,
     **kwargs,
@@ -78,24 +78,26 @@ def _make_github_mock() -> AsyncMock:
 
 
 class TestPMTools:
-    def _make_pm_tools(self, registry, github=None):
-        return PMTools(
+    def _make_tools(self, registry, github=None):
+        return SquadronTools(
             registry=registry,
             github=github or _make_github_mock(),
+            agent_inboxes={},
             owner="testowner",
             repo="testrepo",
         )
 
     async def test_create_issue(self, registry):
         github = _make_github_mock()
-        tools = self._make_pm_tools(registry, github)
+        tools = self._make_tools(registry, github)
 
         result = await tools.create_issue(
+            "pm-agent",
             CreateIssueParams(
                 title="New bug",
                 body="Something broke",
                 labels=["bug"],
-            )
+            ),
         )
 
         github.create_issue.assert_called_once()
@@ -103,13 +105,14 @@ class TestPMTools:
 
     async def test_assign_issue(self, registry):
         github = _make_github_mock()
-        tools = self._make_pm_tools(registry, github)
+        tools = self._make_tools(registry, github)
 
         result = await tools.assign_issue(
+            "pm-agent",
             AssignIssueParams(
                 issue_number=42,
                 assignees=["squadron[bot]"],
-            )
+            ),
         )
 
         github.assign_issue.assert_called_once_with("testowner", "testrepo", 42, ["squadron[bot]"])
@@ -117,13 +120,14 @@ class TestPMTools:
 
     async def test_label_issue(self, registry):
         github = _make_github_mock()
-        tools = self._make_pm_tools(registry, github)
+        tools = self._make_tools(registry, github)
 
         result = await tools.label_issue(
+            "pm-agent",
             LabelIssueParams(
                 issue_number=42,
                 labels=["bug", "high"],
-            )
+            ),
         )
 
         github.add_labels.assert_called_once()
@@ -131,62 +135,66 @@ class TestPMTools:
 
     async def test_comment_on_issue(self, registry):
         github = _make_github_mock()
-        tools = self._make_pm_tools(registry, github)
+        tools = self._make_tools(registry, github)
 
         result = await tools.comment_on_issue(
+            "pm-agent",
             CommentOnIssueParams(
                 issue_number=42,
                 body="Triage complete",
-            )
+            ),
         )
 
         github.comment_on_issue.assert_called_once()
         assert "#42" in result
 
     async def test_check_registry_empty(self, registry):
-        tools = self._make_pm_tools(registry)
+        tools = self._make_tools(registry)
 
-        result = await tools.check_registry(CheckRegistryParams())
+        result = await tools.check_registry("pm-agent", CheckRegistryParams())
 
         assert "No active agents" in result
 
     async def test_check_registry_with_agents(self, registry):
         agent = _make_agent()
         await registry.create_agent(agent)
-        tools = self._make_pm_tools(registry)
+        tools = self._make_tools(registry)
 
-        result = await tools.check_registry(CheckRegistryParams())
+        result = await tools.check_registry("pm-agent", CheckRegistryParams())
 
         assert "feat-dev-issue-42" in result
         assert "feat-dev" in result
 
     async def test_read_issue(self, registry):
         github = _make_github_mock()
-        tools = self._make_pm_tools(registry, github)
+        tools = self._make_tools(registry, github)
 
-        result = await tools.read_issue(ReadIssueParams(issue_number=42))
+        result = await tools.read_issue("pm-agent", ReadIssueParams(issue_number=42))
 
         github.get_issue.assert_called_once_with("testowner", "testrepo", 42)
         assert "Test Issue" in result
         assert "feature" in result
 
     async def test_get_tools_returns_list(self, registry):
-        tools = self._make_pm_tools(registry)
+        tools = self._make_tools(registry)
 
-        sdk_tools = tools.get_tools()
-
-        assert len(sdk_tools) == 6
-        # Verify each tool is callable and has the expected names
-        tool_names = [t.name for t in sdk_tools]
-        expected = {
+        # Explicitly request the tools we want (no defaults)
+        requested_tools = [
             "create_issue",
             "assign_issue",
             "label_issue",
             "comment_on_issue",
             "check_registry",
             "read_issue",
-        }
-        assert set(tool_names) == expected, f"Tool names mismatch: {tool_names}"
+            "escalate_to_human",
+            "report_complete",
+        ]
+        sdk_tools = tools.get_tools("pm-agent", requested_tools)
+
+        assert len(sdk_tools) == 8
+        # Verify each tool is callable and has the expected names
+        tool_names = [t.name for t in sdk_tools]
+        assert set(tool_names) == set(requested_tools), f"Tool names mismatch: {tool_names}"
 
 
 # ── Escalate to Human ───────────────────────────────────────────────────────
@@ -197,7 +205,7 @@ class TestEscalateToHuman:
         agent = _make_agent()
         await registry.create_agent(agent)
         github = _make_github_mock()
-        tools = FrameworkTools(
+        tools = SquadronTools(
             registry=registry,
             github=github,
             agent_inboxes={},
@@ -219,7 +227,7 @@ class TestEscalateToHuman:
         agent = _make_agent()
         await registry.create_agent(agent)
         github = _make_github_mock()
-        tools = FrameworkTools(
+        tools = SquadronTools(
             registry=registry,
             github=github,
             agent_inboxes={},
@@ -240,7 +248,7 @@ class TestEscalateToHuman:
         agent = _make_agent()
         await registry.create_agent(agent)
         github = _make_github_mock()
-        tools = FrameworkTools(
+        tools = SquadronTools(
             registry=registry,
             github=github,
             agent_inboxes={},
@@ -331,8 +339,10 @@ class TestTemplateInterpolation:
 # ── PR Closed Handler ────────────────────────────────────────────────────────
 
 
-class TestHandlePRClosed:
-    async def test_pr_merged_completes_dev_agent(self, registry):
+class TestTriggerActions:
+    """Test the unified trigger system's wake and complete actions."""
+
+    async def test_trigger_complete_marks_agent_completed(self, registry):
         agent = _make_agent(pr_number=10, session_id="ses-1")
         await registry.create_agent(agent)
 
@@ -345,15 +355,15 @@ class TestHandlePRClosed:
             data={"payload": {"pull_request": {"merged": True}}},
         )
 
-        await mgr._handle_pr_closed(event)
+        await mgr._trigger_complete("feat-dev", event)
 
         updated = await registry.get_agent(agent.agent_id)
         assert updated.status == AgentStatus.COMPLETED
 
-    async def test_pr_merged_cleans_up_review_agents(self, registry):
+    async def test_trigger_complete_review_agent(self, registry):
         review_agent = _make_agent(
             agent_id="pr-review-pr-10",
-            role=AgentRole.PR_REVIEW,
+            role="pr-review",
             issue_number=10,
             pr_number=10,
             session_id="ses-review",
@@ -372,12 +382,12 @@ class TestHandlePRClosed:
             data={"payload": {"pull_request": {"merged": True}}},
         )
 
-        await mgr._handle_pr_closed(event)
+        await mgr._trigger_complete("pr-review", event)
 
         updated = await registry.get_agent(review_agent.agent_id)
         assert updated.status == AgentStatus.COMPLETED
 
-    async def test_pr_closed_without_merge_wakes_dev_agent(self, registry):
+    async def test_trigger_wake_sleeping_dev_agent(self, registry):
         agent = _make_agent(
             status=AgentStatus.SLEEPING,
             pr_number=10,
@@ -386,8 +396,6 @@ class TestHandlePRClosed:
         await registry.create_agent(agent)
 
         mgr = _make_manager(registry)
-
-        # Mock wake_agent
         mgr.wake_agent = AsyncMock()
 
         event = SquadronEvent(
@@ -396,44 +404,468 @@ class TestHandlePRClosed:
             data={"payload": {"pull_request": {"merged": False}}},
         )
 
-        await mgr._handle_pr_closed(event)
+        await mgr._trigger_wake("feat-dev", event)
 
         mgr.wake_agent.assert_called_once()
         assert mgr.wake_agent.call_args[0][0] == agent.agent_id
 
-    async def test_pr_closed_without_merge_cleans_review_agents(self, registry):
-        review_agent = _make_agent(
-            agent_id="pr-review-pr-10",
-            role=AgentRole.PR_REVIEW,
-            issue_number=10,
-            pr_number=10,
-            session_id="ses-review",
-        )
-        await registry.create_agent(review_agent)
+    async def test_trigger_complete_ignores_wrong_role(self, registry):
+        agent = _make_agent(pr_number=10, session_id="ses-1", role="feat-dev")
+        await registry.create_agent(agent)
 
         mgr = _make_manager(registry)
-        mock_copilot = AsyncMock()
-        mock_copilot.delete_session = AsyncMock()
-        mock_copilot.stop = AsyncMock()
-        mgr._copilot_agents[review_agent.agent_id] = mock_copilot
 
         event = SquadronEvent(
             event_type=SquadronEventType.PR_CLOSED,
             pr_number=10,
-            data={"payload": {"pull_request": {"merged": False}}},
-        )
-
-        await mgr._handle_pr_closed(event)
-
-        updated = await registry.get_agent(review_agent.agent_id)
-        assert updated.status == AgentStatus.COMPLETED
-
-    async def test_no_pr_number_skips(self, registry):
-        mgr = _make_manager(registry)
-        event = SquadronEvent(
-            event_type=SquadronEventType.PR_CLOSED,
             data={"payload": {"pull_request": {"merged": True}}},
         )
 
-        # Should not raise
-        await mgr._handle_pr_closed(event)
+        # Completing pr-review should not affect feat-dev
+        await mgr._trigger_complete("pr-review", event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.ACTIVE  # unchanged
+
+    async def test_trigger_sleep_active_dev_agent(self, registry):
+        """Sleep action transitions an active agent to SLEEPING."""
+        agent = _make_agent(
+            status=AgentStatus.ACTIVE,
+            pr_number=10,
+            session_id="ses-1",
+        )
+        await registry.create_agent(agent)
+
+        mgr = _make_manager(registry, github=_make_github_mock())
+        # Simulate a running task
+        task = AsyncMock()
+        task.done = MagicMock(return_value=False)
+        task.cancel = MagicMock()
+        mgr._agent_tasks[agent.agent_id] = task
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED,
+            pr_number=10,
+            data={"payload": {"pull_request": {"body": "Closes #42"}}},
+        )
+
+        await mgr._trigger_sleep("feat-dev", event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.SLEEPING
+        assert updated.sleeping_since is not None
+        assert updated.active_since is None
+        # Task should be cancelled
+        task.cancel.assert_called_once()
+
+    async def test_trigger_sleep_ignores_non_active(self, registry):
+        """Sleep action should only affect ACTIVE agents."""
+        agent = _make_agent(
+            status=AgentStatus.SLEEPING,
+            pr_number=10,
+            session_id="ses-1",
+        )
+        await registry.create_agent(agent)
+
+        mgr = _make_manager(registry)
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED,
+            pr_number=10,
+            data={},
+        )
+
+        await mgr._trigger_sleep("feat-dev", event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.SLEEPING  # unchanged
+
+    async def test_trigger_sleep_matches_by_issue_from_pr_body(self, registry):
+        """Sleep should match agents by issue number extracted from PR body."""
+        agent = _make_agent(
+            status=AgentStatus.ACTIVE,
+            issue_number=42,
+            pr_number=None,  # PR not yet associated
+            session_id="ses-1",
+        )
+        await registry.create_agent(agent)
+
+        mgr = _make_manager(registry, github=_make_github_mock())
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED,
+            pr_number=15,
+            data={"payload": {"pull_request": {"body": "Closes #42"}}},
+        )
+
+        await mgr._trigger_sleep("feat-dev", event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.SLEEPING
+        # PR should be associated with the agent
+        assert updated.pr_number == 15
+
+    async def test_trigger_sleep_posts_comment(self, registry):
+        """Sleep action should post a comment on the agent's issue."""
+        agent = _make_agent(
+            status=AgentStatus.ACTIVE,
+            pr_number=10,
+            session_id="ses-1",
+        )
+        await registry.create_agent(agent)
+
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED,
+            pr_number=10,
+            data={},
+        )
+
+        await mgr._trigger_sleep("feat-dev", event)
+
+        github.comment_on_issue.assert_called_once()
+        comment_text = github.comment_on_issue.call_args[0][3]
+        assert "PR #10" in comment_text
+        assert "sleep" in comment_text.lower()
+
+
+class TestEvaluateCondition:
+    """Test condition evaluation including review_state."""
+
+    def test_review_state_changes_requested(self, registry):
+        mgr = _make_manager(registry)
+        condition = {"review_state": "changes_requested"}
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
+            pr_number=10,
+            data={},
+        )
+        payload = {"review": {"state": "changes_requested"}}
+        assert mgr._evaluate_condition(condition, event, "feat-dev", payload) is True
+
+    def test_review_state_approved_does_not_match_changes_requested(self, registry):
+        mgr = _make_manager(registry)
+        condition = {"review_state": "changes_requested"}
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
+            pr_number=10,
+            data={},
+        )
+        payload = {"review": {"state": "approved"}}
+        assert mgr._evaluate_condition(condition, event, "feat-dev", payload) is False
+
+    def test_review_state_case_insensitive(self, registry):
+        mgr = _make_manager(registry)
+        condition = {"review_state": "CHANGES_REQUESTED"}
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
+            pr_number=10,
+            data={},
+        )
+        payload = {"review": {"state": "changes_requested"}}
+        assert mgr._evaluate_condition(condition, event, "feat-dev", payload) is True
+
+    def test_merged_true(self, registry):
+        mgr = _make_manager(registry)
+        condition = {"merged": True}
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_CLOSED,
+            pr_number=10,
+            data={},
+        )
+        payload = {"pull_request": {"merged": True}}
+        assert mgr._evaluate_condition(condition, event, "feat-dev", payload) is True
+
+    def test_merged_false_when_true(self, registry):
+        mgr = _make_manager(registry)
+        condition = {"merged": False}
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_CLOSED,
+            pr_number=10,
+            data={},
+        )
+        payload = {"pull_request": {"merged": True}}
+        assert mgr._evaluate_condition(condition, event, "feat-dev", payload) is False
+
+
+class TestWakePromptContext:
+    """Test enriched wake prompt with review context."""
+
+    async def test_wake_prompt_includes_review_context(self, registry):
+        agent = _make_agent(pr_number=10)
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
+            pr_number=10,
+            data={
+                "payload": {
+                    "review": {
+                        "state": "changes_requested",
+                        "body": "Needs work",
+                        "user": {"login": "reviewer1"},
+                    }
+                }
+            },
+        )
+
+        prompt = await mgr._build_wake_prompt(agent, event)
+        # Event-level review info is still included as context
+        assert "changes_requested" in prompt
+        assert "Needs work" in prompt
+        assert "reviewer1" in prompt
+        # Inline review comments are no longer injected -- agents use
+        # the get_pr_feedback tool to fetch them on demand
+
+    async def test_wake_prompt_handles_missing_review(self, registry):
+        agent = _make_agent(pr_number=None)
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.BLOCKER_RESOLVED,
+            issue_number=42,
+            data={"resolved_issue": 99},
+        )
+
+        prompt = await mgr._build_wake_prompt(agent, event)
+        assert "Resolved blocker" in prompt
+        assert "#99" in prompt
+
+    async def test_wake_prompt_survives_github_errors(self, registry):
+        """Wake prompt works even without github API calls (review context
+        is now fetched via get_pr_feedback tool, not injected)."""
+        agent = _make_agent(pr_number=10)
+        github = _make_github_mock()
+
+        mgr = _make_manager(registry, github=github)
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
+            pr_number=10,
+            data={"payload": {"review": {"state": "changes_requested", "body": "Fix it"}}},
+        )
+
+        prompt = await mgr._build_wake_prompt(agent, event)
+        assert "Session Resumed" in prompt
+        assert "Fix it" in prompt
+
+
+class TestStatelessPrompt:
+    """Test ephemeral (PM) prompt — context-only, no workflow instructions.
+
+    The prompt now contains only structured event context (project, role,
+    triggering event details).  Workload, history, escalations, and
+    available roles are fetched on-demand via introspection tools.
+    """
+
+    async def test_includes_project_and_role(self, registry):
+        """Prompt should show project name, repo, and role."""
+        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
+        mgr = _make_manager(registry)
+
+        prompt = await mgr._build_stateless_prompt(pm_record, None)
+
+        assert "squadron" in prompt
+        assert "pm" in prompt
+
+    async def test_includes_event_details(self, registry):
+        """Prompt should include triggering event information."""
+        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
+        mgr = _make_manager(registry)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_OPENED,
+            issue_number=99,
+            data={
+                "payload": {
+                    "issue": {
+                        "title": "Add OAuth",
+                        "body": "We need OAuth2 support",
+                        "labels": [{"name": "feature"}],
+                    }
+                }
+            },
+        )
+
+        prompt = await mgr._build_stateless_prompt(pm_record, event)
+
+        assert "Add OAuth" in prompt
+        assert "OAuth2 support" in prompt
+        assert "feature" in prompt
+        assert "issue.opened" in prompt
+
+    async def test_includes_comment_details(self, registry):
+        """Prompt should include comment text when triggered by a comment event."""
+        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
+        mgr = _make_manager(registry)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_COMMENT,
+            issue_number=99,
+            data={
+                "payload": {
+                    "issue": {"title": "Something", "body": "body", "labels": []},
+                    "comment": {
+                        "body": "What is the status?",
+                        "user": {"login": "alice"},
+                    },
+                }
+            },
+        )
+
+        prompt = await mgr._build_stateless_prompt(pm_record, event)
+
+        assert "What is the status?" in prompt
+        assert "alice" in prompt
+
+    async def test_includes_pr_data(self, registry):
+        """Prompt should include PR title when triggered by a PR event."""
+        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
+        mgr = _make_manager(registry)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED,
+            pr_number=10,
+            issue_number=99,
+            data={
+                "payload": {
+                    "pull_request": {"title": "feat: add OAuth support"},
+                }
+            },
+        )
+
+        prompt = await mgr._build_stateless_prompt(pm_record, event)
+
+        assert "feat: add OAuth support" in prompt
+
+    async def test_no_event_still_has_context(self, registry):
+        """Prompt should still contain project/role context even without an event."""
+        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
+        mgr = _make_manager(registry)
+
+        prompt = await mgr._build_stateless_prompt(pm_record, None)
+
+        assert "squadron" in prompt
+        assert "pm" in prompt
+        assert "#99" in prompt
+
+
+# ── Issue Reassignment (D-12) ───────────────────────────────────────────────
+
+
+class TestHandleIssueAssigned:
+    """Test _handle_issue_assigned — abort agents on reassignment."""
+
+    async def test_reassign_away_completes_active_agent(self, registry):
+        agent = _make_agent(status=AgentStatus.ACTIVE, issue_number=42)
+        await registry.create_agent(agent)
+
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_ASSIGNED,
+            issue_number=42,
+            data={"payload": {"assignee": {"login": "humandev"}}},
+        )
+        await mgr._handle_issue_assigned(event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED
+
+    async def test_reassign_away_completes_sleeping_agent(self, registry):
+        agent = _make_agent(status=AgentStatus.SLEEPING, issue_number=42)
+        await registry.create_agent(agent)
+
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_ASSIGNED,
+            issue_number=42,
+            data={"payload": {"assignee": {"login": "humandev"}}},
+        )
+        await mgr._handle_issue_assigned(event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED
+
+    async def test_reassign_to_bot_is_ignored(self, registry):
+        agent = _make_agent(status=AgentStatus.ACTIVE, issue_number=42)
+        await registry.create_agent(agent)
+
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_ASSIGNED,
+            issue_number=42,
+            data={"payload": {"assignee": {"login": "squadron-dev[bot]"}}},
+        )
+        await mgr._handle_issue_assigned(event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.ACTIVE  # unchanged
+
+    async def test_reassign_posts_comment(self, registry):
+        agent = _make_agent(status=AgentStatus.ACTIVE, issue_number=42, branch="feat/issue-42")
+        await registry.create_agent(agent)
+
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_ASSIGNED,
+            issue_number=42,
+            data={"payload": {"assignee": {"login": "humandev"}}},
+        )
+        await mgr._handle_issue_assigned(event)
+
+        github.comment_on_issue.assert_called_once()
+        comment_body = github.comment_on_issue.call_args[0][3]
+        assert "humandev" in comment_body
+        assert "stopped" in comment_body
+
+    async def test_no_agents_for_issue_is_noop(self, registry):
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_ASSIGNED,
+            issue_number=999,
+            data={"payload": {"assignee": {"login": "humandev"}}},
+        )
+        await mgr._handle_issue_assigned(event)
+
+        github.comment_on_issue.assert_not_called()
+
+    async def test_completed_agent_not_affected(self, registry):
+        agent = _make_agent(status=AgentStatus.COMPLETED, issue_number=42)
+        await registry.create_agent(agent)
+
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_ASSIGNED,
+            issue_number=42,
+            data={"payload": {"assignee": {"login": "humandev"}}},
+        )
+        await mgr._handle_issue_assigned(event)
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.COMPLETED
+        github.comment_on_issue.assert_not_called()
+
+    async def test_missing_issue_number_is_noop(self, registry):
+        github = _make_github_mock()
+        mgr = _make_manager(registry, github=github)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_ASSIGNED,
+            data={"payload": {"assignee": {"login": "humandev"}}},
+        )
+        await mgr._handle_issue_assigned(event)
+
+        github.comment_on_issue.assert_not_called()

@@ -26,7 +26,7 @@ import pytest
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
 
 _project_root = Path(__file__).parent.parent.parent
@@ -190,7 +190,7 @@ class TestServerBootE2E:
         await reg.create_agent(
             AgentRecord(
                 agent_id="e2e-stale-agent",
-                role=AgentRole.FEAT_DEV,
+                role="feat-dev",
                 issue_number=999,
                 status=AgentStatus.ACTIVE,
             )

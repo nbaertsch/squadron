@@ -18,11 +18,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest_asyncio
 
 from squadron.config import CircuitBreakerDefaults
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
-from squadron.tools.framework import (
+from squadron.tools.squadron_tools import (
     CreateBlockerIssueParams,
-    FrameworkTools,
+    SquadronTools,
     ReportBlockedParams,
     ReportCompleteParams,
 )
@@ -42,7 +42,7 @@ async def registry(tmp_path):
 
 def _make_agent(
     agent_id: str = "feat-dev-issue-42",
-    role: AgentRole = AgentRole.FEAT_DEV,
+    role: str = "feat-dev",
     issue_number: int = 42,
     status: AgentStatus = AgentStatus.ACTIVE,
     **kwargs,
@@ -64,8 +64,8 @@ def _make_github_mock() -> AsyncMock:
     return github
 
 
-def _make_framework_tools(registry: AgentRegistry, github=None) -> FrameworkTools:
-    return FrameworkTools(
+def _make_framework_tools(registry: AgentRegistry, github=None) -> SquadronTools:
+    return SquadronTools(
         registry=registry,
         github=github or _make_github_mock(),
         agent_inboxes={},
@@ -381,9 +381,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         # Simulate the agent calling report_blocked during its turn
         async def side_effect_block(*args, **kwargs):
@@ -426,9 +426,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         async def side_effect_complete(*args, **kwargs):
             a = await registry.get_agent(agent.agent_id)
@@ -468,9 +468,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         await manager._run_agent(agent, trigger_event=None, resume=False)
 
@@ -497,9 +497,9 @@ class TestPostTurnStateMachine:
         agent_def = MagicMock()
         agent_def.prompt = "You are a dev agent"
         agent_def.raw_content = "---\nname: test\n---\nYou are a dev agent"
-        agent_def.role = agent.role.value
+        agent_def.role = agent.role
         agent_def.mcp_servers = {}
-        manager.agent_definitions[agent.role.value] = agent_def
+        manager.agent_definitions[agent.role] = agent_def
 
         await manager._run_agent(agent, trigger_event=None, resume=False)
 
@@ -593,13 +593,13 @@ class TestCleanupAgent:
 
 
 class TestCommentOnIssue:
-    async def test_posts_comment_with_role_prefix(self, registry: AgentRegistry):
+    async def test_posts_comment_with_agent_signature(self, registry: AgentRegistry):
         agent = _make_agent()
         await registry.create_agent(agent)
         github = _make_github_mock()
         tools = _make_framework_tools(registry, github)
 
-        from squadron.tools.framework import CommentOnIssueParams
+        from squadron.tools.squadron_tools import CommentOnIssueParams
 
         result = await tools.comment_on_issue(
             agent.agent_id,
@@ -609,8 +609,10 @@ class TestCommentOnIssue:
         assert "Posted comment" in result
         github.comment_on_issue.assert_called_once()
         call_args = github.comment_on_issue.call_args
-        # Should include role prefix
-        assert f"[squadron:{agent.role.value}]" in call_args[1].get("body", call_args[0][-1])
+        body = call_args[1].get("body", call_args[0][-1])
+        # Should include emoji + display_name signature (or default 🤖 **role**)
+        assert "🤖 **" in body or "**" in body
+        assert agent.role in body
 
 
 class TestSubmitPRReview:
@@ -621,7 +623,7 @@ class TestSubmitPRReview:
         github.submit_pr_review = AsyncMock(return_value={"id": 123})
         tools = _make_framework_tools(registry, github)
 
-        from squadron.tools.framework import SubmitPRReviewParams
+        from squadron.tools.squadron_tools import SubmitPRReviewParams
 
         result = await tools.submit_pr_review(
             agent.agent_id,
@@ -646,7 +648,7 @@ class TestSubmitPRReview:
         github.submit_pr_review = AsyncMock(return_value={"id": 456})
         tools = _make_framework_tools(registry, github)
 
-        from squadron.tools.framework import SubmitPRReviewParams
+        from squadron.tools.squadron_tools import SubmitPRReviewParams
 
         comments = [{"path": "src/auth.py", "position": 5, "body": "Missing null check"}]
         result = await tools.submit_pr_review(
@@ -678,7 +680,7 @@ class TestOpenPR:
         github.create_pull_request = AsyncMock(return_value={"number": 15})
         tools = _make_framework_tools(registry, github)
 
-        from squadron.tools.framework import OpenPRParams
+        from squadron.tools.squadron_tools import OpenPRParams
 
         result = await tools.open_pr(
             agent.agent_id,
@@ -700,3 +702,253 @@ class TestOpenPR:
             head="feat/issue-42",
             base="main",
         )
+
+    async def test_records_pr_number_on_agent(self, registry: AgentRegistry):
+        """open_pr should record the PR number on the agent record."""
+        agent = _make_agent()
+        assert agent.pr_number is None
+        await registry.create_agent(agent)
+        github = _make_github_mock()
+        github.create_pull_request = AsyncMock(return_value={"number": 15})
+        tools = _make_framework_tools(registry, github)
+
+        from squadron.tools.squadron_tools import OpenPRParams
+
+        await tools.open_pr(
+            agent.agent_id,
+            OpenPRParams(
+                title="Add auth flow",
+                body="Fixes #42",
+                head="feat/issue-42",
+                base="main",
+            ),
+        )
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.pr_number == 15
+
+
+# ── WIP commit + push before sleep (3.1) ─────────────────────────────────────
+
+
+class TestWipCommitAndPush:
+    """Test the _wip_commit_and_push method on AgentManager."""
+
+    def _make_manager(self, tmp_path):
+        """Create an AgentManager with mocks sufficient for WIP commit tests."""
+        from squadron.config import SquadronConfig, ProjectConfig, RuntimeConfig
+
+        config = MagicMock(spec=SquadronConfig)
+        config.project = MagicMock(spec=ProjectConfig)
+        config.project.owner = "testowner"
+        config.project.repo = "testrepo"
+        config.agent_roles = {}
+        config.runtime = MagicMock(spec=RuntimeConfig)
+        config.runtime.max_concurrent_agents = 5
+        config.runtime.worktree_dir = None
+
+        registry_mock = AsyncMock(spec=AgentRegistry)
+        github = _make_github_mock()
+        router = MagicMock()
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = AgentManager(
+            config,
+            registry_mock,
+            github,
+            router=router,
+            agent_definitions={},
+            repo_root=tmp_path,
+        )
+        return mgr
+
+    async def test_commits_and_pushes_when_changes_exist(self, tmp_path):
+        """Should run git add, status, commit, push in sequence."""
+        mgr = self._make_manager(tmp_path)
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        agent = _make_agent(branch="feat/issue-42", worktree_path=str(worktree))
+
+        calls = []
+
+        async def fake_run_git_in(cwd, *args, timeout=60, auth=False):
+            calls.append((args, auth))
+            if args[0] == "status":
+                return (0, "M  src/main.py\n", "")
+            return (0, "", "")
+
+        mgr._run_git_in = fake_run_git_in
+
+        await mgr._wip_commit_and_push(agent)
+
+        assert len(calls) == 4
+        assert calls[0][0] == ("add", "-A")
+        assert calls[1][0][:1] == ("status",)
+        assert calls[2][0][0] == "commit"
+        assert "[squadron-wip]" in calls[2][0][2]
+        assert calls[3][0] == ("push", "origin", "feat/issue-42")
+        assert calls[3][1] is True  # auth=True for push
+
+    async def test_skips_commit_when_no_changes(self, tmp_path):
+        """Should not commit or push if working tree is clean."""
+        mgr = self._make_manager(tmp_path)
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        agent = _make_agent(branch="feat/issue-42", worktree_path=str(worktree))
+
+        calls = []
+
+        async def fake_run_git_in(cwd, *args, timeout=60, auth=False):
+            calls.append((args, auth))
+            if args[0] == "status":
+                return (0, "", "")  # clean
+            return (0, "", "")
+
+        mgr._run_git_in = fake_run_git_in
+
+        await mgr._wip_commit_and_push(agent)
+
+        assert len(calls) == 2  # add + status only, no commit/push
+        assert calls[0][0] == ("add", "-A")
+
+    async def test_skips_when_no_worktree(self, tmp_path):
+        """Should silently skip if agent has no worktree."""
+        mgr = self._make_manager(tmp_path)
+
+        agent = _make_agent(branch="feat/issue-42", worktree_path=None)
+
+        mgr._run_git_in = AsyncMock()
+        await mgr._wip_commit_and_push(agent)
+
+        mgr._run_git_in.assert_not_called()
+
+    async def test_skips_when_no_branch(self, tmp_path):
+        """Should silently skip if agent has no branch (ephemeral)."""
+        mgr = self._make_manager(tmp_path)
+
+        agent = _make_agent(branch="", worktree_path=str(tmp_path))
+
+        mgr._run_git_in = AsyncMock()
+        await mgr._wip_commit_and_push(agent)
+
+        mgr._run_git_in.assert_not_called()
+
+    async def test_push_failure_does_not_raise(self, tmp_path):
+        """Push failure should be logged but not propagated."""
+        mgr = self._make_manager(tmp_path)
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        agent = _make_agent(branch="feat/issue-42", worktree_path=str(worktree))
+
+        async def fake_run_git_in(cwd, *args, timeout=60):
+            if args[0] == "status":
+                return (0, "M  file.py\n", "")
+            if args[0] == "push":
+                return (1, "", "error: failed to push")
+            return (0, "", "")
+
+        mgr._run_git_in = fake_run_git_in
+
+        # Should not raise
+        await mgr._wip_commit_and_push(agent)
+
+    async def test_timeout_does_not_raise(self, tmp_path):
+        """Timeout during git operations should be caught gracefully."""
+        mgr = self._make_manager(tmp_path)
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        agent = _make_agent(branch="feat/issue-42", worktree_path=str(worktree))
+
+        async def fake_run_git_in(cwd, *args, timeout=60):
+            raise asyncio.TimeoutError()
+
+        mgr._run_git_in = fake_run_git_in
+
+        # Should not raise
+        await mgr._wip_commit_and_push(agent)
+
+
+class TestPreSleepHookIntegration:
+    """Test that tools call the pre_sleep_hook before transitioning to SLEEPING."""
+
+    async def test_report_blocked_calls_hook(self, registry: AgentRegistry):
+        """report_blocked should call pre_sleep_hook before sleeping."""
+        agent = _make_agent()
+        await registry.create_agent(agent)
+
+        hook_called = []
+
+        async def hook(a):
+            hook_called.append(a.agent_id)
+
+        tools = SquadronTools(
+            registry=registry,
+            github=_make_github_mock(),
+            agent_inboxes={},
+            owner="testowner",
+            repo="testrepo",
+            pre_sleep_hook=hook,
+        )
+
+        await tools.report_blocked(
+            agent.agent_id,
+            ReportBlockedParams(blocker_issue=99, reason="waiting"),
+        )
+
+        assert hook_called == [agent.agent_id]
+
+    async def test_create_blocker_calls_hook(self, registry: AgentRegistry):
+        """create_blocker_issue should call pre_sleep_hook before sleeping."""
+        agent = _make_agent()
+        await registry.create_agent(agent)
+
+        hook_called = []
+
+        async def hook(a):
+            hook_called.append(a.agent_id)
+
+        tools = SquadronTools(
+            registry=registry,
+            github=_make_github_mock(),
+            agent_inboxes={},
+            owner="testowner",
+            repo="testrepo",
+            pre_sleep_hook=hook,
+        )
+
+        await tools.create_blocker_issue(
+            agent.agent_id,
+            CreateBlockerIssueParams(title="blocker", body="something"),
+        )
+
+        assert hook_called == [agent.agent_id]
+
+    async def test_hook_failure_does_not_prevent_sleep(self, registry: AgentRegistry):
+        """If the hook fails, agent should still transition to SLEEPING."""
+        agent = _make_agent()
+        await registry.create_agent(agent)
+
+        async def failing_hook(a):
+            raise RuntimeError("git broken")
+
+        tools = SquadronTools(
+            registry=registry,
+            github=_make_github_mock(),
+            agent_inboxes={},
+            owner="testowner",
+            repo="testrepo",
+            pre_sleep_hook=failing_hook,
+        )
+
+        await tools.report_blocked(
+            agent.agent_id,
+            ReportBlockedParams(blocker_issue=99, reason="waiting"),
+        )
+
+        updated = await registry.get_agent(agent.agent_id)
+        assert updated.status == AgentStatus.SLEEPING

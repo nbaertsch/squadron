@@ -103,7 +103,7 @@ class TestAgentRecord:
     def test_defaults(self):
         record = AgentRecord(
             agent_id="feat-dev-issue-1",
-            role=AgentRole.FEAT_DEV,
+            role="feat-dev",
             issue_number=1,
         )
         assert record.status == AgentStatus.CREATED
@@ -120,23 +120,16 @@ class TestAgentRecord:
         for status in AgentStatus:
             record = AgentRecord(
                 agent_id="test",
-                role=AgentRole.PM,
+                role="pm",
                 status=status,
             )
             assert record.status == status
 
     def test_all_roles(self):
-        expected = {
-            "pm",
-            "feat-dev",
-            "bug-fix",
-            "pr-review",
-            "security-review",
-            "test-coverage",
-            "code-search",
-            "test-writer",
-        }
-        assert {r.value for r in AgentRole} == expected
+        """AgentRole is now a plain str type alias — roles are defined in config.yaml."""
+        # This test validates the type alias works with plain strings
+        role: AgentRole = "feat-dev"
+        assert isinstance(role, str)
 
 
 class TestSquadronEvent:
@@ -144,6 +137,7 @@ class TestSquadronEvent:
         """Ensure we have internal types for key GitHub events."""
         github_types = {
             SquadronEventType.ISSUE_OPENED,
+            SquadronEventType.ISSUE_REOPENED,
             SquadronEventType.ISSUE_CLOSED,
             SquadronEventType.ISSUE_ASSIGNED,
             SquadronEventType.ISSUE_LABELED,

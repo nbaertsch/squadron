@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import re
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
@@ -19,19 +20,12 @@ class AgentStatus(str, enum.Enum):
     SLEEPING = "sleeping"
     COMPLETED = "completed"
     ESCALATED = "escalated"
+    FAILED = "failed"
 
 
-class AgentRole(str, enum.Enum):
-    """Built-in agent roles."""
-
-    PM = "pm"
-    FEAT_DEV = "feat-dev"
-    BUG_FIX = "bug-fix"
-    PR_REVIEW = "pr-review"
-    SECURITY_REVIEW = "security-review"
-    TEST_COVERAGE = "test-coverage"
-    CODE_SEARCH = "code-search"
-    TEST_WRITER = "test-writer"
+# Agent roles are plain strings — defined in .squadron/config.yaml, not in code.
+# The config's agent_roles dict is the single source of truth for available roles.
+AgentRole = str
 
 
 # ── Agent Record ─────────────────────────────────────────────────────────────
@@ -121,6 +115,7 @@ class SquadronEventType(str, enum.Enum):
 
     # Webhook-originated
     ISSUE_OPENED = "issue.opened"
+    ISSUE_REOPENED = "issue.reopened"
     ISSUE_CLOSED = "issue.closed"
     ISSUE_ASSIGNED = "issue.assigned"
     ISSUE_LABELED = "issue.labeled"
@@ -147,5 +142,63 @@ class SquadronEvent(BaseModel):
     agent_id: str | None = Field(default=None, description="Related agent, if any")
     issue_number: int | None = None
     pr_number: int | None = None
+    command: ParsedCommand | None = Field(
+        default=None,
+        description="Parsed command from @squadron-dev syntax (help or agent routing)",
+    )
     data: dict = Field(default_factory=dict, description="Event-specific data")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Command Parsing ──────────────────────────────────────────────────────────
+
+# The bot mention prefix. Hardcoded to avoid pinging random GitHub users.
+# The GitHub org 'squadron-dev' is owned by the project.
+BOT_MENTION = "squadron-dev"
+
+# Matches @squadron-dev <agent>: <message> syntax
+# Groups: (1) agent name, (2) message
+_COMMAND_RE = re.compile(
+    rf"@{BOT_MENTION}\s+([\w][\w-]*):\s*(.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Matches @squadron-dev help (case-insensitive)
+_HELP_RE = re.compile(
+    rf"@{BOT_MENTION}\s+help\b",
+    re.IGNORECASE,
+)
+
+
+class ParsedCommand(BaseModel):
+    """Result of parsing a comment for squadron commands."""
+
+    is_help: bool = False
+    agent_name: str | None = None
+    message: str | None = None
+
+
+def parse_command(text: str) -> ParsedCommand | None:
+    """Parse a comment for squadron command syntax.
+
+    Supports:
+    - ``@squadron-dev help`` — returns ParsedCommand(is_help=True)
+    - ``@squadron-dev <agent>: <message>`` — returns ParsedCommand with agent_name and message
+
+    Returns None if the comment doesn't match any command syntax.
+    """
+    if not text:
+        return None
+
+    # Check for help command first
+    if _HELP_RE.search(text):
+        return ParsedCommand(is_help=True)
+
+    # Check for agent command
+    match = _COMMAND_RE.search(text)
+    if match:
+        agent_name = match.group(1).lower()
+        message = match.group(2).strip()
+        return ParsedCommand(agent_name=agent_name, message=message)
+
+    return None

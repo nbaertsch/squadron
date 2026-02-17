@@ -249,7 +249,6 @@ class TestAgentDefinitionWiring:
         await registry.initialize()
         github = AsyncMock()
         router = AsyncMock(spec=EventRouter)
-        router.pm_queue = asyncio.Queue()
 
         manager = AgentManager(
             config=config,

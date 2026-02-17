@@ -2,7 +2,7 @@
 
 import pytest_asyncio
 
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
 
 
@@ -18,7 +18,7 @@ async def registry(tmp_path):
 
 def _make_agent(
     agent_id: str = "feat-dev-issue-1",
-    role: AgentRole = AgentRole.FEAT_DEV,
+    role: str = "feat-dev",
     issue_number: int = 1,
     status: AgentStatus = AgentStatus.CREATED,
     **kwargs,
@@ -40,7 +40,7 @@ class TestCRUD:
         fetched = await registry.get_agent("feat-dev-issue-1")
         assert fetched is not None
         assert fetched.agent_id == "feat-dev-issue-1"
-        assert fetched.role == AgentRole.FEAT_DEV
+        assert fetched.role == "feat-dev"
         assert fetched.issue_number == 1
 
     async def test_get_nonexistent(self, registry: AgentRegistry):

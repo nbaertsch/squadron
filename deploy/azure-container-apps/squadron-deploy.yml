@@ -79,7 +79,7 @@ jobs:
         run: |
           if [ ! -d ".squadron" ]; then
             echo "::error::.squadron/ directory not found."
-            echo "Run 'squadron init' to create it, then commit and push."
+            echo "Copy examples/.squadron/ from the Squadron repo into your repo root, then commit and push."
             exit 1
           fi
           if [ ! -f ".squadron/config.yaml" ]; then
@@ -145,61 +145,33 @@ jobs:
             githubInstallationId=${{ secrets.SQ_INSTALLATION_ID }}
             githubWebhookSecret=${{ secrets.SQ_WEBHOOK_SECRET }}
             copilotGithubToken=${{ secrets.SQ_COPILOT_TOKEN }}
+            repoUrl=https://github.com/${{ github.repository }}
+            defaultBranch=${{ github.event.repository.default_branch || 'main' }}
 
-      # ── Config sync (always runs) ─────────────────────────────────
-      - name: Resolve storage account
-        id: storage
+      # ── Config sync (push to main with .squadron/ changes) ────────
+      # The container clones the repo at startup and hot-reloads config
+      # on push events (D-5). For push-triggered runs, restart the
+      # container so it picks up the latest commit.
+      - name: Restart container for config sync
+        if: github.event_name == 'push'
         run: |
-          # Find the storage account in the resource group
-          STORAGE_ACCOUNT=$(az storage account list \
-            --resource-group "${{ steps.params.outputs.resource-group }}" \
-            --query "[0].name" --output tsv)
+          APP_NAME="${{ steps.app.outputs.name }}"
+          RG="${{ steps.params.outputs.resource-group }}"
 
-          if [ -z "$STORAGE_ACCOUNT" ]; then
-            echo "::error::No storage account found in resource group."
-            echo "Run with action=deploy first to create infrastructure."
-            exit 1
-          fi
-
-          STORAGE_KEY=$(az storage account keys list \
-            --account-name "$STORAGE_ACCOUNT" \
-            --query "[0].value" --output tsv)
-
-          echo "account=$STORAGE_ACCOUNT" >> "$GITHUB_OUTPUT"
-          echo "::add-mask::$STORAGE_KEY"
-          echo "key=$STORAGE_KEY" >> "$GITHUB_OUTPUT"
-          echo "Resolved storage account: $STORAGE_ACCOUNT"
-
-      - name: Sync .squadron/ config to Azure Files
-        run: |
-          echo "Uploading .squadron/ to Azure Files share..."
-          az storage file upload-batch \
-            --destination "squadron-data" \
-            --source ".squadron" \
-            --destination-path ".squadron" \
-            --account-name "${{ steps.storage.outputs.account }}" \
-            --account-key "${{ steps.storage.outputs.key }}" \
-            --overwrite
-          echo "Config synced successfully"
-
-      - name: Restart container to load new config
-        run: |
-          echo "Restarting container to pick up config changes..."
           REVISION=$(az containerapp revision list \
-            --name "${{ steps.app.outputs.name }}" \
-            --resource-group "${{ steps.params.outputs.resource-group }}" \
+            --name "$APP_NAME" \
+            --resource-group "$RG" \
             --query "[0].name" --output tsv 2>/dev/null || true)
 
           if [ -n "$REVISION" ]; then
             az containerapp revision restart \
-              --name "${{ steps.app.outputs.name }}" \
-              --resource-group "${{ steps.params.outputs.resource-group }}" \
+              --name "$APP_NAME" \
+              --resource-group "$RG" \
               --revision "$REVISION" \
               --output none
-            echo "Container restarted"
+            echo "Container restarted to pick up config changes"
           else
-            echo "::warning::No active revision found — container may not be running yet."
-            echo "If this is your first deploy, run again with action=deploy."
+            echo "::warning::No active revision found — deploy infrastructure first."
           fi
 
       # ── Output ────────────────────────────────────────────────────
@@ -255,15 +227,13 @@ jobs:
           echo "::warning::Health check did not pass within 120s. Container may still be starting."
 
   # ════════════════════════════════════════════════════════════════════
-  # Sync config only (no infrastructure changes)
+  # Sync config only (restart container to git pull latest)
   # ════════════════════════════════════════════════════════════════════
   sync-config:
     if: github.event_name == 'workflow_dispatch' && inputs.action == 'sync-config'
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Azure Login
         uses: azure/login@v2
         with:
@@ -279,32 +249,7 @@ jobs:
             echo "name=${REPO_NAME}-squadron" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Resolve storage account
-        id: storage
-        run: |
-          RG="${{ inputs.resource-group || 'squadron-rg' }}"
-          STORAGE_ACCOUNT=$(az storage account list \
-            --resource-group "$RG" \
-            --query "[0].name" --output tsv)
-          STORAGE_KEY=$(az storage account keys list \
-            --account-name "$STORAGE_ACCOUNT" \
-            --query "[0].value" --output tsv)
-          echo "account=$STORAGE_ACCOUNT" >> "$GITHUB_OUTPUT"
-          echo "::add-mask::$STORAGE_KEY"
-          echo "key=$STORAGE_KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Sync .squadron/ config
-        run: |
-          az storage file upload-batch \
-            --destination "squadron-data" \
-            --source ".squadron" \
-            --destination-path ".squadron" \
-            --account-name "${{ steps.storage.outputs.account }}" \
-            --account-key "${{ steps.storage.outputs.key }}" \
-            --overwrite
-          echo "Config synced"
-
-      - name: Restart container
+      - name: Restart container to pick up latest config
         run: |
           RG="${{ inputs.resource-group || 'squadron-rg' }}"
           REVISION=$(az containerapp revision list \
@@ -316,7 +261,7 @@ jobs:
             --resource-group "$RG" \
             --revision "$REVISION" \
             --output none
-          echo "Container restarted with new config"
+          echo "Container restarting — will git pull and reload config"
 
   # ════════════════════════════════════════════════════════════════════
   # Destroy all infrastructure

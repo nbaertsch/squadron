@@ -13,14 +13,15 @@ but run everything else for real: SQLite, FastAPI, EventRouter, config loading.
 from __future__ import annotations
 
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from squadron.config import RuntimeConfig, load_config
-from squadron.models import AgentRecord, AgentRole, AgentStatus
+from squadron.config import ProjectConfig, RuntimeConfig, SquadronConfig, load_config
+from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
+from squadron.server import SquadronServer
 
 
 # ── Server Boot Tests ────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ class TestServerBoot:
                     mock_github.close.assert_called_once()
 
     async def test_stale_agent_recovery(self, squadron_dir):
-        """ACTIVE agents from a previous crash should be marked SLEEPING on boot."""
+        """ACTIVE agents from a previous crash should be marked FAILED on boot."""
         from squadron.server import SquadronServer
 
         # Pre-populate DB with a stale ACTIVE agent
@@ -101,7 +102,7 @@ class TestServerBoot:
         await reg.initialize()
         stale_agent = AgentRecord(
             agent_id="feat-dev-issue-99",
-            role=AgentRole.FEAT_DEV,
+            role="feat-dev",
             issue_number=99,
             status=AgentStatus.ACTIVE,
         )
@@ -135,7 +136,7 @@ class TestServerBoot:
 
                     # Check that stale agent was recovered
                     recovered = await server.registry.get_agent("feat-dev-issue-99")
-                    assert recovered.status == AgentStatus.SLEEPING
+                    assert recovered.status == AgentStatus.FAILED
 
                     await server.stop()
 
@@ -279,9 +280,16 @@ class TestCopilotSDKTypes:
         """Verify provider dict matches SDK ProviderConfig type when BYOK key set."""
 
         from squadron.copilot import _build_provider_dict
+        from squadron.config import ProviderConfig
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provider-shape")
-        runtime_config = RuntimeConfig()
+        runtime_config = RuntimeConfig(
+            provider=ProviderConfig(
+                type="anthropic",
+                base_url="https://api.anthropic.com",
+                api_key_env="ANTHROPIC_API_KEY",
+            )
+        )
         provider = _build_provider_dict(runtime_config)
 
         assert provider is not None
@@ -299,20 +307,32 @@ class TestCopilotSDKTypes:
         assert provider is None
 
     def test_squadron_pm_tools_are_define_tool_decorated(self):
-        """Verify Squadron's PMTools.get_tools() returns callable define_tool-decorated tools."""
-        from squadron.tools.pm_tools import PMTools
+        """Verify Squadron's SquadronTools.get_tools() returns callable define_tool-decorated tools."""
+        from squadron.tools.squadron_tools import SquadronTools
 
         registry_mock = AsyncMock()
         github_mock = AsyncMock()
-        pm = PMTools(
+        tools = SquadronTools(
             registry=registry_mock,
             github=github_mock,
+            agent_inboxes={},
             owner="testowner",
             repo="testrepo",
         )
-        tools = pm.get_tools()
-        assert len(tools) == 6
-        for tool in tools:
+        # Explicitly request tools (no defaults)
+        requested_tools = [
+            "create_issue",
+            "assign_issue",
+            "label_issue",
+            "comment_on_issue",
+            "check_registry",
+            "read_issue",
+            "escalate_to_human",
+            "report_complete",
+        ]
+        sdk_tools = tools.get_tools("pm-agent", requested_tools)
+        assert len(sdk_tools) == 8
+        for tool in sdk_tools:
             assert hasattr(tool, "name"), f"Tool missing 'name': {tool}"
             assert hasattr(tool, "handler"), f"Tool missing 'handler': {tool}"
             assert callable(tool.handler), f"Tool handler not callable: {tool.name}"
@@ -382,3 +402,108 @@ class TestConfigLoading:
         assert defs["pm"].prompt  # Not empty
         assert defs["pm"].tools  # Should be populated from frontmatter
         assert defs["feat-dev"].tools  # Should be populated
+
+
+# ── Config Hot-Reload Tests ──────────────────────────────────────────────────
+
+
+class TestConfigHotReload:
+    """Test _handle_config_reload on the server."""
+
+    async def test_reload_skips_non_default_branch(self):
+        """Push to non-default branch should not trigger reload."""
+        from squadron.models import SquadronEvent, SquadronEventType
+
+        server = SquadronServer.__new__(SquadronServer)
+        server.config = SquadronConfig(project=ProjectConfig(name="test", default_branch="main"))
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PUSH,
+            data={
+                "payload": {
+                    "ref": "refs/heads/feature-branch",
+                    "commits": [{"modified": [".squadron/config.yaml"]}],
+                }
+            },
+        )
+
+        # Should return early (no git pull attempted)
+        await server._handle_config_reload(event)
+
+    async def test_reload_skips_non_squadron_changes(self):
+        """Push that doesn't touch .squadron/ should not reload."""
+        from squadron.models import SquadronEvent, SquadronEventType
+
+        server = SquadronServer.__new__(SquadronServer)
+        server.config = SquadronConfig(project=ProjectConfig(name="test", default_branch="main"))
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PUSH,
+            data={
+                "payload": {
+                    "ref": "refs/heads/main",
+                    "commits": [
+                        {
+                            "added": ["src/app.py"],
+                            "modified": ["README.md"],
+                            "removed": [],
+                        }
+                    ],
+                }
+            },
+        )
+
+        # Should return early — no .squadron files changed
+        await server._handle_config_reload(event)
+
+    async def test_reload_detects_squadron_config_change(self, tmp_path):
+        """Push modifying .squadron/config.yaml triggers reload."""
+        from squadron.models import SquadronEvent, SquadronEventType
+
+        # Set up a minimal config file
+        sq_dir = tmp_path / ".squadron"
+        agents_dir = sq_dir / "agents"
+        agents_dir.mkdir(parents=True)
+        (sq_dir / "config.yaml").write_text(
+            "project:\n  name: updated-project\n  owner: o\n  repo: r\n"
+        )
+        (agents_dir / "pm.md").write_text("# PM\nYou are PM.\n")
+
+        server = SquadronServer.__new__(SquadronServer)
+        server.repo_root = tmp_path
+        server.squadron_dir = sq_dir
+        server.config = SquadronConfig(
+            project=ProjectConfig(name="original", default_branch="main")
+        )
+        server._config_version = None
+        server.agent_manager = MagicMock()
+        server.agent_manager._register_trigger_handlers = MagicMock()
+        server.reconciliation = MagicMock()
+        server.router = MagicMock()
+        server.workflow_engine = None
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PUSH,
+            data={
+                "payload": {
+                    "ref": "refs/heads/main",
+                    "after": "abc123def456",
+                    "commits": [
+                        {
+                            "added": [],
+                            "modified": [".squadron/config.yaml"],
+                            "removed": [],
+                        }
+                    ],
+                }
+            },
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            await server._handle_config_reload(event)
+
+        # Config should be updated
+        assert server.config.project.name == "updated-project"
+        assert server._config_version == "abc123def456"
+        server.agent_manager._register_trigger_handlers.assert_called_once()

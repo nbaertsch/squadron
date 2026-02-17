@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class ProjectConfig(BaseModel):
     owner: str = ""  # GitHub org/user, e.g. "noahbaertsch"
     repo: str = ""  # GitHub repo name, e.g. "squadron"
     default_branch: str = "main"
-    bot_username: str = "squadron[bot]"  # GitHub App bot username for self-event filtering
+    bot_username: str = "squadron-dev[bot]"  # GitHub App bot username for self-event filtering
 
 
 class LabelsConfig(BaseModel):
@@ -46,15 +46,57 @@ class BranchNamingConfig(BaseModel):
     feature: str = "feat/issue-{issue_number}"
     bugfix: str = "fix/issue-{issue_number}"
     security: str = "security/issue-{issue_number}"
+    docs: str = "docs/issue-{issue_number}"
+    infra: str = "infra/issue-{issue_number}"
     hotfix: str = "hotfix/issue-{issue_number}"
+
+
+class AgentTrigger(BaseModel):
+    """Defines when an agent should be spawned, woken, completed, or put to sleep.
+
+    Actions:
+        - spawn (default): Create a new agent for this role
+        - wake: Wake a sleeping agent of this role (for the matched PR/issue)
+        - complete: Complete an active/sleeping agent of this role
+        - sleep: Transition an active agent to SLEEPING (e.g. after opening PR)
+
+    Examples:
+        - {event: "issues.labeled", label: "feature"}  → spawn on label
+        - {event: "pull_request.opened", condition: {approval_flow: true}}  → spawn reviewer via approval flow
+        - {event: "pull_request.opened", action: "sleep"}  → sleep dev after PR opened
+        - {event: "pull_request.synchronize", action: "wake"}  → wake reviewer on PR update
+        - {event: "pull_request.closed", action: "complete"}  → complete agent on PR close
+        - {event: "pull_request.closed", condition: {merged: false}, action: "wake"}  → wake dev on PR rejection
+        - {event: "pull_request_review.submitted", condition: {review_state: "changes_requested"}, action: "wake"}
+    """
+
+    event: str  # GitHub webhook event type, e.g. "issues.opened", "issues.labeled"
+    label: str | None = None  # Only trigger when this specific label is applied
+    action: Literal["spawn", "wake", "complete", "sleep"] = "spawn"
+    condition: dict[str, Any] | None = None  # e.g. {approval_flow: true}, {merged: false}
 
 
 class AgentRoleConfig(BaseModel):
     agent_definition: str  # Relative path to agent .md file
     singleton: bool = False
-    assignable_labels: list[str] = Field(default_factory=list)
-    trigger: str | None = None  # e.g. "approval_flow"
+    lifecycle: Literal["ephemeral", "persistent"] = "persistent"
+    triggers: list[AgentTrigger] = Field(default_factory=list)  # Event triggers for this agent
     subagents: list[str] = Field(default_factory=list)  # Other agent roles available as subagents
+    branch_template: str | None = (
+        None  # e.g. "feat/issue-{issue_number}"; None → auto from BranchNamingConfig
+    )
+
+    # Backward-compat: accept `stateless: true` → lifecycle: ephemeral
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_stateless(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.pop("stateless", None):
+            data.setdefault("lifecycle", "ephemeral")
+        return data
+
+    @property
+    def is_ephemeral(self) -> bool:
+        return self.lifecycle == "ephemeral"
 
 
 class CircuitBreakerDefaults(BaseModel):
@@ -79,9 +121,9 @@ class CircuitBreakerConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
-    type: str = "anthropic"
-    base_url: str = "https://api.anthropic.com"
-    api_key_env: str = "ANTHROPIC_API_KEY"
+    type: str = "copilot"
+    base_url: str = ""
+    api_key_env: str = ""
 
     @property
     def api_key(self) -> str | None:
@@ -90,12 +132,12 @@ class ProviderConfig(BaseModel):
 
 class ModelOverride(BaseModel):
     model: str
-    reasoning_effort: str = "medium"
+    reasoning_effort: str | None = None
 
 
 class RuntimeConfig(BaseModel):
     default_model: str = "claude-sonnet-4"
-    default_reasoning_effort: str = "medium"
+    default_reasoning_effort: str | None = None
     models: dict[str, ModelOverride] = Field(default_factory=dict)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     reconciliation_interval: int = 300  # seconds
@@ -112,47 +154,207 @@ class EscalationConfig(BaseModel):
     max_issue_depth: int = 3
 
 
+# ── Human Invocation Config ───────────────────────────────────────────────────
+
+
+class HumanInvocationConfig(BaseModel):
+    """Configuration for how to notify humans when agent intervention is needed."""
+
+    method: Literal["github_comment", "issue_label", "both"] = "both"
+    mention_format: str = "@{username}"  # or "@{group}" for team mentions
+    include_context: bool = True  # include failure details in comment
+    labels_to_add: list[str] = Field(default_factory=lambda: ["needs-human"])
+
+
+# ── Review Policy Config (replaces approval_flows + workflows) ────────────────
+
+
+class FailureAction(BaseModel):
+    """Defines what happens when a failure occurs (merge conflict, CI fail, etc.)."""
+
+    action: Literal["spawn", "notify", "escalate"] = "notify"
+    target: str = "maintainers"  # agent role OR human group name
+    fallback: "FailureAction | None" = None  # if primary action fails
+
+
+class AutoMergeConfig(BaseModel):
+    """Configuration for automatic PR merging."""
+
+    enabled: bool = True
+    method: Literal["squash", "merge", "rebase"] = "squash"
+    delete_branch: bool = True
+    require_ci_pass: bool = False  # wait for status checks before merge
+
+    # Failure handlers
+    on_merge_conflict: FailureAction = Field(
+        default_factory=lambda: FailureAction(action="notify", target="maintainers")
+    )
+    on_ci_failed: FailureAction = Field(
+        default_factory=lambda: FailureAction(action="notify", target="maintainers")
+    )
+    on_unknown_error: FailureAction = Field(
+        default_factory=lambda: FailureAction(action="escalate", target="maintainers")
+    )
+
+
+class SynchronizeConfig(BaseModel):
+    """What happens when a PR is updated after reviews."""
+
+    invalidate_approvals: bool = True  # require full re-review (not just "still LGTM")
+    respawn_reviewers: bool = True  # wake/spawn reviewer agents to re-check
+
+
+class ReviewRequirement(BaseModel):
+    """A single review requirement — which role must approve and how many."""
+
+    role: str  # agent role name, e.g. "security-review"
+    count: int = 1  # how many approvals from this role required
+
+
+class MatchCondition(BaseModel):
+    """Conditions for when a review rule applies."""
+
+    labels: list[str] = Field(default_factory=list)  # any label matches
+    paths: list[str] = Field(default_factory=list)  # glob patterns for changed files
+    base_branch: str | None = None  # target branch must match
+
+    def matches(
+        self, labels: list[str], changed_files: list[str] | None = None, base_branch: str = ""
+    ) -> bool:
+        """Check if this condition matches the given PR context."""
+        import fnmatch
+
+        # Label match: any overlap (if labels specified)
+        if self.labels:
+            if not any(lbl in self.labels for lbl in labels):
+                return False
+
+        # Path match: any changed file matches any glob (if paths specified)
+        if self.paths and changed_files is not None:
+            if not any(
+                fnmatch.fnmatch(f, pattern) for f in changed_files for pattern in self.paths
+            ):
+                return False
+
+        # Base branch match (if specified)
+        if self.base_branch and base_branch != self.base_branch:
+            return False
+
+        return True
+
+
+class ReviewRule(BaseModel):
+    """A conditional review rule — when matched, adds requirements."""
+
+    name: str
+    match: MatchCondition
+    requirements: list[ReviewRequirement] = Field(default_factory=list)
+    sequence: list[str] = Field(default_factory=list)  # optional: enforce review order
+
+
+class ReviewPolicyConfig(BaseModel):
+    """Unified PR review policy — replaces approval_flows + workflows.
+
+    Defines:
+    - Which roles must approve PRs (default + conditional rules)
+    - Optional sequencing (role A must approve before role B starts)
+    - Auto-merge behavior and failure handling
+    - What happens when PRs are updated after review
+    """
+
+    enabled: bool = True
+
+    # Auto-merge configuration
+    auto_merge: AutoMergeConfig = Field(default_factory=AutoMergeConfig)
+
+    # What happens when PR is updated after approvals
+    on_synchronize: SynchronizeConfig = Field(default_factory=SynchronizeConfig)
+
+    # Default requirements for all PRs
+    default_requirements: list[ReviewRequirement] = Field(
+        default_factory=lambda: [ReviewRequirement(role="pr-review", count=1)]
+    )
+
+    # Conditional rules (additive with defaults)
+    rules: list[ReviewRule] = Field(default_factory=list)
+
+    def get_requirements_for_pr(
+        self,
+        labels: list[str],
+        changed_files: list[str] | None = None,
+        base_branch: str = "",
+    ) -> tuple[list[ReviewRequirement], list[str]]:
+        """Get all review requirements for a PR.
+
+        Returns:
+            Tuple of (requirements_list, sequence_list).
+            - requirements_list: All required roles with counts
+            - sequence_list: Order in which roles must approve (empty = parallel)
+        """
+        # Start with defaults
+        requirements: dict[str, int] = {}
+        for req in self.default_requirements:
+            requirements[req.role] = max(requirements.get(req.role, 0), req.count)
+
+        # Add from matching rules
+        sequence: list[str] = []
+        for rule in self.rules:
+            if rule.match.matches(labels, changed_files, base_branch):
+                for req in rule.requirements:
+                    requirements[req.role] = max(requirements.get(req.role, 0), req.count)
+                # Use sequence from first matching rule that defines one
+                if rule.sequence and not sequence:
+                    sequence = rule.sequence
+
+        return [ReviewRequirement(role=r, count=c) for r, c in requirements.items()], sequence
+
+    def get_required_roles(
+        self,
+        labels: list[str],
+        changed_files: list[str] | None = None,
+        base_branch: str = "",
+    ) -> list[str]:
+        """Get list of required reviewer roles for a PR."""
+        requirements, _ = self.get_requirements_for_pr(labels, changed_files, base_branch)
+        return [req.role for req in requirements]
+
+
+# ── Legacy: ApprovalFlowConfig (deprecated, kept for backward compatibility) ──
+
+
 class ApprovalFlowRule(BaseModel):
-    """A single approval flow rule — maps labels/paths to review agent roles."""
+    """DEPRECATED: Use review_policy instead. Kept for backward compatibility."""
 
     name: str
     match_labels: list[str] = Field(default_factory=list)
-    match_paths: list[str] = Field(default_factory=list)  # glob patterns
-    reviewers: list[str] = Field(default_factory=list)  # role names
+    match_paths: list[str] = Field(default_factory=list)
+    reviewers: list[str] = Field(default_factory=list)
     required_approvals: int = 1
 
     def matches(self, labels: list[str], changed_files: list[str] | None = None) -> bool:
-        """Check if this rule matches the given PR labels and changed files."""
         import fnmatch
 
-        # Label match: any overlap
         if self.match_labels:
             if not any(lbl in self.match_labels for lbl in labels):
                 return False
-
-        # Path match: any changed file matches any glob
         if self.match_paths and changed_files is not None:
             if not any(
                 fnmatch.fnmatch(f, pattern) for f in changed_files for pattern in self.match_paths
             ):
                 return False
-
         return True
 
 
 class ApprovalFlowConfig(BaseModel):
-    """Approval flow configuration — defines which reviewers to spawn for PRs."""
+    """DEPRECATED: Use review_policy instead. Kept for backward compatibility."""
 
-    enabled: bool = True
-    default_reviewers: list[str] = Field(
-        default_factory=lambda: ["pr-review"]
-    )  # roles always assigned
+    enabled: bool = False  # Disabled by default — use review_policy
+    default_reviewers: list[str] = Field(default_factory=list)
     rules: list[ApprovalFlowRule] = Field(default_factory=list)
 
     def get_reviewers_for_pr(
         self, labels: list[str], changed_files: list[str] | None = None
     ) -> list[str]:
-        """Return the set of reviewer roles for a PR based on labels/files."""
         roles = set(self.default_reviewers)
         for rule in self.rules:
             if rule.matches(labels, changed_files):
@@ -171,9 +373,15 @@ class SquadronConfig(BaseModel):
     circuit_breakers: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     escalation: EscalationConfig = Field(default_factory=EscalationConfig)
+
+    # New unified review policy (replaces approval_flows + workflows)
+    review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
+    human_invocation: HumanInvocationConfig = Field(default_factory=HumanInvocationConfig)
+
+    # DEPRECATED: kept for backward compatibility, use review_policy instead
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
-    commands: dict[str, CommandDefinition] = Field(default_factory=dict)
-    workflows: list[WorkflowDefinition] = Field(default_factory=list)
+    commands: dict[str, "CommandDefinition"] = Field(default_factory=dict)
+    workflows: list["WorkflowDefinition"] = Field(default_factory=list)
 
 
 # ── Workflow Definitions ─────────────────────────────────────────────────────
@@ -334,8 +542,10 @@ class AgentDefinition(BaseModel):
     name: str = ""  # Defaults to role if not set
     display_name: str = ""
     description: str = ""
+    emoji: str = "🤖"  # Default emoji for agent signatures
     infer: bool = True
-    tools: list[str] = Field(default_factory=list)
+    tools: list[str] | None = None  # Allowlist of tool names (built-in aliases + custom).
+    #                                  None = all tools available; list = only listed tools.
     mcp_servers: dict[str, MCPServerDefinition] = Field(default_factory=dict)
 
     def to_custom_agent_config(self) -> dict[str, Any]:
@@ -431,7 +641,7 @@ def parse_agent_definition(role: str, content: str) -> AgentDefinition:
         display_name=fm.get("display_name", ""),
         description=fm.get("description", ""),
         infer=fm.get("infer", True),
-        tools=fm.get("tools", []) or [],
+        tools=fm.get("tools") or None,
         mcp_servers=mcp_servers,
     )
 
@@ -528,12 +738,14 @@ def load_workflow_definitions(squadron_dir: Path) -> list[WorkflowDefinition]:
 
     return definitions
 
+
 # ── Command Configuration ─────────────────────────────────────────────────────
 
 
 class CommandDefinition(BaseModel):
     """Configuration for a specific command."""
+
     enabled: bool = True
     invoke_agent: bool = True
     delegate_to: str | None = None  # Agent role to delegate to if invoke_agent is True
-    response: str | None = None     # Static response for commands with invoke_agent=False
+    response: str | None = None  # Static response for commands with invoke_agent=False

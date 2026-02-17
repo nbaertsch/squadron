@@ -179,7 +179,12 @@ class TestIssuePayloads:
         assert evt.data["payload"]["issue"]["state_reason"] == "completed"
 
     async def test_bot_sender_filtered(self, client, event_queue, registry, config, payloads):
-        """When squadron[bot] is the sender, the event should be filtered."""
+        """Bot self-events should be filtered UNLESS they are workflow triggers.
+
+        pull_request.opened from the bot IS a workflow trigger (dev agents
+        open PRs to trigger review), so it should pass through to handlers.
+        Non-workflow bot events (e.g. issue_comment.created) remain filtered.
+        """
         payload = payloads["pull_request_opened"]
         _send_webhook(client, "pull_request", payload)
 
@@ -187,13 +192,14 @@ class TestIssuePayloads:
         assert raw.sender == "squadron[bot]"
         assert raw.is_bot is True
 
-        # Route — should be filtered
+        # Route — pull_request.opened IS a bot-allowed workflow trigger
         router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
         handler = AsyncMock()
         router.on(SquadronEventType.PR_OPENED, handler)
         await router._route_event(raw)
 
-        handler.assert_not_called()
+        # Handler SHOULD be called — bot PR opens are workflow triggers
+        handler.assert_called_once()
 
 
 class TestPullRequestPayloads:
@@ -334,27 +340,36 @@ class TestCommentPayloads:
         assert evt.data["payload"]["comment"]["body"] == "@squadron can you also add PKCE support?"
 
 
-# ── PM Queue Routing ─────────────────────────────────────────────────────────
+# ── Handler Routing ──────────────────────────────────────────────────────────
 
 
-class TestPMQueueRouting:
-    """Verify that the right events land in the PM queue."""
+class TestHandlerRouting:
+    """Verify that events reach registered handlers."""
 
-    async def test_issue_events_routed_to_pm(self, client, event_queue, registry, config, payloads):
+    async def test_issue_events_reach_handlers(
+        self, client, event_queue, registry, config, payloads
+    ):
         for event_name in ["issues_opened", "issues_closed"]:
             payload = payloads[event_name]
             gh_event_type = "issues"
-            _send_webhook(client, gh_event_type, payload, delivery_id=f"pm-{event_name}")
+            _send_webhook(client, gh_event_type, payload, delivery_id=f"h-{event_name}")
 
         raw1: GitHubEvent = event_queue.get_nowait()
         raw2: GitHubEvent = event_queue.get_nowait()
 
         router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
+        received = []
+
+        async def handler(event):
+            received.append(event)
+
+        router.on(SquadronEventType.ISSUE_OPENED, handler)
+        router.on(SquadronEventType.ISSUE_CLOSED, handler)
         await router._route_event(raw1)
         await router._route_event(raw2)
 
-        # Both should be in PM queue
-        assert router.pm_queue.qsize() == 2
+        # Both should reach handlers
+        assert len(received) == 2
 
 
 # ── Deduplication ────────────────────────────────────────────────────────────

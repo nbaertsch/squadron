@@ -1,13 +1,23 @@
 """Event Router — consumes raw GitHub events and dispatches to agents.
 
-Runs as an async consumer loop. Handles:
-- Bot self-event filtering (squadron[bot] events)
-- Webhook deduplication (X-GitHub-Delivery UUID)
-- Event type → handler dispatch
-- PM queue routing for triage events
-- Agent inbox routing for targeted events
+Runs as an async consumer loop.  Two routing layers:
 
-See event-routing.md and AD-013 for design details.
+**Layer 1 — Structural events** (config-driven triggers):
+  PR opened/closed/merged, issue labeled/closed/reopened, push, etc.
+  These fire based on ``config.yaml agent_roles.triggers``.
+
+**Layer 2 — Command-based routing**:
+  ``issue_comment.created`` events are parsed for ``@squadron-dev`` commands:
+  - ``@squadron-dev help`` — lists available agents
+  - ``@squadron-dev <agent>: <message>`` — routes to specific agent
+
+  A self-loop guard prevents an agent from re-triggering itself.
+
+Other responsibilities:
+- Webhook deduplication (X-GitHub-Delivery UUID)
+- Command parsing (populated on ``SquadronEvent.command``)
+
+See event-routing.md, AD-013 for design details.
 """
 
 from __future__ import annotations
@@ -15,20 +25,27 @@ from __future__ import annotations
 import re
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 
-from squadron.models import GitHubEvent, SquadronEvent, SquadronEventType
+from squadron.models import (
+    GitHubEvent,
+    ParsedCommand,
+    SquadronEvent,
+    SquadronEventType,
+    parse_command,
+)
 
 if TYPE_CHECKING:
     from squadron.config import SquadronConfig
     from squadron.registry import AgentRegistry
-    from squadron.workflow_engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
 
 # Map GitHub event types to internal event types
 EVENT_MAP: dict[str, SquadronEventType] = {
     "issues.opened": SquadronEventType.ISSUE_OPENED,
+    "issues.reopened": SquadronEventType.ISSUE_REOPENED,
     "issues.closed": SquadronEventType.ISSUE_CLOSED,
     "issues.assigned": SquadronEventType.ISSUE_ASSIGNED,
     "issues.labeled": SquadronEventType.ISSUE_LABELED,
@@ -40,6 +57,10 @@ EVENT_MAP: dict[str, SquadronEventType] = {
     "push": SquadronEventType.PUSH,
 }
 
+# Reverse map: SquadronEventType → GitHub event type string.
+# Used by trigger matching to compare config triggers against internal events.
+REVERSE_EVENT_MAP: dict[SquadronEventType, str] = {v: k for k, v in EVENT_MAP.items()}
+
 
 class EventRouter:
     """Async consumer loop that routes GitHub events to the right handler."""
@@ -49,36 +70,29 @@ class EventRouter:
         event_queue: asyncio.Queue[GitHubEvent],
         registry: AgentRegistry,
         config: SquadronConfig,
-        bot_username: str = "squadron[bot]",
     ):
         self.event_queue = event_queue
         self.registry = registry
         self.config = config
-        self.bot_username = bot_username
 
         # Handler callbacks, registered by the Agent Manager
         self._handlers: dict[
             SquadronEventType, list[Callable[[SquadronEvent], Awaitable[None]]]
         ] = {}
 
-        # PM event queue — batched events for PM processing
-        self.pm_queue: asyncio.Queue[SquadronEvent] = asyncio.Queue()
-
-        # Workflow engine (optional — set via set_workflow_engine)
-        self._workflow_engine: WorkflowEngine | None = None
-
         self._running = False
         self._task: asyncio.Task | None = None
-
-    def set_workflow_engine(self, engine: WorkflowEngine) -> None:
-        """Attach the workflow engine for event-driven pipeline triggers."""
-        self._workflow_engine = engine
+        self.last_event_time: str | None = None  # ISO timestamp of last dispatched event
 
     def on(
         self, event_type: SquadronEventType, handler: Callable[[SquadronEvent], Awaitable[None]]
     ) -> None:
         """Register an event handler."""
         self._handlers.setdefault(event_type, []).append(handler)
+
+    def clear_handlers_for(self, event_type: SquadronEventType) -> None:
+        """Remove all handlers for a given event type."""
+        self._handlers.pop(event_type, None)
 
     async def start(self) -> None:
         """Start the event consumer loop."""
@@ -113,13 +127,15 @@ class EventRouter:
                 logger.exception("Error routing event %s", event.delivery_id)
 
     async def _route_event(self, event: GitHubEvent) -> None:
-        """Route a single GitHub event."""
-        # 1. Bot self-event filter
-        if event.sender == self.bot_username:
-            logger.debug("Filtered bot self-event: %s", event.full_type)
-            return
+        """Route a single GitHub event.
 
-        # 2. Webhook deduplication
+        Structural events (PR, label, issue lifecycle) are routed via
+        config-driven triggers.  Comment events are routed via command
+        parsing — only comments with ``@squadron-dev <agent>: <message>``
+        or ``@squadron-dev help`` syntax are dispatched.  A self-loop
+        guard in the AgentManager prevents an agent from re-triggering itself.
+        """
+        # 1. Webhook deduplication
         if await self.registry.has_seen_event(event.delivery_id):
             logger.debug("Duplicate event filtered: %s", event.delivery_id)
             return
@@ -134,42 +150,17 @@ class EventRouter:
         # 4. Create internal event
         squadron_event = self._to_squadron_event(event, internal_type)
 
-        # 5. Workflow engine evaluation (triggers pipelines before normal dispatch)
-        if self._workflow_engine:
-            try:
-                triggered = await self._workflow_engine.evaluate_event(
-                    event.full_type,
-                    event.payload,
-                    squadron_event,
-                )
-                if triggered:
-                    logger.info(
-                        "Workflow triggered for %s — skipping approval flow", event.full_type
-                    )
-
-                # For PR review events, check if this advances a workflow stage
-                if (
-                    internal_type == SquadronEventType.PR_REVIEW_SUBMITTED
-                    and squadron_event.pr_number
-                ):
-                    review = event.payload.get("review", {})
-                    await self._workflow_engine.handle_pr_review(
-                        pr_number=squadron_event.pr_number,
-                        reviewer=review.get("user", {}).get("login", ""),
-                        review_state=review.get("state", ""),
-                        payload=event.payload,
-                        squadron_event=squadron_event,
-                    )
-            except Exception:
-                logger.exception("Workflow engine error for %s", event.full_type)
-
-        # 6. Dispatch to handlers
+        # 5. Dispatch to handlers (all routing is config-driven via AgentManager)
         await self._dispatch(squadron_event)
 
     def _to_squadron_event(
         self, event: GitHubEvent, event_type: SquadronEventType
     ) -> SquadronEvent:
-        """Convert a GitHub event to an internal SquadronEvent."""
+        """Convert a GitHub event to an internal SquadronEvent.
+
+        For comment events, parses ``@squadron-dev <agent>: <message>``
+        command syntax and populates ``command``.
+        """
         issue_number = None
         pr_number = None
 
@@ -181,11 +172,18 @@ class EventRouter:
         if event.payload.get("issue", {}).get("pull_request"):
             pr_number = event.payload["issue"]["number"]
 
+        # Parse @squadron-dev command syntax from comment body
+        command: ParsedCommand | None = None
+        if event_type == SquadronEventType.ISSUE_COMMENT:
+            comment_body = (event.comment or {}).get("body", "")
+            command = parse_command(comment_body)
+
         return SquadronEvent(
             event_type=event_type,
             source_delivery_id=event.delivery_id,
             issue_number=issue_number,
             pr_number=pr_number,
+            command=command,
             data={
                 "action": event.action,
                 "sender": event.sender,
@@ -195,77 +193,88 @@ class EventRouter:
 
     def _is_command_comment(self, comment_body: str) -> tuple[bool, str | None]:
         """Check if a comment is a squadron command.
-        
+
         Returns:
             (is_command, command_name) where is_command is True if this is a command,
             and command_name is the command if found.
         """
         if not comment_body:
             return False, None
-            
+
         # Check for @squadron-dev mentions
         mention_pattern = r"@squadron-dev\s+(\w+)"
         match = re.search(mention_pattern, comment_body, re.IGNORECASE)
-        
+
         if match:
             command_name = match.group(1).lower()
             return True, command_name
-            
+
         return False, None
-    
+
     async def _handle_command(self, event: SquadronEvent, command_name: str) -> bool:
         """Handle a squadron command.
-        
+
         Returns:
             True if the command was handled (skip normal routing), False otherwise.
         """
         command_config = self.config.commands.get(command_name)
-        
+
         if not command_config or not command_config.enabled:
             # Unknown or disabled command, treat as regular comment
             return False
-            
+
         if not command_config.invoke_agent:
             # Command doesn't invoke agent - post response and stop routing
             if command_config.response and event.issue_number:
                 # TODO: Post command response as comment (requires github client access)
                 logger.info(
-                    "Command '%s' handled with static response (issue #%s)", 
-                    command_name, event.issue_number
+                    "Command '%s' handled with static response (issue #%s)",
+                    command_name,
+                    event.issue_number,
                 )
             return True  # Skip normal routing
-            
+
         # Command should invoke agent - check delegation
         if command_config.delegate_to:
             # TODO: Route to specific agent role
             logger.info(
                 "Command '%s' delegated to %s agent (issue #%s)",
-                command_name, command_config.delegate_to, event.issue_number
+                command_name,
+                command_config.delegate_to,
+                event.issue_number,
             )
-        
+
         return False  # Continue with normal routing
 
     async def _dispatch(self, event: SquadronEvent) -> None:
-        """Dispatch an event to registered handlers and route to PM/agent inboxes."""
+        """Dispatch an event to registered handlers.
+
+        All routing logic is config-driven — handlers are registered by the
+        AgentManager based on config.yaml trigger definitions.  The router
+        itself has no opinion about which events go where.
+        """
+        self.last_event_time = datetime.now(timezone.utc).isoformat()
+
         logger.info(
             "Dispatching event: %s (issue=#%s, pr=#%s)",
             event.event_type,
             event.issue_number,
             event.pr_number,
         )
-        
+
         # Handle comment events that might be commands
         if event.event_type == SquadronEventType.ISSUE_COMMENT:
             comment_body = event.data.get("payload", {}).get("comment", {}).get("body", "")
             is_command, command_name = self._is_command_comment(comment_body)
-            
+
             if is_command:
                 command_handled = await self._handle_command(event, command_name)
                 if command_handled:
                     # Command was handled, skip normal routing
                     logger.info(
                         "Command '%s' handled, skipping PM routing (issue #%s)",
-                        command_name, event.issue_number
+                        command_name,
+                        event.issue_number,
                     )
                     # Still call registered handlers for command events
                     handlers = self._handlers.get(event.event_type, [])
@@ -275,28 +284,6 @@ class EventRouter:
                         except Exception:
                             logger.exception("Handler error for %s", event.event_type)
                     return
-
-        # PM-bound events: issue triage, comments with @-pings, blocker resolution
-        pm_events = {
-            SquadronEventType.ISSUE_OPENED,
-            SquadronEventType.ISSUE_CLOSED,
-            SquadronEventType.ISSUE_COMMENT,
-            SquadronEventType.ISSUE_LABELED,
-        }
-
-        if event.event_type in pm_events:
-            await self.pm_queue.put(event)
-
-        # PR events: route to approval flow / review agents
-        pr_events = {
-            SquadronEventType.PR_OPENED,
-            SquadronEventType.PR_REVIEW_SUBMITTED,
-            SquadronEventType.PR_SYNCHRONIZED,
-        }
-
-        if event.event_type in pr_events:
-            # Also send to PM for awareness
-            await self.pm_queue.put(event)
 
         # Call registered handlers
         handlers = self._handlers.get(event.event_type, [])
