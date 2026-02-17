@@ -773,8 +773,8 @@ class TestWipCommitAndPush:
 
         calls = []
 
-        async def fake_run_git_in(cwd, *args, timeout=60):
-            calls.append(args)
+        async def fake_run_git_in(cwd, *args, timeout=60, auth=False):
+            calls.append((args, auth))
             if args[0] == "status":
                 return (0, "M  src/main.py\n", "")
             return (0, "", "")
@@ -784,11 +784,12 @@ class TestWipCommitAndPush:
         await mgr._wip_commit_and_push(agent)
 
         assert len(calls) == 4
-        assert calls[0] == ("add", "-A")
-        assert calls[1][:1] == ("status",)
-        assert calls[2][0] == "commit"
-        assert "[squadron-wip]" in calls[2][2]
-        assert calls[3] == ("push", "origin", "feat/issue-42")
+        assert calls[0][0] == ("add", "-A")
+        assert calls[1][0][:1] == ("status",)
+        assert calls[2][0][0] == "commit"
+        assert "[squadron-wip]" in calls[2][0][2]
+        assert calls[3][0] == ("push", "origin", "feat/issue-42")
+        assert calls[3][1] is True  # auth=True for push
 
     async def test_skips_commit_when_no_changes(self, tmp_path):
         """Should not commit or push if working tree is clean."""
@@ -800,8 +801,8 @@ class TestWipCommitAndPush:
 
         calls = []
 
-        async def fake_run_git_in(cwd, *args, timeout=60):
-            calls.append(args)
+        async def fake_run_git_in(cwd, *args, timeout=60, auth=False):
+            calls.append((args, auth))
             if args[0] == "status":
                 return (0, "", "")  # clean
             return (0, "", "")
@@ -811,7 +812,7 @@ class TestWipCommitAndPush:
         await mgr._wip_commit_and_push(agent)
 
         assert len(calls) == 2  # add + status only, no commit/push
-        assert calls[0] == ("add", "-A")
+        assert calls[0][0] == ("add", "-A")
 
     async def test_skips_when_no_worktree(self, tmp_path):
         """Should silently skip if agent has no worktree."""
