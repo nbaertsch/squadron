@@ -205,6 +205,19 @@ class AgentRegistry:
         rows = await cursor.fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    async def get_all_agents_for_issue(self, issue_number: int) -> list[AgentRecord]:
+        """Get ALL agents assigned to an issue, regardless of status.
+
+        Used for duplicate detection — includes completed/failed agents to prevent
+        UNIQUE constraint violations when re-spawning.
+        """
+        cursor = await self.db.execute(
+            "SELECT * FROM agents WHERE issue_number = ? ORDER BY created_at DESC",
+            (issue_number,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     async def get_agents_by_status(self, status: AgentStatus) -> list[AgentRecord]:
         """Get all agents with a given status."""
         cursor = await self.db.execute("SELECT * FROM agents WHERE status = ?", (status.value,))

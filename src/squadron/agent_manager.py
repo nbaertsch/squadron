@@ -324,8 +324,10 @@ class AgentManager:
                 return
 
         # Duplicate guard (ephemeral agents skip)
+        # Use get_all_agents_for_issue to include completed/failed agents and prevent
+        # UNIQUE constraint violations (issue #13)
         if not role_config.is_ephemeral:
-            existing = await self.registry.get_agents_for_issue(issue_number)
+            existing = await self.registry.get_all_agents_for_issue(issue_number)
             if any(a.role == role_name for a in existing):
                 logger.info(
                     "Agent %s already exists for issue #%d — skipping",
@@ -653,10 +655,15 @@ class AgentManager:
             agent_id = f"{role}-issue-{issue_number}"
 
         # Duplicate guard for persistent agents — check by role + issue
+        # Use get_all_agents_for_issue to include terminal agents (issue #13)
         if not is_ephemeral:
-            existing_agents = await self.registry.get_agents_for_issue(issue_number)
+            existing_agents = await self.registry.get_all_agents_for_issue(issue_number)
             for existing in existing_agents:
-                if existing.role == role:
+                if existing.role == role and existing.status in (
+                    AgentStatus.CREATED,
+                    AgentStatus.ACTIVE,
+                    AgentStatus.SLEEPING,
+                ):
                     logger.warning(
                         "Agent %s already exists for role=%s issue=#%d — skipping",
                         existing.agent_id,
@@ -1975,7 +1982,8 @@ class AgentManager:
         assert event.issue_number is not None
 
         # Look for existing agents of this role for this issue
-        existing_agents = await self.registry.get_agents_for_issue(event.issue_number)
+        # Use get_all_agents_for_issue to find terminal agents too (issue #13)
+        existing_agents = await self.registry.get_all_agents_for_issue(event.issue_number)
         role_agents = [a for a in existing_agents if a.role == role_name]
 
         if role_agents:
