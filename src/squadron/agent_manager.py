@@ -1202,11 +1202,33 @@ class AgentManager:
             except Exception:
                 logger.warning("Failed to stop CopilotAgent for %s", agent_id)
 
-        # Remove task and inbox
+        # Remove task
         self._agent_tasks.pop(agent_id, None)
         # Cancel watchdog timer
         self._cancel_watchdog(agent_id)
-        self.agent_inboxes.pop(agent_id, None)
+
+        # Drain inbox and re-queue pending commands for ephemeral singletons
+        inbox = self.agent_inboxes.pop(agent_id, None)
+        if inbox and not inbox.empty():
+            agent_record = await self.registry.get_agent(agent_id)
+            if agent_record:
+                role_config = self.config.agent_roles.get(agent_record.role)
+                if role_config and role_config.is_ephemeral and role_config.singleton:
+                    pending_events = []
+                    while not inbox.empty():
+                        pending_events.append(inbox.get_nowait())
+                    if pending_events:
+                        logger.info(
+                            "Agent %s completed with %d pending inbox events — re-spawning",
+                            agent_id,
+                            len(pending_events),
+                        )
+                        # Spawn new agent for each pending command
+                        for event in pending_events:
+                            asyncio.create_task(
+                                self._command_spawn(agent_record.role, role_config, event),
+                                name=f"respawn-{agent_record.role}-{event.issue_number}",
+                            )
 
         # Remove git worktree (if any)
         agent_record = await self.registry.get_agent(agent_id)
@@ -1911,16 +1933,26 @@ class AgentManager:
         event: SquadronEvent,
     ) -> None:
         """Spawn an ephemeral agent via command routing."""
-        # Singleton guard — same as config triggers
+        # Singleton guard — if agent already active, deliver to its inbox
         if role_config.singleton:
             all_active = await self.registry.get_all_active_agents()
             active_of_role = [a for a in all_active if a.role == role_name]
             if active_of_role:
-                logger.info(
-                    "Singleton role %s already has active agent %s — skipping command spawn",
-                    role_name,
-                    active_of_role[0].agent_id,
-                )
+                active_agent = active_of_role[0]
+                inbox = self.agent_inboxes.get(active_agent.agent_id)
+                if inbox is not None:
+                    await inbox.put(event)
+                    logger.info(
+                        "Singleton %s already active (%s) — delivered command to inbox",
+                        role_name,
+                        active_agent.agent_id,
+                    )
+                else:
+                    logger.warning(
+                        "Singleton %s already active (%s) but no inbox — command dropped",
+                        role_name,
+                        active_agent.agent_id,
+                    )
                 return
 
         assert event.issue_number is not None
