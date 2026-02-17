@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import re
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
@@ -141,5 +142,41 @@ class SquadronEvent(BaseModel):
     agent_id: str | None = Field(default=None, description="Related agent, if any")
     issue_number: int | None = None
     pr_number: int | None = None
+    mentioned_roles: list[str] = Field(
+        default_factory=list,
+        description="Agent roles mentioned in the comment body (e.g. ['pm', 'feat-dev'])",
+    )
     data: dict = Field(default_factory=dict, description="Event-specific data")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Mention Parsing ──────────────────────────────────────────────────────────
+
+# Matches @role or /role at word boundaries.  Role names may contain
+# letters, digits, and hyphens (e.g. feat-dev, pr-review, docs-dev).
+_MENTION_RE = re.compile(r"(?:^|(?<=\s))[@/]([\w][\w-]*)", re.MULTILINE)
+
+
+def parse_mentions(text: str, known_roles: set[str]) -> list[str]:
+    """Extract agent role mentions from a comment body.
+
+    Supports two mention styles:
+    - ``@role`` — e.g. ``@pm``, ``@feat-dev``
+    - ``/role`` — e.g. ``/pm``, ``/feat-dev``
+
+    Only returns roles that exist in *known_roles* to avoid false positives
+    (e.g. ``@someone-random`` is ignored).
+
+    Returns a deduplicated list in the order first seen.
+    """
+    if not text:
+        return []
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for match in _MENTION_RE.finditer(text):
+        role = match.group(1).lower()
+        if role in known_roles and role not in seen:
+            seen.add(role)
+            result.append(role)
+    return result

@@ -1,16 +1,22 @@
 """Event Router — consumes raw GitHub events and dispatches to agents.
 
-Runs as an async consumer loop. Handles:
-- Bot self-event filtering (squadron[bot] events)
+Runs as an async consumer loop.  Two routing layers:
+
+**Layer 1 — Structural events** (config-driven triggers):
+  PR opened/closed/merged, issue labeled/closed/reopened, push, etc.
+  These fire based on ``config.yaml agent_roles.triggers``.
+
+**Layer 2 — Conversational routing** (mention-based):
+  ``issue_comment.created`` events are parsed for ``@role`` / ``/role``
+  mentions.  Only the mentioned roles are invoked — comments without
+  role mentions are ignored.  A self-loop guard prevents an agent from
+  re-triggering its own role via its own comments.
+
+Other responsibilities:
 - Webhook deduplication (X-GitHub-Delivery UUID)
-- Event type → handler dispatch (config-driven triggers)
+- Mention parsing (populated on ``SquadronEvent.mentioned_roles``)
 
-All event→agent routing is defined in config.yaml agent_roles.triggers.
-The router itself has NO hardcoded routing logic — it maps GitHub events
-to SquadronEventType and calls registered handlers.  Workflow pipeline
-evaluation is handled by the AgentManager (unified dispatch).
-
-See event-routing.md and AD-013 for design details.
+See event-routing.md, AD-013 for design details.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 
-from squadron.models import GitHubEvent, SquadronEvent, SquadronEventType
+from squadron.models import GitHubEvent, SquadronEvent, SquadronEventType, parse_mentions
 
 if TYPE_CHECKING:
     from squadron.config import SquadronConfig
@@ -115,10 +121,11 @@ class EventRouter:
     async def _route_event(self, event: GitHubEvent) -> None:
         """Route a single GitHub event.
 
-        All events are routed regardless of sender.  Loop protection is
-        handled by existing guards: webhook dedup, singleton, duplicate
-        agent, and circuit breakers.  What triggers what is fully
-        controlled by the user's config.yaml triggers.
+        Structural events (PR, label, issue lifecycle) are routed via
+        config-driven triggers.  Comment events are routed via mention
+        parsing — only comments that ``@role`` or ``/role``-mention a
+        known agent role are dispatched.  A self-loop guard in the
+        AgentManager prevents an agent from re-triggering itself.
         """
         # 1. Webhook deduplication
         if await self.registry.has_seen_event(event.delivery_id):
@@ -141,7 +148,11 @@ class EventRouter:
     def _to_squadron_event(
         self, event: GitHubEvent, event_type: SquadronEventType
     ) -> SquadronEvent:
-        """Convert a GitHub event to an internal SquadronEvent."""
+        """Convert a GitHub event to an internal SquadronEvent.
+
+        For comment events, parses ``@role`` / ``/role`` mentions from
+        the comment body and populates ``mentioned_roles``.
+        """
         issue_number = None
         pr_number = None
 
@@ -153,11 +164,19 @@ class EventRouter:
         if event.payload.get("issue", {}).get("pull_request"):
             pr_number = event.payload["issue"]["number"]
 
+        # Parse @role / /role mentions from comment body
+        mentioned_roles: list[str] = []
+        if event_type == SquadronEventType.ISSUE_COMMENT:
+            comment_body = (event.comment or {}).get("body", "")
+            known_roles = set(self.config.agent_roles.keys())
+            mentioned_roles = parse_mentions(comment_body, known_roles)
+
         return SquadronEvent(
             event_type=event_type,
             source_delivery_id=event.delivery_id,
             issue_number=issue_number,
             pr_number=pr_number,
+            mentioned_roles=mentioned_roles,
             data={
                 "action": event.action,
                 "sender": event.sender,

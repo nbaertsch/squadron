@@ -62,7 +62,8 @@ agent_roles:
     triggers:
       - event: "issues.opened"
       - event: "issues.reopened"
-      - event: "issue_comment.created"
+      # Comments are routed via @pm / /pm mentions (Layer 2 routing).
+      # No issue_comment.created trigger needed — mention routing handles it.
     subagents: [feat-dev, bug-fix, pr-review, security-review, docs-dev, infra-dev]
 
   feat-dev:

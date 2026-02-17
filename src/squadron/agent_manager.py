@@ -103,6 +103,9 @@ class AgentManager:
         # that appear in agent_roles.triggers
         self._register_trigger_handlers()
 
+        # Register mention-based routing for comment events (Layer 2)
+        self.router.on(SquadronEventType.ISSUE_COMMENT, self._handle_mention_routing)
+
         # Register lifecycle handler for issue close (unblocking)
         self.router.on(SquadronEventType.ISSUE_CLOSED, self._handle_issue_closed)
 
@@ -115,8 +118,8 @@ class AgentManager:
         """Stop all agents gracefully."""
         self._running = False
 
-        # Stop all running agent tasks
-        for agent_id, task in self._agent_tasks.items():
+        # Stop all running agent tasks (snapshot to avoid dict-changed-during-iteration)
+        for agent_id, task in list(self._agent_tasks.items()):
             logger.info("Stopping agent %s", agent_id)
             task.cancel()
             try:
@@ -132,12 +135,12 @@ class AgentManager:
                 await self.registry.update_agent(agent)
 
         # Cancel all watchdog timers
-        for agent_id, watchdog in self._watchdog_tasks.items():
+        for agent_id, watchdog in list(self._watchdog_tasks.items()):
             watchdog.cancel()
         self._watchdog_tasks.clear()
 
         # Stop all CopilotAgent instances (CLI subprocesses)
-        for agent_id, copilot in self._copilot_agents.items():
+        for agent_id, copilot in list(self._copilot_agents.items()):
             await copilot.stop()
         self._copilot_agents.clear()
 
@@ -1648,6 +1651,206 @@ class AgentManager:
         match = re.search(r"(?:closes|fixes|resolves)\s+#(\d+)", body, re.IGNORECASE)
         return int(match.group(1)) if match else None
 
+    # ── Mention-Based Routing (Layer 2) ──────────────────────────────────
+
+    def _get_sender_agent_role(self, event: SquadronEvent) -> str | None:
+        """Determine if the comment sender is a squadron agent, and return its role.
+
+        Uses the bot_username from config to detect bot-authored comments,
+        then checks the comment prefix (``[squadron:role]``) to identify
+        which agent role posted it.  Returns ``None`` for human senders.
+        """
+        import re as _re
+
+        payload = event.data.get("payload", {})
+        comment_data = payload.get("comment", {})
+        sender = comment_data.get("user", {})
+
+        # Only apply self-loop guard to bot-authored comments
+        sender_login = (sender.get("login") or "").lower()
+        bot_username = (self.config.project.bot_username or "").lower()
+
+        # Match "squadron-dev[bot]" login or type == "Bot"
+        is_bot = sender.get("type") == "Bot" or (bot_username and sender_login == bot_username)
+        if not is_bot:
+            return None
+
+        # Extract role from comment body prefix: [squadron:role]
+        body = comment_data.get("body", "")
+        match = _re.match(r"\*?\*?\[squadron[:\s]*(\S+?)\]", body)
+        if match:
+            return match.group(1).lower()
+
+        return None
+
+    async def _handle_mention_routing(self, event: SquadronEvent) -> None:
+        """Route comment events based on @role / /role mentions.
+
+        This is Layer 2 routing — conversational, mention-based dispatch:
+
+        1. Parse ``@role`` or ``/role`` mentions from the comment body
+           (already populated on ``event.mentioned_roles`` by the router).
+        2. Apply self-loop guard: if the comment was posted by a squadron
+           agent of role X, filter out role X from the mention list.  This
+           prevents the PM from re-triggering itself when it posts a comment
+           mentioning ``@pm``, while still allowing PM to trigger ``@feat-dev``.
+        3. For each mentioned role:
+           - Ephemeral roles → spawn a new agent
+           - Persistent roles with a SLEEPING agent for this issue → wake it
+           - Persistent roles with an ACTIVE agent → deliver event to inbox
+           - Persistent roles with no agent → spawn a new one
+
+        Comments with no role mentions are silently ignored.
+        """
+        if not event.mentioned_roles:
+            logger.debug(
+                "Comment on issue #%s has no role mentions — skipping",
+                event.issue_number,
+            )
+            return
+
+        if event.issue_number is None:
+            logger.warning("Comment event has no issue_number — skipping mention routing")
+            return
+
+        # Self-loop guard: determine which role (if any) posted this comment
+        sender_role = self._get_sender_agent_role(event)
+
+        for role_name in event.mentioned_roles:
+            # Self-loop guard: skip if the bot posted this comment as this role
+            if sender_role and sender_role == role_name:
+                logger.info(
+                    "Self-loop guard: skipping @%s mention (comment authored by same role)",
+                    role_name,
+                )
+                continue
+
+            role_config = self.config.agent_roles.get(role_name)
+            if not role_config:
+                logger.debug("Mentioned role @%s not in config — ignoring", role_name)
+                continue
+
+            logger.info(
+                "Mention routing: @%s mentioned on issue #%d (sender_role=%s)",
+                role_name,
+                event.issue_number,
+                sender_role or "human",
+            )
+
+            if role_config.is_ephemeral:
+                # Ephemeral roles: always spawn a new agent
+                await self._mention_spawn(role_name, role_config, event)
+            else:
+                # Persistent roles: wake, deliver, or spawn
+                await self._mention_wake_or_spawn(role_name, role_config, event)
+
+    async def _mention_spawn(
+        self,
+        role_name: str,
+        role_config: Any,
+        event: SquadronEvent,
+    ) -> None:
+        """Spawn an ephemeral agent via mention routing."""
+        # Singleton guard — same as config triggers
+        if role_config.singleton:
+            all_active = await self.registry.get_all_active_agents()
+            active_of_role = [a for a in all_active if a.role == role_name]
+            if active_of_role:
+                logger.info(
+                    "Singleton role %s already has active agent %s — skipping mention spawn",
+                    role_name,
+                    active_of_role[0].agent_id,
+                )
+                return
+
+        assert event.issue_number is not None
+        logger.info(
+            "Mention spawn: creating %s for issue #%d",
+            role_name,
+            event.issue_number,
+        )
+        record = await self.create_agent(role_name, event.issue_number, trigger_event=event)
+        if record:
+            self.last_spawn_time = datetime.now(timezone.utc).isoformat()
+
+    async def _mention_wake_or_spawn(
+        self,
+        role_name: str,
+        role_config: Any,
+        event: SquadronEvent,
+    ) -> None:
+        """Handle mention of a persistent role: wake if sleeping, deliver if active, spawn if new."""
+        assert event.issue_number is not None
+
+        # Look for existing agents of this role for this issue
+        existing_agents = await self.registry.get_agents_for_issue(event.issue_number)
+        role_agents = [a for a in existing_agents if a.role == role_name]
+
+        if role_agents:
+            agent = role_agents[0]  # most recent
+
+            if agent.status == AgentStatus.SLEEPING:
+                # Wake the sleeping agent with this comment as context
+                wake_event = SquadronEvent(
+                    event_type=SquadronEventType.WAKE_AGENT,
+                    issue_number=event.issue_number,
+                    pr_number=event.pr_number,
+                    agent_id=agent.agent_id,
+                    mentioned_roles=event.mentioned_roles,
+                    data=event.data,
+                )
+                logger.info(
+                    "Mention wake: @%s → waking %s on issue #%d",
+                    role_name,
+                    agent.agent_id,
+                    event.issue_number,
+                )
+                await self.wake_agent(agent.agent_id, wake_event)
+
+            elif agent.status == AgentStatus.ACTIVE:
+                # Agent is actively running — deliver to its inbox
+                inbox = self.agent_inboxes.get(agent.agent_id)
+                if inbox is not None:
+                    await inbox.put(event)
+                    logger.info(
+                        "Mention deliver: @%s → queued event for active agent %s",
+                        role_name,
+                        agent.agent_id,
+                    )
+                else:
+                    logger.warning(
+                        "Mention deliver: @%s → agent %s is ACTIVE but has no inbox",
+                        role_name,
+                        agent.agent_id,
+                    )
+            else:
+                logger.debug(
+                    "Mention: @%s → agent %s is in terminal state %s — spawning new",
+                    role_name,
+                    agent.agent_id,
+                    agent.status,
+                )
+                await self._mention_spawn_persistent(role_name, event)
+        else:
+            # No agent exists for this role + issue → spawn
+            await self._mention_spawn_persistent(role_name, event)
+
+    async def _mention_spawn_persistent(
+        self,
+        role_name: str,
+        event: SquadronEvent,
+    ) -> None:
+        """Spawn a new persistent agent via mention routing."""
+        assert event.issue_number is not None
+        logger.info(
+            "Mention spawn (persistent): creating %s for issue #%d",
+            role_name,
+            event.issue_number,
+        )
+        record = await self.create_agent(role_name, event.issue_number, trigger_event=event)
+        if record:
+            self.last_spawn_time = datetime.now(timezone.utc).isoformat()
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     async def _build_stateless_prompt(
@@ -1751,13 +1954,18 @@ class AgentManager:
 
         # ── Available agent roles ────────────────────────────────────
         lines.append("\n### Available Agent Roles\n")
+        lines.append("You can mention other agents in your comments using `@role` syntax.")
+        lines.append("The mentioned agent will be spawned or woken automatically.\n")
         for role_name, role_config in self.config.agent_roles.items():
             trigger_info = ", ".join(
                 f"{t.event}" + (f"[{t.label}]" if t.label else "")
                 for t in role_config.triggers
                 if t.action == "spawn"  # Only show spawn triggers
             )
-            lines.append(f"- **{role_name}**: triggers on {trigger_info or 'approval flow only'}")
+            mention_note = f"(mention with @{role_name})"
+            lines.append(
+                f"- **{role_name}** {mention_note}: triggers on {trigger_info or 'mention / approval flow'}"
+            )
 
         # ── Instructions ─────────────────────────────────────────────
         lines.append("\n### Instructions\n")
@@ -1778,7 +1986,12 @@ class AgentManager:
             "5. IMPORTANT: Applying a type label automatically spawns the appropriate agent — do NOT manually assign"
         )
         lines.append("")
-        lines.append("**For comments:** Respond if needed, or re-triage if context has changed.")
+        lines.append(
+            "**For comments (via @pm mention):** Respond to the request, re-triage if context has changed."
+        )
+        lines.append(
+            "**For agent coordination:** Mention other agents in your reply (e.g. @feat-dev, @docs-dev) to invoke them."
+        )
         lines.append(
             "**For escalations:** If agents are escalated, post guidance or notify maintainers."
         )
