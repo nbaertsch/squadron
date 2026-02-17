@@ -97,6 +97,7 @@ class TestGitHubEvent:
         assert event.issue is None
         assert event.pull_request is None
         assert event.comment is None
+        assert event.issue_creator is None
 
 
 class TestAgentRecord:
@@ -165,3 +166,37 @@ class TestSquadronEvent:
         assert event.issue_number is None
         assert event.pr_number is None
         assert event.source_delivery_id is None
+
+    def test_issue_creator_extraction(self):
+        event = GitHubEvent(
+            delivery_id="test-123",
+            event_type="issues",
+            action="opened",
+            payload={
+                "issue": {
+                    "number": 42,
+                    "user": {"login": "issue-creator", "type": "User"}
+                },
+                "sender": {"login": "event-sender", "type": "User"}
+            },
+        )
+        assert event.issue_creator == "issue-creator"
+        assert event.sender == "event-sender"  # Verify they are different
+
+    def test_issue_creator_missing(self):
+        # Test when there is no issue in payload
+        event = GitHubEvent(
+            delivery_id="test-124",
+            event_type="push",
+            payload={"sender": {"login": "someone", "type": "User"}},
+        )
+        assert event.issue_creator is None
+
+        # Test when issue exists but user is missing
+        event2 = GitHubEvent(
+            delivery_id="test-125",
+            event_type="issues",
+            action="opened",
+            payload={"issue": {"number": 42}},
+        )
+        assert event2.issue_creator is None

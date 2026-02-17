@@ -188,6 +188,7 @@ class EventRouter:
                 "action": event.action,
                 "sender": event.sender,
                 "payload": event.payload,
+                "issue_creator": event.issue_creator,
             },
         )
 
