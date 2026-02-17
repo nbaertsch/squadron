@@ -24,7 +24,12 @@ from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEve
 from squadron.tools.squadron_tools import SquadronTools
 
 if TYPE_CHECKING:
-    from squadron.config import AgentDefinition, CircuitBreakerDefaults, SquadronConfig
+    from squadron.config import (
+        AgentDefinition,
+        CircuitBreakerDefaults,
+        FailureAction,
+        SquadronConfig,
+    )
     from squadron.event_router import EventRouter
     from squadron.github_client import GitHubClient
     from squadron.registry import AgentRegistry
@@ -66,6 +71,7 @@ class AgentManager:
             agent_definitions=agent_definitions,
             pre_sleep_hook=self._wip_commit_and_push,
             git_push_callback=self._git_push_for_agent,
+            auto_merge_callback=self._auto_merge_pr,
         )
 
         # Per-agent CopilotAgent instances (one CLI subprocess each)
@@ -114,6 +120,12 @@ class AgentManager:
 
         # Register handler for issue reassignment (D-12: abort on reassign)
         self.router.on(SquadronEventType.ISSUE_ASSIGNED, self._handle_issue_assigned)
+
+        # Register handler for PR synchronize (invalidate approvals on PR update)
+        self.router.on(SquadronEventType.PR_SYNCHRONIZED, self._handle_pr_synchronize)
+
+        # Register handler for PR opened (set up review requirements)
+        self.router.on(SquadronEventType.PR_OPENED, self._handle_pr_opened)
 
         logger.info("Agent manager started")
 
@@ -1627,6 +1639,101 @@ class AgentManager:
                         agent.agent_id,
                     )
 
+    async def _handle_pr_opened(self, event: SquadronEvent) -> None:
+        """Handle PR opened — set up review requirements based on policy.
+
+        When a new PR is opened:
+        1. Determine which roles need to review (from review_policy config)
+        2. Store the requirements in the registry
+        3. Set up sequence state if sequential reviews are configured
+        """
+        if not event.pr_number:
+            return
+
+        policy = self.config.review_policy
+        if not policy.enabled:
+            logger.debug("Review policy disabled — skipping PR #%d setup", event.pr_number)
+            return
+
+        payload = event.data.get("payload", {})
+        pr_data = payload.get("pull_request", {})
+
+        # Get PR labels and base branch
+        labels = [lbl.get("name", "") for lbl in pr_data.get("labels", [])]
+        base_branch = pr_data.get("base", {}).get("ref", "")
+
+        # Get changed files (optional, may not be in the webhook payload)
+        changed_files = None
+        try:
+            files = await self.github.list_pull_request_files(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.pr_number,
+            )
+            changed_files = [f.get("filename", "") for f in files]
+        except Exception:
+            logger.debug("Could not fetch changed files for PR #%d", event.pr_number)
+
+        # Determine requirements
+        requirements, sequence = policy.get_requirements_for_pr(labels, changed_files, base_branch)
+
+        if not requirements:
+            logger.debug("No review requirements for PR #%d", event.pr_number)
+            return
+
+        # Store in registry
+        req_dicts = [{"role": r.role, "count": r.count} for r in requirements]
+        await self.registry.set_pr_requirements(event.pr_number, req_dicts, sequence or None)
+
+        logger.info(
+            "Set up review requirements for PR #%d: %s (sequence=%s)",
+            event.pr_number,
+            [r.role for r in requirements],
+            sequence,
+        )
+
+    async def _handle_pr_synchronize(self, event: SquadronEvent) -> None:
+        """Handle PR synchronize — invalidate approvals when PR is updated.
+
+        When a PR is updated with new commits:
+        1. Invalidate all existing approvals (require full re-review)
+        2. Reset sequence state to first role only
+        3. Optionally respawn reviewer agents to re-check
+        """
+        if not event.pr_number:
+            return
+
+        policy = self.config.review_policy
+        if not policy.enabled:
+            return
+
+        sync_config = policy.on_synchronize
+
+        if sync_config.invalidate_approvals:
+            invalidated = await self.registry.invalidate_pr_approvals(event.pr_number)
+            if invalidated > 0:
+                logger.info(
+                    "PR #%d updated — invalidated %d approvals (full re-review required)",
+                    event.pr_number,
+                    invalidated,
+                )
+
+                # Post a comment about invalidation
+                try:
+                    await self.github.comment_on_issue(
+                        self.config.project.owner,
+                        self.config.project.repo,
+                        event.pr_number,
+                        "🔄 **PR Updated** — new commits detected. "
+                        f"Previous approvals ({invalidated}) have been invalidated. "
+                        "Full re-review required.",
+                    )
+                except Exception:
+                    logger.debug("Failed to post invalidation comment on PR #%d", event.pr_number)
+
+        # Note: Respawning reviewers is handled by config triggers with action: "wake"
+        # which are already registered via _register_trigger_handlers
+
     @staticmethod
     def _extract_issue_number(body: str) -> int | None:
         """Extract an issue number from PR body (e.g., 'Closes #42')."""
@@ -2189,3 +2296,284 @@ class AgentManager:
             args.insert(1, "--force-with-lease")
 
         return await self._run_git_in(worktree, *args, timeout=120, auth=True)
+
+    # ── Auto-Merge System ─────────────────────────────────────────────────
+
+    async def _auto_merge_pr(self, pr_number: int) -> None:
+        """Attempt to merge a PR after all required approvals are in place.
+
+        This is the callback for the auto-merge system. It:
+        1. Verifies all approvals are still valid
+        2. Optionally waits for CI to pass (if configured)
+        3. Merges the PR using the configured method
+        4. Handles failures via YAML-configured handlers
+        5. Deletes the branch after merge (if configured)
+
+        Args:
+            pr_number: The PR number to merge.
+        """
+        import httpx
+
+        policy = self.config.review_policy
+        if not policy.enabled or not policy.auto_merge.enabled:
+            logger.info("Auto-merge disabled — skipping PR #%d", pr_number)
+            return
+
+        owner = self.config.project.owner
+        repo = self.config.project.repo
+
+        # Double-check merge readiness (approvals could have changed)
+        is_ready, missing = await self.registry.check_pr_merge_ready(pr_number)
+        if not is_ready:
+            logger.warning("PR #%d not ready for merge: %s", pr_number, missing)
+            return
+
+        # Get PR details for branch info
+        try:
+            pr_data = await self.github.get_pull_request(owner, repo, pr_number)
+        except Exception:
+            logger.exception("Failed to get PR #%d details", pr_number)
+            return
+
+        head_branch = pr_data.get("head", {}).get("ref", "")
+        pr_title = pr_data.get("title", f"PR #{pr_number}")
+
+        # Optionally check CI status
+        if policy.auto_merge.require_ci_pass:
+            try:
+                sha = pr_data.get("head", {}).get("sha", "")
+                if sha:
+                    status = await self.github.get_combined_status(owner, repo, sha)
+                    state = status.get("state", "unknown")
+                    if state == "failure":
+                        logger.warning(
+                            "PR #%d CI failed — invoking on_ci_failed handler", pr_number
+                        )
+                        await self._handle_merge_failure(
+                            pr_number,
+                            "ci_failed",
+                            policy.auto_merge.on_ci_failed,
+                            pr_data,
+                        )
+                        return
+                    elif state == "pending":
+                        logger.info("PR #%d CI still pending — will retry later", pr_number)
+                        # TODO: schedule a retry instead of just returning
+                        return
+            except Exception:
+                logger.warning("Failed to check CI status for PR #%d", pr_number, exc_info=True)
+
+        # Attempt merge
+        logger.info(
+            "AUTO-MERGE — attempting to merge PR #%d (%s) via %s",
+            pr_number,
+            pr_title,
+            policy.auto_merge.method,
+        )
+
+        try:
+            await self.github.merge_pull_request(
+                owner,
+                repo,
+                pr_number,
+                merge_method=policy.auto_merge.method,
+                commit_title=f"{pr_title} (#{pr_number})",
+            )
+            logger.info("AUTO-MERGE SUCCESS — PR #%d merged", pr_number)
+
+            # Delete branch if configured
+            if policy.auto_merge.delete_branch and head_branch:
+                try:
+                    await self.github.delete_branch(owner, repo, head_branch)
+                    logger.info("Deleted branch %s after merge", head_branch)
+                except Exception:
+                    logger.warning("Failed to delete branch %s", head_branch, exc_info=True)
+
+            # Clean up PR tracking data
+            await self.registry.cleanup_pr_data(pr_number)
+
+            # Post merge comment
+            try:
+                issue_number = self._extract_issue_number(pr_data.get("body", "") or "")
+                if issue_number:
+                    await self.github.comment_on_issue(
+                        owner,
+                        repo,
+                        issue_number,
+                        f"🎉 **Auto-merged** — PR #{pr_number} has been merged to "
+                        f"`{pr_data.get('base', {}).get('ref', 'main')}`.",
+                    )
+            except Exception:
+                logger.debug("Failed to post merge comment")
+
+        except httpx.HTTPStatusError as e:
+            error_body = e.response.text
+            logger.warning(
+                "AUTO-MERGE FAILED — PR #%d: %s %s",
+                pr_number,
+                e.response.status_code,
+                error_body[:200],
+            )
+
+            # Determine failure type and invoke appropriate handler
+            if "merge conflict" in error_body.lower() or e.response.status_code == 409:
+                await self._handle_merge_failure(
+                    pr_number,
+                    "merge_conflict",
+                    policy.auto_merge.on_merge_conflict,
+                    pr_data,
+                )
+            else:
+                await self._handle_merge_failure(
+                    pr_number,
+                    "unknown_error",
+                    policy.auto_merge.on_unknown_error,
+                    pr_data,
+                    error_message=error_body[:500],
+                )
+
+        except Exception as e:
+            logger.exception("AUTO-MERGE ERROR — PR #%d", pr_number)
+            await self._handle_merge_failure(
+                pr_number,
+                "unknown_error",
+                policy.auto_merge.on_unknown_error,
+                pr_data,
+                error_message=str(e),
+            )
+
+    async def _handle_merge_failure(
+        self,
+        pr_number: int,
+        failure_type: str,
+        handler: "FailureAction",
+        pr_data: dict,
+        error_message: str = "",
+    ) -> None:
+        """Handle a merge failure according to the configured action.
+
+        Actions:
+        - spawn: Spawn an agent to fix the issue (e.g. merge-conflict agent)
+        - notify: Post a comment mentioning the configured human group
+        - escalate: Add escalation labels and notify maintainers
+        """
+
+        owner = self.config.project.owner
+        repo = self.config.project.repo
+
+        logger.info(
+            "Handling %s for PR #%d: action=%s, target=%s",
+            failure_type,
+            pr_number,
+            handler.action,
+            handler.target,
+        )
+
+        if handler.action == "spawn":
+            # Spawn an agent to handle the failure
+            role = handler.target
+            if role not in self.config.agent_roles:
+                logger.error(
+                    "Cannot spawn %s for %s — role not configured",
+                    role,
+                    failure_type,
+                )
+                # Fall back to notify if spawn target doesn't exist
+                if handler.fallback:
+                    await self._handle_merge_failure(
+                        pr_number, failure_type, handler.fallback, pr_data, error_message
+                    )
+                return
+
+            # Extract issue number from PR
+            issue_number = self._extract_issue_number(pr_data.get("body", "") or "")
+            if not issue_number:
+                issue_number = pr_number  # Use PR number as fallback
+
+            # Create a synthetic event for the agent
+            event = SquadronEvent(
+                event_type=SquadronEventType.PR_SYNCHRONIZED,
+                pr_number=pr_number,
+                issue_number=issue_number,
+                data={
+                    "payload": {"pull_request": pr_data},
+                    "failure_type": failure_type,
+                    "error_message": error_message,
+                },
+            )
+
+            await self.create_agent(role, issue_number, trigger_event=event)
+            logger.info("Spawned %s agent to handle %s on PR #%d", role, failure_type, pr_number)
+
+        elif handler.action == "notify":
+            # Post a comment mentioning the configured group
+            group_name = handler.target
+            mentions = self._resolve_human_group(group_name)
+
+            message_parts = [
+                f"⚠️ **Merge Failed** — PR #{pr_number} could not be auto-merged.",
+                f"**Reason:** {failure_type.replace('_', ' ').title()}",
+            ]
+            if error_message:
+                message_parts.append(f"```\n{error_message[:500]}\n```")
+            message_parts.append(f"\n{mentions} — please investigate and resolve.")
+
+            await self.github.comment_on_issue(
+                owner,
+                repo,
+                pr_number,
+                "\n".join(message_parts),
+            )
+            logger.info("Posted merge failure notification for PR #%d", pr_number)
+
+        elif handler.action == "escalate":
+            # Add escalation labels and notify
+            group_name = handler.target
+            mentions = self._resolve_human_group(group_name)
+
+            try:
+                await self.github.add_labels(
+                    owner,
+                    repo,
+                    pr_number,
+                    self.config.escalation.escalation_labels,
+                )
+            except Exception:
+                logger.warning("Failed to add escalation labels to PR #%d", pr_number)
+
+            message_parts = [
+                f"🚨 **Escalation** — PR #{pr_number} requires human intervention.",
+                f"**Failure:** {failure_type.replace('_', ' ').title()}",
+            ]
+            if error_message:
+                message_parts.append(f"```\n{error_message[:500]}\n```")
+            message_parts.append(f"\n{mentions}")
+
+            await self.github.comment_on_issue(
+                owner,
+                repo,
+                pr_number,
+                "\n".join(message_parts),
+            )
+            logger.info("Escalated PR #%d for human intervention", pr_number)
+
+        # Try fallback if primary action might have failed
+        if handler.fallback:
+            logger.debug("Fallback handler available but not needed")
+
+    def _resolve_human_group(self, group_name: str) -> str:
+        """Resolve a human group name to @mentions.
+
+        Looks up the group in config.human_groups. If not found,
+        returns @group_name as a team mention.
+        """
+        human_config = self.config.human_invocation
+        group_members = self.config.human_groups.get(group_name, [])
+
+        if group_members:
+            # Mention each member
+            mentions = [human_config.mention_format.format(username=u) for u in group_members]
+            return " ".join(mentions)
+        else:
+            # Assume it's a team name
+            return human_config.mention_format.format(username=group_name)

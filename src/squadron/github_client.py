@@ -497,3 +497,49 @@ class GitHubClient:
                 if e.response.status_code == 422:  # Already exists
                     continue
                 raise
+
+    async def delete_branch(self, owner: str, repo: str, branch: str) -> bool:
+        """Delete a branch from the repository.
+
+        Args:
+            owner: Repository owner.
+            repo: Repository name.
+            branch: Branch name to delete (not the ref path, just the name).
+
+        Returns:
+            True if deleted successfully, False if branch didn't exist.
+        """
+        try:
+            await self._request(
+                "DELETE",
+                f"/repos/{owner}/{repo}/git/refs/heads/{branch}",
+            )
+            logger.info("Deleted branch %s/%s:%s", owner, repo, branch)
+            return True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 422:  # Reference does not exist
+                logger.debug("Branch %s does not exist (already deleted?)", branch)
+                return False
+            raise
+
+    async def get_combined_status(self, owner: str, repo: str, ref: str) -> dict:
+        """Get combined status for a reference (commit SHA or branch).
+
+        Returns dict with 'state' (success, pending, failure) and 'statuses' list.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/commits/{ref}/status",
+        )
+        return resp.json()
+
+    async def list_check_runs(self, owner: str, repo: str, ref: str) -> list[dict]:
+        """List check runs for a reference (commit SHA or branch).
+
+        Returns list of check run dicts with 'name', 'status', 'conclusion' keys.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
+        )
+        return resp.json().get("check_runs", [])

@@ -61,10 +61,46 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     updated_at TEXT NOT NULL
 );
 
+-- PR Review Requirements: what approvals are needed for each PR
+CREATE TABLE IF NOT EXISTS pr_review_requirements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pr_number INTEGER NOT NULL,
+    rule_name TEXT,
+    required_role TEXT NOT NULL,
+    required_count INTEGER DEFAULT 1,
+    sequence_order INTEGER,
+    created_at TEXT NOT NULL,
+    UNIQUE(pr_number, rule_name, required_role)
+);
+
+-- PR Approvals: track each agent's approval state
+CREATE TABLE IF NOT EXISTS pr_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pr_number INTEGER NOT NULL,
+    agent_role TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    review_body TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(pr_number, agent_id)
+);
+
+-- PR Sequence State: track which roles are unlocked for sequential reviews
+CREATE TABLE IF NOT EXISTS pr_sequence_state (
+    pr_number INTEGER PRIMARY KEY,
+    sequence TEXT NOT NULL DEFAULT '[]',
+    unlocked_roles TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
 CREATE INDEX IF NOT EXISTS idx_agents_issue ON agents(issue_number);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_pr ON workflow_runs(pr_number);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+CREATE INDEX IF NOT EXISTS idx_pr_approvals_pr ON pr_approvals(pr_number);
+CREATE INDEX IF NOT EXISTS idx_pr_approvals_state ON pr_approvals(pr_number, state);
+CREATE INDEX IF NOT EXISTS idx_pr_requirements_pr ON pr_review_requirements(pr_number);
 """
 
 
@@ -463,6 +499,291 @@ class AgentRegistry:
         )
         await self.db.commit()
         logger.info("Workflow run %s → %s", run_id, status)
+
+    # ── PR Review Requirements & Approvals ────────────────────────────────
+
+    async def set_pr_requirements(
+        self,
+        pr_number: int,
+        requirements: list[dict],
+        sequence: list[str] | None = None,
+    ) -> None:
+        """Set review requirements for a PR. Replaces any existing requirements.
+
+        Args:
+            pr_number: The PR number.
+            requirements: List of dicts with 'role', 'count', and optional 'rule_name'.
+            sequence: Optional list of role names defining review order.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Clear existing requirements
+        await self.db.execute(
+            "DELETE FROM pr_review_requirements WHERE pr_number = ?", (pr_number,)
+        )
+
+        # Insert new requirements
+        for i, req in enumerate(requirements):
+            seq_order = None
+            if sequence and req["role"] in sequence:
+                seq_order = sequence.index(req["role"])
+
+            await self.db.execute(
+                """INSERT INTO pr_review_requirements
+                   (pr_number, rule_name, required_role, required_count, sequence_order, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    pr_number,
+                    req.get("rule_name"),
+                    req["role"],
+                    req.get("count", 1),
+                    seq_order,
+                    now,
+                ),
+            )
+
+        # Set up sequence state if needed
+        if sequence:
+            unlocked = [sequence[0]] if sequence else []
+            await self.db.execute(
+                """INSERT OR REPLACE INTO pr_sequence_state
+                   (pr_number, sequence, unlocked_roles, updated_at)
+                   VALUES (?, ?, ?, ?)""",
+                (pr_number, json.dumps(sequence), json.dumps(unlocked), now),
+            )
+
+        await self.db.commit()
+        logger.info(
+            "Set PR #%d requirements: %s (sequence=%s)",
+            pr_number,
+            [r["role"] for r in requirements],
+            sequence,
+        )
+
+    async def get_pr_requirements(self, pr_number: int) -> list[dict]:
+        """Get all review requirements for a PR."""
+        cursor = await self.db.execute(
+            "SELECT * FROM pr_review_requirements WHERE pr_number = ? ORDER BY sequence_order",
+            (pr_number,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": r["id"],
+                "pr_number": r["pr_number"],
+                "rule_name": r["rule_name"],
+                "role": r["required_role"],
+                "count": r["required_count"],
+                "sequence_order": r["sequence_order"],
+            }
+            for r in rows
+        ]
+
+    async def record_pr_approval(
+        self,
+        pr_number: int,
+        agent_role: str,
+        agent_id: str,
+        state: str,
+        review_body: str | None = None,
+    ) -> None:
+        """Record an agent's approval state for a PR.
+
+        Args:
+            pr_number: The PR number.
+            agent_role: The agent's role (e.g., "security-review").
+            agent_id: The specific agent instance ID.
+            state: One of "approved", "changes_requested", "pending".
+            review_body: Optional review comment text.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            """INSERT INTO pr_approvals
+               (pr_number, agent_role, agent_id, state, review_body, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(pr_number, agent_id) DO UPDATE SET
+               state = excluded.state,
+               review_body = excluded.review_body,
+               updated_at = excluded.updated_at""",
+            (pr_number, agent_role, agent_id, state, review_body, now, now),
+        )
+        await self.db.commit()
+        logger.info(
+            "Recorded PR #%d approval: %s (%s) → %s", pr_number, agent_role, agent_id, state
+        )
+
+        # If approved and there's a sequence, check if we should unlock next role
+        if state == "approved":
+            await self._maybe_unlock_next_role(pr_number, agent_role)
+
+    async def get_pr_approvals(
+        self,
+        pr_number: int,
+        role: str | None = None,
+        state: str | None = None,
+    ) -> list[dict]:
+        """Get approval records for a PR, optionally filtered.
+
+        Args:
+            pr_number: The PR number.
+            role: Filter by agent role (optional).
+            state: Filter by approval state (optional).
+        """
+        query = "SELECT * FROM pr_approvals WHERE pr_number = ?"
+        params: list = [pr_number]
+
+        if role:
+            query += " AND agent_role = ?"
+            params.append(role)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
+
+        cursor = await self.db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": r["id"],
+                "pr_number": r["pr_number"],
+                "agent_role": r["agent_role"],
+                "agent_id": r["agent_id"],
+                "state": r["state"],
+                "review_body": r["review_body"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    async def invalidate_pr_approvals(self, pr_number: int) -> int:
+        """Invalidate all approvals for a PR (called on PR synchronize).
+
+        Deletes all approval records, requiring full re-review.
+        Returns the number of records deleted.
+        """
+        cursor = await self.db.execute("DELETE FROM pr_approvals WHERE pr_number = ?", (pr_number,))
+        await self.db.commit()
+        count = cursor.rowcount
+        if count > 0:
+            logger.info("Invalidated %d approvals for PR #%d", count, pr_number)
+
+            # Reset sequence state to first role only
+            seq_state = await self.get_pr_sequence_state(pr_number)
+            if seq_state and seq_state["sequence"]:
+                sequence = seq_state["sequence"]
+                await self._reset_sequence_state(pr_number, sequence)
+
+        return count
+
+    async def get_pr_sequence_state(self, pr_number: int) -> dict | None:
+        """Get the sequence state for a PR."""
+        cursor = await self.db.execute(
+            "SELECT * FROM pr_sequence_state WHERE pr_number = ?", (pr_number,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "pr_number": row["pr_number"],
+            "sequence": json.loads(row["sequence"]),
+            "unlocked_roles": json.loads(row["unlocked_roles"]),
+            "updated_at": row["updated_at"],
+        }
+
+    async def is_role_unlocked(self, pr_number: int, role: str) -> bool:
+        """Check if a role is unlocked to review (for sequential reviews)."""
+        seq_state = await self.get_pr_sequence_state(pr_number)
+        if not seq_state:
+            return True  # No sequence configured, all roles unlocked
+        if not seq_state["sequence"]:
+            return True  # Empty sequence, all roles unlocked
+        return role in seq_state["unlocked_roles"]
+
+    async def _maybe_unlock_next_role(self, pr_number: int, approved_role: str) -> None:
+        """If a role approves in a sequence, unlock the next role."""
+        seq_state = await self.get_pr_sequence_state(pr_number)
+        if not seq_state or not seq_state["sequence"]:
+            return
+
+        sequence = seq_state["sequence"]
+        unlocked = seq_state["unlocked_roles"]
+
+        if approved_role not in sequence:
+            return
+
+        role_idx = sequence.index(approved_role)
+        if role_idx + 1 < len(sequence):
+            next_role = sequence[role_idx + 1]
+            if next_role not in unlocked:
+                unlocked.append(next_role)
+                now = datetime.now(timezone.utc).isoformat()
+                await self.db.execute(
+                    "UPDATE pr_sequence_state SET unlocked_roles = ?, updated_at = ? WHERE pr_number = ?",
+                    (json.dumps(unlocked), now, pr_number),
+                )
+                await self.db.commit()
+                logger.info(
+                    "PR #%d: %s approved, unlocked %s for review",
+                    pr_number,
+                    approved_role,
+                    next_role,
+                )
+
+    async def _reset_sequence_state(self, pr_number: int, sequence: list[str]) -> None:
+        """Reset sequence state to only the first role unlocked."""
+        unlocked = [sequence[0]] if sequence else []
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            "UPDATE pr_sequence_state SET unlocked_roles = ?, updated_at = ? WHERE pr_number = ?",
+            (json.dumps(unlocked), now, pr_number),
+        )
+        await self.db.commit()
+        logger.info("PR #%d: Reset sequence state, unlocked=%s", pr_number, unlocked)
+
+    async def check_pr_merge_ready(self, pr_number: int) -> tuple[bool, list[str]]:
+        """Check if a PR has all required approvals and can be merged.
+
+        Returns:
+            Tuple of (is_ready, missing_reasons).
+            - is_ready: True if all requirements met and no changes requested.
+            - missing_reasons: List of reasons why merge is blocked (empty if ready).
+        """
+        requirements = await self.get_pr_requirements(pr_number)
+        if not requirements:
+            return False, ["No review requirements configured for this PR"]
+
+        approvals = await self.get_pr_approvals(pr_number)
+        missing: list[str] = []
+
+        # Check for any "changes_requested"
+        changes_requested = [a for a in approvals if a["state"] == "changes_requested"]
+        if changes_requested:
+            roles = set(a["agent_role"] for a in changes_requested)
+            missing.append(f"Changes requested by: {', '.join(roles)}")
+
+        # Check each requirement
+        for req in requirements:
+            role = req["role"]
+            count_needed = req["count"]
+
+            role_approvals = [
+                a for a in approvals if a["agent_role"] == role and a["state"] == "approved"
+            ]
+
+            if len(role_approvals) < count_needed:
+                missing.append(f"{role}: {len(role_approvals)}/{count_needed} approvals")
+
+        return len(missing) == 0, missing
+
+    async def cleanup_pr_data(self, pr_number: int) -> None:
+        """Clean up all PR-related data after merge/close."""
+        await self.db.execute(
+            "DELETE FROM pr_review_requirements WHERE pr_number = ?", (pr_number,)
+        )
+        await self.db.execute("DELETE FROM pr_approvals WHERE pr_number = ?", (pr_number,))
+        await self.db.execute("DELETE FROM pr_sequence_state WHERE pr_number = ?", (pr_number,))
+        await self.db.commit()
+        logger.info("Cleaned up PR #%d data", pr_number)
 
     # ── Helpers ──────────────────────────────────────────────────────────
 

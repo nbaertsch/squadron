@@ -221,6 +221,7 @@ class SquadronTools:
         pre_sleep_hook: Callable[[AgentRecord], Awaitable[None]] | None = None,
         git_push_callback: Callable[[AgentRecord, bool], Awaitable[tuple[int, str, str]]]
         | None = None,
+        auto_merge_callback: Callable[[int], Awaitable[None]] | None = None,
     ):
         self.registry = registry
         self.github = github
@@ -231,6 +232,7 @@ class SquadronTools:
         self.agent_definitions = agent_definitions or {}
         self._pre_sleep_hook = pre_sleep_hook
         self._git_push_callback = git_push_callback
+        self._auto_merge_callback = auto_merge_callback
 
     def _agent_signature(self, role: str) -> str:
         """Build the agent signature prefix: emoji + display_name on its own line.
@@ -437,7 +439,12 @@ class SquadronTools:
         )
 
     async def submit_pr_review(self, agent_id: str, params: SubmitPRReviewParams) -> str:
-        """Submit a review on a pull request."""
+        """Submit a review on a pull request.
+
+        Records the review in the approval tracking system and triggers
+        auto-merge if all requirements are satisfied.
+        """
+        # Submit review to GitHub
         result = await self.github.submit_pr_review(
             self.owner,
             self.repo,
@@ -447,7 +454,42 @@ class SquadronTools:
             comments=params.comments if params.comments else None,
         )
         review_id = result.get("id", "unknown")
-        return f"Submitted {params.event} review (id={review_id}) on PR #{params.pr_number}"
+
+        # Map GitHub event to our approval state
+        state_map = {
+            "APPROVE": "approved",
+            "REQUEST_CHANGES": "changes_requested",
+            "COMMENT": None,  # Comments don't affect approval state
+        }
+        approval_state = state_map.get(params.event.upper())
+
+        # Record approval in database if it's an approval-relevant review
+        merge_status = ""
+        if approval_state:
+            agent = await self.registry.get_agent(agent_id)
+            if agent:
+                await self.registry.record_pr_approval(
+                    pr_number=params.pr_number,
+                    agent_role=agent.role,
+                    agent_id=agent_id,
+                    state=approval_state,
+                    review_body=params.body,
+                )
+
+                # Check if PR is now ready for auto-merge
+                is_ready, missing = await self.registry.check_pr_merge_ready(params.pr_number)
+                if is_ready and self._auto_merge_callback:
+                    logger.info("PR #%d ready for auto-merge, triggering merge", params.pr_number)
+                    try:
+                        await self._auto_merge_callback(params.pr_number)
+                        merge_status = " PR is ready for merge — auto-merge triggered."
+                    except Exception as e:
+                        logger.exception("Auto-merge failed for PR #%d", params.pr_number)
+                        merge_status = f" Auto-merge failed: {e}"
+                elif not is_ready:
+                    merge_status = f" Merge blocked: {', '.join(missing)}"
+
+        return f"Submitted {params.event} review (id={review_id}) on PR #{params.pr_number}.{merge_status}"
 
     async def open_pr(self, agent_id: str, params: OpenPRParams) -> str:
         """Open a new pull request."""

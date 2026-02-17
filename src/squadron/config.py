@@ -154,47 +154,207 @@ class EscalationConfig(BaseModel):
     max_issue_depth: int = 3
 
 
+# ── Human Invocation Config ───────────────────────────────────────────────────
+
+
+class HumanInvocationConfig(BaseModel):
+    """Configuration for how to notify humans when agent intervention is needed."""
+
+    method: Literal["github_comment", "issue_label", "both"] = "both"
+    mention_format: str = "@{username}"  # or "@{group}" for team mentions
+    include_context: bool = True  # include failure details in comment
+    labels_to_add: list[str] = Field(default_factory=lambda: ["needs-human"])
+
+
+# ── Review Policy Config (replaces approval_flows + workflows) ────────────────
+
+
+class FailureAction(BaseModel):
+    """Defines what happens when a failure occurs (merge conflict, CI fail, etc.)."""
+
+    action: Literal["spawn", "notify", "escalate"] = "notify"
+    target: str = "maintainers"  # agent role OR human group name
+    fallback: "FailureAction | None" = None  # if primary action fails
+
+
+class AutoMergeConfig(BaseModel):
+    """Configuration for automatic PR merging."""
+
+    enabled: bool = True
+    method: Literal["squash", "merge", "rebase"] = "squash"
+    delete_branch: bool = True
+    require_ci_pass: bool = False  # wait for status checks before merge
+
+    # Failure handlers
+    on_merge_conflict: FailureAction = Field(
+        default_factory=lambda: FailureAction(action="notify", target="maintainers")
+    )
+    on_ci_failed: FailureAction = Field(
+        default_factory=lambda: FailureAction(action="notify", target="maintainers")
+    )
+    on_unknown_error: FailureAction = Field(
+        default_factory=lambda: FailureAction(action="escalate", target="maintainers")
+    )
+
+
+class SynchronizeConfig(BaseModel):
+    """What happens when a PR is updated after reviews."""
+
+    invalidate_approvals: bool = True  # require full re-review (not just "still LGTM")
+    respawn_reviewers: bool = True  # wake/spawn reviewer agents to re-check
+
+
+class ReviewRequirement(BaseModel):
+    """A single review requirement — which role must approve and how many."""
+
+    role: str  # agent role name, e.g. "security-review"
+    count: int = 1  # how many approvals from this role required
+
+
+class MatchCondition(BaseModel):
+    """Conditions for when a review rule applies."""
+
+    labels: list[str] = Field(default_factory=list)  # any label matches
+    paths: list[str] = Field(default_factory=list)  # glob patterns for changed files
+    base_branch: str | None = None  # target branch must match
+
+    def matches(
+        self, labels: list[str], changed_files: list[str] | None = None, base_branch: str = ""
+    ) -> bool:
+        """Check if this condition matches the given PR context."""
+        import fnmatch
+
+        # Label match: any overlap (if labels specified)
+        if self.labels:
+            if not any(lbl in self.labels for lbl in labels):
+                return False
+
+        # Path match: any changed file matches any glob (if paths specified)
+        if self.paths and changed_files is not None:
+            if not any(
+                fnmatch.fnmatch(f, pattern) for f in changed_files for pattern in self.paths
+            ):
+                return False
+
+        # Base branch match (if specified)
+        if self.base_branch and base_branch != self.base_branch:
+            return False
+
+        return True
+
+
+class ReviewRule(BaseModel):
+    """A conditional review rule — when matched, adds requirements."""
+
+    name: str
+    match: MatchCondition
+    requirements: list[ReviewRequirement] = Field(default_factory=list)
+    sequence: list[str] = Field(default_factory=list)  # optional: enforce review order
+
+
+class ReviewPolicyConfig(BaseModel):
+    """Unified PR review policy — replaces approval_flows + workflows.
+
+    Defines:
+    - Which roles must approve PRs (default + conditional rules)
+    - Optional sequencing (role A must approve before role B starts)
+    - Auto-merge behavior and failure handling
+    - What happens when PRs are updated after review
+    """
+
+    enabled: bool = True
+
+    # Auto-merge configuration
+    auto_merge: AutoMergeConfig = Field(default_factory=AutoMergeConfig)
+
+    # What happens when PR is updated after approvals
+    on_synchronize: SynchronizeConfig = Field(default_factory=SynchronizeConfig)
+
+    # Default requirements for all PRs
+    default_requirements: list[ReviewRequirement] = Field(
+        default_factory=lambda: [ReviewRequirement(role="pr-review", count=1)]
+    )
+
+    # Conditional rules (additive with defaults)
+    rules: list[ReviewRule] = Field(default_factory=list)
+
+    def get_requirements_for_pr(
+        self,
+        labels: list[str],
+        changed_files: list[str] | None = None,
+        base_branch: str = "",
+    ) -> tuple[list[ReviewRequirement], list[str]]:
+        """Get all review requirements for a PR.
+
+        Returns:
+            Tuple of (requirements_list, sequence_list).
+            - requirements_list: All required roles with counts
+            - sequence_list: Order in which roles must approve (empty = parallel)
+        """
+        # Start with defaults
+        requirements: dict[str, int] = {}
+        for req in self.default_requirements:
+            requirements[req.role] = max(requirements.get(req.role, 0), req.count)
+
+        # Add from matching rules
+        sequence: list[str] = []
+        for rule in self.rules:
+            if rule.match.matches(labels, changed_files, base_branch):
+                for req in rule.requirements:
+                    requirements[req.role] = max(requirements.get(req.role, 0), req.count)
+                # Use sequence from first matching rule that defines one
+                if rule.sequence and not sequence:
+                    sequence = rule.sequence
+
+        return [ReviewRequirement(role=r, count=c) for r, c in requirements.items()], sequence
+
+    def get_required_roles(
+        self,
+        labels: list[str],
+        changed_files: list[str] | None = None,
+        base_branch: str = "",
+    ) -> list[str]:
+        """Get list of required reviewer roles for a PR."""
+        requirements, _ = self.get_requirements_for_pr(labels, changed_files, base_branch)
+        return [req.role for req in requirements]
+
+
+# ── Legacy: ApprovalFlowConfig (deprecated, kept for backward compatibility) ──
+
+
 class ApprovalFlowRule(BaseModel):
-    """A single approval flow rule — maps labels/paths to review agent roles."""
+    """DEPRECATED: Use review_policy instead. Kept for backward compatibility."""
 
     name: str
     match_labels: list[str] = Field(default_factory=list)
-    match_paths: list[str] = Field(default_factory=list)  # glob patterns
-    reviewers: list[str] = Field(default_factory=list)  # role names
+    match_paths: list[str] = Field(default_factory=list)
+    reviewers: list[str] = Field(default_factory=list)
     required_approvals: int = 1
 
     def matches(self, labels: list[str], changed_files: list[str] | None = None) -> bool:
-        """Check if this rule matches the given PR labels and changed files."""
         import fnmatch
 
-        # Label match: any overlap
         if self.match_labels:
             if not any(lbl in self.match_labels for lbl in labels):
                 return False
-
-        # Path match: any changed file matches any glob
         if self.match_paths and changed_files is not None:
             if not any(
                 fnmatch.fnmatch(f, pattern) for f in changed_files for pattern in self.match_paths
             ):
                 return False
-
         return True
 
 
 class ApprovalFlowConfig(BaseModel):
-    """Approval flow configuration — defines which reviewers to spawn for PRs."""
+    """DEPRECATED: Use review_policy instead. Kept for backward compatibility."""
 
-    enabled: bool = True
-    default_reviewers: list[str] = Field(
-        default_factory=lambda: ["pr-review"]
-    )  # roles always assigned
+    enabled: bool = False  # Disabled by default — use review_policy
+    default_reviewers: list[str] = Field(default_factory=list)
     rules: list[ApprovalFlowRule] = Field(default_factory=list)
 
     def get_reviewers_for_pr(
         self, labels: list[str], changed_files: list[str] | None = None
     ) -> list[str]:
-        """Return the set of reviewer roles for a PR based on labels/files."""
         roles = set(self.default_reviewers)
         for rule in self.rules:
             if rule.matches(labels, changed_files):
@@ -213,8 +373,14 @@ class SquadronConfig(BaseModel):
     circuit_breakers: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     escalation: EscalationConfig = Field(default_factory=EscalationConfig)
+
+    # New unified review policy (replaces approval_flows + workflows)
+    review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
+    human_invocation: HumanInvocationConfig = Field(default_factory=HumanInvocationConfig)
+
+    # DEPRECATED: kept for backward compatibility, use review_policy instead
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
-    workflows: list[WorkflowDefinition] = Field(default_factory=list)
+    workflows: list["WorkflowDefinition"] = Field(default_factory=list)
 
 
 # ── Workflow Definitions ─────────────────────────────────────────────────────

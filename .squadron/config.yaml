@@ -154,6 +154,11 @@ agent_roles:
   test-coverage:
     agent_definition: agents/test-coverage.md
 
+  merge-conflict:
+    agent_definition: agents/merge-conflict.md
+    lifecycle: ephemeral
+    # No triggers - spawned programmatically by auto-merge failure handler
+
 # ─────────────────────────────────────────────
 # Circuit Breakers
 # ─────────────────────────────────────────────
@@ -225,10 +230,96 @@ escalation:
   max_issue_depth: 3
 
 # ─────────────────────────────────────────────
-# Approval Flows
+# Review Policy (replaces approval_flows + workflows)
+# ─────────────────────────────────────────────
+review_policy:
+  enabled: true
+
+  # Auto-merge configuration
+  auto_merge:
+    enabled: true
+    method: squash
+    delete_branch: true
+    require_ci_pass: false  # Set to true when CI is configured
+
+    # What to do when merge fails
+    on_merge_conflict:
+      action: notify
+      target: maintainers
+    on_ci_failed:
+      action: notify
+      target: maintainers
+    on_unknown_error:
+      action: escalate
+      target: maintainers
+
+  # What happens when a PR is updated after reviews
+  on_synchronize:
+    invalidate_approvals: true  # Full re-review required
+    respawn_reviewers: true     # Wake reviewer agents
+
+  # Default requirements for ALL PRs
+  default_requirements:
+    - role: pr-review
+      count: 1
+
+  # Conditional rules (additive with defaults)
+  rules:
+    - name: security-sensitive
+      match:
+        labels: [security]
+        paths:
+          - "src/**/auth/**"
+          - "src/**/crypto/**"
+          - "**/security/**"
+      requirements:
+        - role: security-review
+          count: 1
+
+    - name: infrastructure
+      match:
+        labels: [infrastructure]
+        paths:
+          - ".squadron/**"
+          - "pyproject.toml"
+          - "Dockerfile"
+          - ".github/**"
+      requirements:
+        - role: pr-review
+          count: 1
+
+    # Sequential review pipeline for PRs targeting squadron-dev
+    # Replaces the old .squadron/workflows/pr-review-pipeline.yaml
+    - name: squadron-dev-pipeline
+      match:
+        base_branch: squadron-dev
+      requirements:
+        - role: test-coverage
+          count: 1
+        - role: security-review
+          count: 1
+        - role: pr-review
+          count: 1
+      sequence:
+        - test-coverage
+        - security-review
+        - pr-review
+
+# ─────────────────────────────────────────────
+# Human Invocation (how to notify humans)
+# ─────────────────────────────────────────────
+human_invocation:
+  method: both  # github_comment, issue_label, or both
+  mention_format: "@{username}"
+  include_context: true
+  labels_to_add:
+    - needs-human
+
+# ─────────────────────────────────────────────
+# Approval Flows (DEPRECATED - use review_policy)
 # ─────────────────────────────────────────────
 approval_flows:
-  enabled: true
+  enabled: false  # Disabled - using review_policy instead
   default_reviewers:
     - pr-review
   rules:
