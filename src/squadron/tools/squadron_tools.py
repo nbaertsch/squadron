@@ -46,26 +46,41 @@ logger = logging.getLogger(__name__)
 
 # All available tool names for validation and documentation
 ALL_TOOL_NAMES = [
+    # Framework (agent lifecycle)
     "check_for_events",
     "report_blocked",
     "report_complete",
     "create_blocker_issue",
     "escalate_to_human",
-    "comment_on_issue",
     "submit_pr_review",
     "open_pr",
     "git_push",
+    # Issue management
     "create_issue",
     "assign_issue",
     "label_issue",
     "read_issue",
+    "close_issue",
+    "update_issue",
+    # PR context
+    "list_pr_files",
+    "get_pr_details",
+    "get_pr_feedback",
+    "merge_pr",
+    # Repository context
+    "get_ci_status",
+    "get_repo_info",
+    "delete_branch",
+    # Introspection
     "check_registry",
     "get_recent_history",
     "list_agent_roles",
-    "get_pr_feedback",
+    # Listing
     "list_issues",
     "list_pull_requests",
     "list_issue_comments",
+    # Communication
+    "comment_on_issue",
 ]
 
 # O(1) lookup set for splitting .md tool lists into custom vs SDK built-in
@@ -195,6 +210,69 @@ class GitPushParams(BaseModel):
         default=False,
         description="Use force push (--force-with-lease). Only use if explicitly needed.",
     )
+
+
+class ListPRFilesParams(BaseModel):
+    """List files changed in a pull request."""
+
+    pr_number: int = Field(description="The pull request number")
+
+
+class GetPRDetailsParams(BaseModel):
+    """Get detailed information about a pull request."""
+
+    pr_number: int = Field(description="The pull request number")
+
+
+class GetCIStatusParams(BaseModel):
+    """Get CI/check status for a commit or branch."""
+
+    ref: str = Field(description="Git ref to check (commit SHA or branch name)")
+
+
+class CloseIssueParams(BaseModel):
+    """Close a GitHub issue."""
+
+    issue_number: int = Field(description="The GitHub issue number to close")
+    comment: str = Field(default="", description="Optional comment to post before closing")
+
+
+class UpdateIssueParams(BaseModel):
+    """Update a GitHub issue's fields."""
+
+    issue_number: int = Field(description="The GitHub issue number to update")
+    title: str | None = Field(default=None, description="New title (or None to keep current)")
+    body: str | None = Field(default=None, description="New body (or None to keep current)")
+    state: str | None = Field(
+        default=None, description="'open' or 'closed' (or None to keep current)"
+    )
+    labels: list[str] | None = Field(
+        default=None, description="New labels (or None to keep current)"
+    )
+
+
+class MergePRParams(BaseModel):
+    """Merge a pull request."""
+
+    pr_number: int = Field(description="The pull request number to merge")
+    merge_method: str = Field(
+        default="squash",
+        description="Merge method: 'merge', 'squash', or 'rebase'",
+    )
+    commit_title: str | None = Field(default=None, description="Custom commit title (optional)")
+    commit_message: str | None = Field(default=None, description="Custom commit message (optional)")
+
+
+class DeleteBranchParams(BaseModel):
+    """Delete a branch from the repository."""
+
+    branch: str = Field(description="Branch name to delete (not the full ref, just the name)")
+
+
+class GetRepoInfoParams(BaseModel):
+    """Get repository information."""
+
+    pass
 
 
 # ── Unified Tool Implementations ─────────────────────────────────────────────
@@ -750,6 +828,240 @@ class SquadronTools:
             lines.append(f"**{user}** ({created}):\n{body}\n")
         return "\n".join(lines)
 
+    # ── GitHub Context Tools ──────────────────────────────────────────────
+
+    async def list_pr_files(self, agent_id: str, params: ListPRFilesParams) -> str:
+        """List files changed in a pull request with diff stats."""
+        files = await self.github.list_pull_request_files(self.owner, self.repo, params.pr_number)
+        if not files:
+            return f"No files changed in PR #{params.pr_number}."
+
+        lines = [f"**{len(files)} file(s) changed in PR #{params.pr_number}:**\n"]
+        total_additions = 0
+        total_deletions = 0
+
+        for f in files:
+            filename = f.get("filename", "unknown")
+            status = f.get("status", "?")
+            additions = f.get("additions", 0)
+            deletions = f.get("deletions", 0)
+            total_additions += additions
+            total_deletions += deletions
+
+            # Status indicators
+            status_icon = {"added": "+", "removed": "-", "modified": "~", "renamed": "→"}.get(
+                status, "?"
+            )
+            lines.append(f"  {status_icon} `{filename}` (+{additions}/-{deletions})")
+
+            # Include patch preview for small changes (first 500 chars)
+            patch = f.get("patch", "")
+            if patch and len(patch) < 1000:
+                # Show first few lines of patch
+                patch_lines = patch.split("\n")[:10]
+                if patch_lines:
+                    lines.append("    ```diff")
+                    for pl in patch_lines:
+                        lines.append(f"    {pl}")
+                    if len(patch.split("\n")) > 10:
+                        lines.append("    ... (truncated)")
+                    lines.append("    ```")
+
+        lines.append(f"\n**Total:** +{total_additions}/-{total_deletions}")
+        return "\n".join(lines)
+
+    async def get_pr_details(self, agent_id: str, params: GetPRDetailsParams) -> str:
+        """Get detailed information about a pull request."""
+        pr = await self.github.get_pull_request(self.owner, self.repo, params.pr_number)
+
+        # Extract key info
+        title = pr.get("title", "N/A")
+        state = pr.get("state", "unknown")
+        merged = pr.get("merged", False)
+        mergeable = pr.get("mergeable")
+        mergeable_state = pr.get("mergeable_state", "unknown")
+        draft = pr.get("draft", False)
+
+        head_ref = pr.get("head", {}).get("ref", "?")
+        head_sha = pr.get("head", {}).get("sha", "?")[:8]
+        base_ref = pr.get("base", {}).get("ref", "?")
+
+        user = pr.get("user", {}).get("login", "unknown")
+        labels = ", ".join(lbl.get("name", "") for lbl in pr.get("labels", []))
+        body = pr.get("body", "") or "(no description)"
+
+        additions = pr.get("additions", 0)
+        deletions = pr.get("deletions", 0)
+        changed_files = pr.get("changed_files", 0)
+
+        # Build response
+        lines = [
+            f"## PR #{params.pr_number}: {title}",
+            f"**Author:** {user}",
+            f"**State:** {state}" + (" (MERGED)" if merged else "") + (" (DRAFT)" if draft else ""),
+            f"**Branch:** `{head_ref}` ({head_sha}) → `{base_ref}`",
+            f"**Mergeable:** {mergeable} ({mergeable_state})",
+            f"**Labels:** {labels or 'none'}",
+            f"**Changes:** {changed_files} files, +{additions}/-{deletions}",
+            "",
+            "**Description:**",
+            body[:2000] + ("..." if len(body) > 2000 else ""),
+        ]
+
+        return "\n".join(lines)
+
+    async def get_ci_status(self, agent_id: str, params: GetCIStatusParams) -> str:
+        """Get CI/check status for a commit or branch."""
+        lines = [f"**CI Status for `{params.ref}`:**\n"]
+
+        try:
+            # Get combined commit status (legacy status API)
+            status = await self.github.get_combined_status(self.owner, self.repo, params.ref)
+            overall_state = status.get("state", "unknown")
+            statuses = status.get("statuses", [])
+
+            lines.append(f"**Overall Status:** {overall_state.upper()}\n")
+
+            if statuses:
+                lines.append("### Status Checks")
+                for s in statuses:
+                    context = s.get("context", "unknown")
+                    state = s.get("state", "?")
+                    desc = s.get("description", "")
+                    icon = {"success": "✅", "failure": "❌", "pending": "⏳", "error": "⚠️"}.get(
+                        state, "❓"
+                    )
+                    lines.append(f"  {icon} **{context}**: {state}")
+                    if desc:
+                        lines.append(f"     {desc}")
+
+            # Get check runs (newer checks API)
+            check_runs = await self.github.list_check_runs(self.owner, self.repo, params.ref)
+            if check_runs:
+                lines.append("\n### Check Runs")
+                for c in check_runs:
+                    name = c.get("name", "unknown")
+                    status_val = c.get("status", "?")
+                    conclusion = c.get("conclusion", "pending")
+                    icon = {
+                        "success": "✅",
+                        "failure": "❌",
+                        "neutral": "⚪",
+                        "cancelled": "🚫",
+                        "skipped": "⏭️",
+                        "timed_out": "⏱️",
+                        "action_required": "🔔",
+                    }.get(conclusion or "pending", "⏳")
+                    lines.append(f"  {icon} **{name}**: {status_val} → {conclusion or 'pending'}")
+
+            if not statuses and not check_runs:
+                lines.append("No status checks or check runs found.")
+
+        except Exception as e:
+            logger.debug("Failed to fetch CI status for %s", params.ref, exc_info=True)
+            lines.append(f"Error fetching CI status: {e}")
+
+        return "\n".join(lines)
+
+    async def close_issue(self, agent_id: str, params: CloseIssueParams) -> str:
+        """Close a GitHub issue."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        # Post closing comment if provided
+        if params.comment:
+            await self.github.comment_on_issue(
+                self.owner,
+                self.repo,
+                params.issue_number,
+                f"{prefix}{params.comment}",
+            )
+
+        await self.github.close_issue(self.owner, self.repo, params.issue_number)
+        return f"Closed issue #{params.issue_number}"
+
+    async def update_issue(self, agent_id: str, params: UpdateIssueParams) -> str:
+        """Update a GitHub issue's fields."""
+        await self.github.update_issue(
+            self.owner,
+            self.repo,
+            params.issue_number,
+            title=params.title,
+            body=params.body,
+            state=params.state,
+            labels=params.labels,
+        )
+
+        updates = []
+        if params.title is not None:
+            updates.append(f"title='{params.title[:30]}...'")
+        if params.body is not None:
+            updates.append("body updated")
+        if params.state is not None:
+            updates.append(f"state={params.state}")
+        if params.labels is not None:
+            updates.append(f"labels={params.labels}")
+
+        return f"Updated issue #{params.issue_number}: {', '.join(updates)}"
+
+    async def merge_pr(self, agent_id: str, params: MergePRParams) -> str:
+        """Merge a pull request."""
+        try:
+            result = await self.github.merge_pull_request(
+                self.owner,
+                self.repo,
+                params.pr_number,
+                merge_method=params.merge_method,
+                commit_title=params.commit_title,
+                commit_message=params.commit_message,
+            )
+            sha = result.get("sha", "unknown")[:8]
+            return f"Merged PR #{params.pr_number} via {params.merge_method} (commit: {sha})"
+        except Exception as e:
+            error_msg = str(e)
+            if "409" in error_msg or "conflict" in error_msg.lower():
+                return f"Merge failed: PR #{params.pr_number} has merge conflicts. Resolve conflicts and try again."
+            elif "405" in error_msg:
+                return f"Merge failed: PR #{params.pr_number} is not mergeable (may need reviews or CI to pass)."
+            else:
+                return f"Merge failed for PR #{params.pr_number}: {e}"
+
+    async def delete_branch(self, agent_id: str, params: DeleteBranchParams) -> str:
+        """Delete a branch from the repository."""
+        success = await self.github.delete_branch(self.owner, self.repo, params.branch)
+        if success:
+            return f"Deleted branch `{params.branch}`"
+        else:
+            return f"Branch `{params.branch}` not found (may already be deleted)"
+
+    async def get_repo_info(self, agent_id: str, params: GetRepoInfoParams) -> str:
+        """Get repository information."""
+        repo = await self.github.get_repo(self.owner, self.repo)
+
+        name = repo.get("full_name", f"{self.owner}/{self.repo}")
+        description = repo.get("description", "(no description)")
+        default_branch = repo.get("default_branch", "main")
+        visibility = repo.get("visibility", "unknown")
+        language = repo.get("language", "unknown")
+
+        open_issues = repo.get("open_issues_count", 0)
+        forks = repo.get("forks_count", 0)
+        stars = repo.get("stargazers_count", 0)
+
+        topics = ", ".join(repo.get("topics", [])) or "none"
+
+        lines = [
+            f"## Repository: {name}",
+            f"**Description:** {description}",
+            f"**Default Branch:** `{default_branch}`",
+            f"**Visibility:** {visibility}",
+            f"**Language:** {language}",
+            f"**Stats:** {stars} stars, {forks} forks, {open_issues} open issues",
+            f"**Topics:** {topics}",
+        ]
+
+        return "\n".join(lines)
+
     # ── Shared Tools ─────────────────────────────────────────────────────
 
     async def comment_on_issue(self, agent_id: str, params: CommentOnIssueParams) -> str:
@@ -933,6 +1245,54 @@ class SquadronTools:
             "List comments on a GitHub issue. Use to read conversation history and context.",
             ListIssueCommentsParams,
             tools.list_issue_comments,
+        )
+        _register(
+            "list_pr_files",
+            "List files changed in a pull request with diff stats and patch previews. Essential for code review.",
+            ListPRFilesParams,
+            tools.list_pr_files,
+        )
+        _register(
+            "get_pr_details",
+            "Get detailed PR information including mergeable state, head/base branches, and description.",
+            GetPRDetailsParams,
+            tools.get_pr_details,
+        )
+        _register(
+            "get_ci_status",
+            "Get CI/check status for a commit SHA or branch. Shows all status checks and check runs.",
+            GetCIStatusParams,
+            tools.get_ci_status,
+        )
+        _register(
+            "close_issue",
+            "Close a GitHub issue, optionally posting a closing comment.",
+            CloseIssueParams,
+            tools.close_issue,
+        )
+        _register(
+            "update_issue",
+            "Update a GitHub issue's title, body, state, or labels.",
+            UpdateIssueParams,
+            tools.update_issue,
+        )
+        _register(
+            "merge_pr",
+            "Merge a pull request using squash, merge, or rebase method.",
+            MergePRParams,
+            tools.merge_pr,
+        )
+        _register(
+            "delete_branch",
+            "Delete a branch from the repository (e.g., after PR merge).",
+            DeleteBranchParams,
+            tools.delete_branch,
+        )
+        _register(
+            "get_repo_info",
+            "Get repository information including default branch, visibility, and stats.",
+            GetRepoInfoParams,
+            tools.get_repo_info,
         )
 
         # Build and return only the requested tools

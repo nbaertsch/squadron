@@ -400,7 +400,7 @@ class TestPreSleepHook:
 
 class TestConstants:
     def test_all_tool_names_count(self):
-        assert len(ALL_TOOL_NAMES) == 20
+        assert len(ALL_TOOL_NAMES) == 28
 
     def test_git_push_in_all_tools(self):
         """git_push should be available for explicit selection."""
