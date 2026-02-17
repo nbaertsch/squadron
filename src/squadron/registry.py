@@ -319,16 +319,26 @@ class AgentRegistry:
         Check if adding `new_blocker_issue` as a blocker for `agent_id`
         would create a circular dependency in the blocker graph.
         """
+        agent = await self.get_agent(agent_id)
+        if agent is None:
+            return False
+
+        # Fix for issue #32: Prevent self-blocking
+        # An agent should never block on the same issue it is working on
+        if new_blocker_issue == agent.issue_number:
+            logger.warning(
+                "Preventing self-blocking: agent %s working on issue #%d attempted to block on the same issue",
+                agent_id,
+                new_blocker_issue,
+            )
+            return True  # Return True to indicate this would create a "cycle"
+
         # Find the agent working on the new_blocker_issue
         blocker_agent = await self.get_agent_by_issue(new_blocker_issue)
         if blocker_agent is None:
             return False  # No agent on that issue — no cycle possible
 
         # BFS from the blocker agent's blockers back toward our agent
-        agent = await self.get_agent(agent_id)
-        if agent is None:
-            return False
-
         visited: set[int] = set()
         queue: deque[int] = deque()
 
