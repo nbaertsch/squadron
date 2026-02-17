@@ -172,6 +172,7 @@ class SquadronConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     escalation: EscalationConfig = Field(default_factory=EscalationConfig)
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
+    commands: dict[str, CommandDefinition] = Field(default_factory=dict)
     workflows: list[WorkflowDefinition] = Field(default_factory=list)
 
 
@@ -526,3 +527,13 @@ def load_workflow_definitions(squadron_dir: Path) -> list[WorkflowDefinition]:
             logger.exception("Failed to load workflow from %s", yaml_file)
 
     return definitions
+
+# ── Command Configuration ─────────────────────────────────────────────────────
+
+
+class CommandDefinition(BaseModel):
+    """Configuration for a specific command."""
+    enabled: bool = True
+    invoke_agent: bool = True
+    delegate_to: str | None = None  # Agent role to delegate to if invoke_agent is True
+    response: str | None = None     # Static response for commands with invoke_agent=False
