@@ -12,6 +12,7 @@ See event-routing.md and AD-013 for design details.
 
 from __future__ import annotations
 
+import re
 import asyncio
 import logging
 from typing import TYPE_CHECKING, Callable, Awaitable
@@ -192,6 +193,58 @@ class EventRouter:
             },
         )
 
+    def _is_command_comment(self, comment_body: str) -> tuple[bool, str | None]:
+        """Check if a comment is a squadron command.
+        
+        Returns:
+            (is_command, command_name) where is_command is True if this is a command,
+            and command_name is the command if found.
+        """
+        if not comment_body:
+            return False, None
+            
+        # Check for @squadron-dev mentions
+        mention_pattern = r"@squadron-dev\s+(\w+)"
+        match = re.search(mention_pattern, comment_body, re.IGNORECASE)
+        
+        if match:
+            command_name = match.group(1).lower()
+            return True, command_name
+            
+        return False, None
+    
+    async def _handle_command(self, event: SquadronEvent, command_name: str) -> bool:
+        """Handle a squadron command.
+        
+        Returns:
+            True if the command was handled (skip normal routing), False otherwise.
+        """
+        command_config = self.config.commands.get(command_name)
+        
+        if not command_config or not command_config.enabled:
+            # Unknown or disabled command, treat as regular comment
+            return False
+            
+        if not command_config.invoke_agent:
+            # Command doesn't invoke agent - post response and stop routing
+            if command_config.response and event.issue_number:
+                # TODO: Post command response as comment (requires github client access)
+                logger.info(
+                    "Command '%s' handled with static response (issue #%s)", 
+                    command_name, event.issue_number
+                )
+            return True  # Skip normal routing
+            
+        # Command should invoke agent - check delegation
+        if command_config.delegate_to:
+            # TODO: Route to specific agent role
+            logger.info(
+                "Command '%s' delegated to %s agent (issue #%s)",
+                command_name, command_config.delegate_to, event.issue_number
+            )
+        
+        return False  # Continue with normal routing
+
     async def _dispatch(self, event: SquadronEvent) -> None:
         """Dispatch an event to registered handlers and route to PM/agent inboxes."""
         logger.info(
@@ -200,6 +253,28 @@ class EventRouter:
             event.issue_number,
             event.pr_number,
         )
+        
+        # Handle comment events that might be commands
+        if event.event_type == SquadronEventType.ISSUE_COMMENT:
+            comment_body = event.data.get("payload", {}).get("comment", {}).get("body", "")
+            is_command, command_name = self._is_command_comment(comment_body)
+            
+            if is_command:
+                command_handled = await self._handle_command(event, command_name)
+                if command_handled:
+                    # Command was handled, skip normal routing
+                    logger.info(
+                        "Command '%s' handled, skipping PM routing (issue #%s)",
+                        command_name, event.issue_number
+                    )
+                    # Still call registered handlers for command events
+                    handlers = self._handlers.get(event.event_type, [])
+                    for handler in handlers:
+                        try:
+                            await handler(event)
+                        except Exception:
+                            logger.exception("Handler error for %s", event.event_type)
+                    return
 
         # PM-bound events: issue triage, comments with @-pings, blocker resolution
         pm_events = {
