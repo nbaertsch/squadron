@@ -651,6 +651,17 @@ class AgentManager:
                     )
                     return existing
 
+            # Clean up stale terminal agent with the same ID so re-spawn
+            # doesn't hit a UNIQUE constraint violation (issue #13).
+            stale = await self.registry.get_agent(agent_id)
+            if stale is not None:
+                logger.info(
+                    "Cleaning up terminal agent %s (status=%s) for re-spawn",
+                    stale.agent_id,
+                    stale.status,
+                )
+                await self.registry.delete_agent(stale.agent_id)
+
         # Check concurrency limit
         if self._agent_semaphore is not None:
             if self._agent_semaphore.locked():

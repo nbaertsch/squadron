@@ -687,6 +687,118 @@ class TestMentionRouting:
         assert len(pm_agents) == 1
         assert pm_agents[0].agent_id == "pm-issue-5-12345"
 
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_mention_respawns_after_completed_agent(
+        self, mock_copilot_cls, registry, tmp_path
+    ):
+        """Issue #13 regression: mentioning @feat-dev when a COMPLETED agent exists
+        for the same role+issue should clean up the stale record and spawn fresh,
+        not crash with sqlite3.IntegrityError."""
+        config = _mention_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+
+        mock_copilot = AsyncMock()
+        mock_copilot.create_session = AsyncMock(
+            return_value=MagicMock(
+                send_and_wait=AsyncMock(return_value=MagicMock(type=MagicMock(value="text"))),
+            )
+        )
+        mock_copilot_cls.return_value = mock_copilot
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=AsyncMock(),
+            router=router,
+            agent_definitions={
+                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None)
+            },
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        # Pre-create a COMPLETED agent (simulates a previous run that finished)
+        completed = AgentRecord(
+            agent_id="feat-dev-issue-12",
+            role="feat-dev",
+            issue_number=12,
+            session_id="squadron-feat-dev-issue-12",
+            status=AgentStatus.COMPLETED,
+        )
+        await registry.create_agent(completed)
+
+        # Verify the stale record is in the DB
+        stale = await registry.get_agent("feat-dev-issue-12")
+        assert stale is not None
+        assert stale.status == AgentStatus.COMPLETED
+
+        # Mention @feat-dev on the same issue — should NOT crash with IntegrityError
+        event = _comment_event(
+            body="@feat-dev please revisit this",
+            issue_number=12,
+        )
+        await router._route_event(event)
+
+        # New agent should be active
+        agents = await registry.get_agents_for_issue(12)
+        feat_agents = [a for a in agents if a.role == "feat-dev"]
+        assert len(feat_agents) == 1
+        assert feat_agents[0].status == AgentStatus.ACTIVE
+
+        await manager.stop()
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_mention_respawns_after_failed_agent(self, mock_copilot_cls, registry, tmp_path):
+        """Similar to #13 but for FAILED status — stale record should be cleaned up."""
+        config = _mention_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+
+        mock_copilot = AsyncMock()
+        mock_copilot.create_session = AsyncMock(
+            return_value=MagicMock(
+                send_and_wait=AsyncMock(return_value=MagicMock(type=MagicMock(value="text"))),
+            )
+        )
+        mock_copilot_cls.return_value = mock_copilot
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=AsyncMock(),
+            router=router,
+            agent_definitions={
+                "feat-dev": MagicMock(prompt="test", raw_content="test", tools=None)
+            },
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        # Pre-create a FAILED agent
+        failed = AgentRecord(
+            agent_id="feat-dev-issue-7",
+            role="feat-dev",
+            issue_number=7,
+            session_id="squadron-feat-dev-issue-7",
+            status=AgentStatus.FAILED,
+        )
+        await registry.create_agent(failed)
+
+        # Mention should respawn cleanly
+        event = _comment_event(
+            body="@feat-dev try again please",
+            issue_number=7,
+        )
+        await router._route_event(event)
+
+        agents = await registry.get_agents_for_issue(7)
+        feat_agents = [a for a in agents if a.role == "feat-dev"]
+        assert len(feat_agents) == 1
+        assert feat_agents[0].status == AgentStatus.ACTIVE
+
+        await manager.stop()
+
 
 # ── EventRouter mention parsing tests ────────────────────────────────────────
 

@@ -145,6 +145,12 @@ class AgentRegistry:
         row = await cursor.fetchone()
         return self._row_to_record(row) if row else None
 
+    async def delete_agent(self, agent_id: str) -> None:
+        """Delete an agent record by ID (used to clean up terminal records before re-spawn)."""
+        await self.db.execute("DELETE FROM agents WHERE agent_id = ?", (agent_id,))
+        await self.db.commit()
+        logger.info("Deleted agent record: %s", agent_id)
+
     async def get_agent_by_issue(self, issue_number: int) -> AgentRecord | None:
         """Get the active/sleeping agent assigned to an issue."""
         cursor = await self.db.execute(
