@@ -26,6 +26,7 @@ tools:
   - get_pr_feedback
   - list_pr_files
   # Communication
+  - comment_on_pr
   - comment_on_issue
   # Lifecycle
   - check_for_events

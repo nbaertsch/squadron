@@ -314,6 +314,15 @@ class GitHubClient:
         )
         return resp.json()
 
+
+    async def comment_on_pr(self, owner: str, repo: str, pr_number: int, body: str) -> dict:
+        """Post a comment on a pull request."""
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            json={"body": body},
+        )
+        return resp.json()
     async def list_issue_comments(
         self, owner: str, repo: str, issue_number: int, *, per_page: int = 30
     ) -> list[dict]:

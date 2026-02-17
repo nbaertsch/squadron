@@ -18,6 +18,7 @@ tools:
   - get_pr_feedback
   - get_ci_status
   # Actions
+  - comment_on_pr
   - comment_on_issue
   - submit_pr_review
   # Lifecycle

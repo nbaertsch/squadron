@@ -81,6 +81,7 @@ ALL_TOOL_NAMES = [
     "list_issue_comments",
     # Communication
     "comment_on_issue",
+    "comment_on_pr",
 ]
 
 # O(1) lookup set for splitting .md tool lists into custom vs SDK built-in
@@ -123,6 +124,11 @@ class CommentOnIssueParams(BaseModel):
     issue_number: int = Field(description="The GitHub issue number to comment on")
     body: str = Field(description="Comment body (markdown supported)")
 
+
+
+class CommentOnPRParams(BaseModel):
+    pr_number: int = Field(description="The pull request number to comment on")
+    body: str = Field(description="Comment body (markdown supported)")
 
 class SubmitPRReviewParams(BaseModel):
     pr_number: int = Field(description="The pull request number to review")
@@ -1077,6 +1083,19 @@ class SquadronTools:
         )
         return f"Posted comment on #{params.issue_number}"
 
+    async def comment_on_pr(self, agent_id: str, params: CommentOnPRParams) -> str:
+        """Post a comment on a GitHub pull request with agent signature."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        await self.github.comment_on_pr(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            f"{prefix}{params.body}",
+        )
+        return f"Posted comment on PR #{params.pr_number}"
+
     # ── Tool Selection ───────────────────────────────────────────────────
 
     def get_tools(
@@ -1161,6 +1180,12 @@ class SquadronTools:
             "Post a comment on a GitHub issue. Use to communicate progress, ask clarifying questions, or post status updates.",
             CommentOnIssueParams,
             tools.comment_on_issue,
+        _register(
+            "comment_on_pr",
+            "Post a comment on a GitHub pull request. Use to communicate progress, ask clarifying questions, or post status updates on PRs.",
+            CommentOnPRParams,
+            tools.comment_on_pr,
+        )
         )
         _register(
             "submit_pr_review",
