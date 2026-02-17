@@ -173,11 +173,8 @@ class TestSquadronEvent:
             event_type="issues",
             action="opened",
             payload={
-                "issue": {
-                    "number": 42,
-                    "user": {"login": "issue-creator", "type": "User"}
-                },
-                "sender": {"login": "event-sender", "type": "User"}
+                "issue": {"number": 42, "user": {"login": "issue-creator", "type": "User"}},
+                "sender": {"login": "event-sender", "type": "User"},
             },
         )
         assert event.issue_creator == "issue-creator"

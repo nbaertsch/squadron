@@ -109,7 +109,7 @@ class GitHubEvent(BaseModel):
     @property
     def issue_creator(self) -> str | None:
         """GitHub username of the user who created the issue.
-        
+
         Returns the username from payload.issue.user.login if available.
         This is different from sender which is the user who triggered the event.
         """
