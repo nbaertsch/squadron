@@ -20,18 +20,19 @@
 
 Squadron is an autonomous development system built on the [GitHub Copilot SDK](https://www.npmjs.com/package/github-copilot-sdk). It listens for GitHub webhooks, triages issues with a **PM agent**, spawns specialized **dev and review agents** to do the work, and coordinates the entire lifecycle — from issue to merged PR — without human intervention.
 
-Each agent runs in its own Copilot SDK session with its own git worktree, tools, and context. The PM agent delegates work using the SDK's native **subagent** and **custom agent** primitives. Everything is configurable via YAML.
+Each agent runs in its own Copilot SDK session with its own git worktree, tools, and context. The PM agent delegates work using the SDK's native **subagent** and **custom agent** primitives. Everything is configurable via YAML and Markdown.
 
 ### Key Features
 
 - **Multi-agent orchestration** — PM, feature dev, bug fix, PR review, security review agents
-- **Copilot SDK native** — uses `CustomAgentConfig`, subagents, MCP servers, skills
+- **Copilot SDK native** — uses `CustomAgentConfig`, subagents, introspection tools
 - **GitHub-native** — GitHub App webhooks, issue/PR CRUD, label taxonomy, approval flows
 - **Branch isolation** — each agent gets its own git worktree
 - **Dependency tracking** — agents can block on other issues with BFS cycle detection
 - **Circuit breakers** — per-role limits on tool calls, turns, and active duration
 - **Sleep/wake lifecycle** — agents sleep when blocked, wake when blockers resolve
 - **Reconciliation loop** — detects stuck agents and auto-escalates
+- **Tool-based architecture** — 20+ specialized tools with per-agent selection
 - **BYOK support** — bring your own API key (OpenAI, Anthropic, etc.) or use Copilot auth
 
 ## Architecture
@@ -40,6 +41,7 @@ Each agent runs in its own Copilot SDK session with its own git worktree, tools,
 GitHub Webhooks ──▶ FastAPI Server ──▶ Event Router ──▶ PM Queue
                                                            │
                                                     PM Agent (Copilot SDK)
+                                                    ├── Introspection Tools
                                                     ├── label_issue()
                                                     ├── assign_issue()
                                                     └── create agent for issue
@@ -47,405 +49,288 @@ GitHub Webhooks ──▶ FastAPI Server ──▶ Event Router ──▶ PM Que
                                               ┌────────────┴──────────────┐
                                          Dev Agent                   Review Agent
                                      (git worktree)              (reads PR diff)
-                                     ├── code changes             ├── submit_pr_review()
-                                     ├── run tests                └── comment_on_issue()
-                                     ├── open_pr()
-                                     └── report_complete()
+                                     ├── git_push()              ├── submit_pr_review()
+                                     ├── open_pr()               ├── get_pr_feedback()
+                                     └── 20+ specialized tools   └── merge_pr()
 ```
 
-### Components
+### Core Architecture Principles
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| **Server** | `src/squadron/server.py` | FastAPI app, startup/shutdown lifecycle |
-| **Webhook** | `src/squadron/webhook.py` | HMAC-SHA256 verified webhook endpoint |
-| **Event Router** | `src/squadron/event_router.py` | Async consumer, bot self-filtering, PM queue |
-| **Agent Manager** | `src/squadron/agent_manager.py` | Agent lifecycle, PM consumer, session management |
-| **Copilot** | `src/squadron/copilot.py` | CopilotAgent wrapper, session config building |
-| **Config** | `src/squadron/config.py` | YAML config + agent definition parsing |
-| **Registry** | `src/squadron/registry.py` | SQLite agent registry with blocker tracking |
-| **GitHub Client** | `src/squadron/github_client.py` | Async GitHub REST API (JWT → installation token) |
-| **Reconciliation** | `src/squadron/reconciliation.py` | Background loop for stuck/orphaned agent detection |
-| **Recovery** | `src/squadron/recovery.py` | GitHub-based state reconstruction on restart |
-| **Models** | `src/squadron/models.py` | Pydantic models, enums, event types |
-| **Tools** | `src/squadron/tools/squadron_tools.py` | Unified `@define_tool` tools with per-role selection |
+1. **GitHub as the State Machine**: Issues, PRs, labels, and webhooks drive all agent behavior
+2. **Tool-Based Agents**: Agents select from 20+ specialized tools via Markdown frontmatter
+3. **Introspection Over Injection**: Agents use tools to understand state rather than receiving injected context
+4. **Persistent Sessions**: Development agents maintain context across sleep/wake cycles
+5. **Human-Compatible Interface**: All agent actions are human-readable and reversible
 
 ## Quick Start
 
-### Prerequisites
+### 1. Prerequisites
 
 - Python 3.11+
-- [uv](https://docs.astral.sh/uv/) package manager
-- GitHub App (for webhook + API access)
-- GitHub Copilot authentication (via `copilot auth login`)
+- GitHub repository with admin access
+- LLM API key (OpenAI, Anthropic) or GitHub Copilot access
 
-### Install
+### 2. Installation
 
 ```bash
-git clone https://github.com/nbaertsch/squadron.git
+# Install Squadron
+pip install squadron
+
+# Or install from source
+git clone https://github.com/your-org/squadron.git
 cd squadron
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
+pip install -e .
 ```
 
-### Authenticate Copilot
+### 3. GitHub App Setup
+
+Create a GitHub App for your repository:
 
 ```bash
-# The Copilot CLI ships with github-copilot-sdk
-.venv/lib/python3.13/site-packages/copilot/bin/copilot auth login
+# Follow the interactive setup guide
+squadron setup-github-app
 ```
 
-### Configure
+Or see [detailed GitHub App setup guide](deploy/github-app-setup.md).
 
-Create a `.env` with your GitHub App credentials:
+### 4. Configure Your Project
+
+Copy the example configuration:
 
 ```bash
-GITHUB_APP_ID=your_app_id
-GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
-GITHUB_INSTALLATION_ID=your_installation_id
-GITHUB_WEBHOOK_SECRET=your_webhook_secret
+# Copy examples to your repository
+cp -r examples/.squadron /path/to/your/repo/.squadron
+
+# Edit configuration
+vim /path/to/your/repo/.squadron/config.yaml
 ```
 
-### Run
+Minimal configuration:
+
+```yaml
+# .squadron/config.yaml
+project:
+  name: "my-project"
+  owner: "my-github-org"
+  repo: "my-repo"
+  default_branch: main
+
+human_groups:
+  maintainers: ["your-github-username"]
+```
+
+### 5. Deploy Squadron
 
 ```bash
-squadron  # or: uv run python -m squadron
+# Run locally for testing
+squadron serve --repo-root /path/to/your/repo
+
+# Or deploy to Azure Container Apps
+# See deploy/azure-container-apps/README.md
 ```
 
-The server starts on `http://localhost:8000`. Point your GitHub App's webhook URL at `/webhook`.
+### 6. Test the System
+
+1. **Open an issue** in your repository labeled with `feature`, `bug`, or `security`
+2. **Watch the PM agent** triage and assign the issue
+3. **See development agents** create branches and implement solutions
+4. **Review the PR** created by the development agent
+
+## Agent System
+
+Squadron includes several pre-configured agent types:
+
+### PM Agent (Project Manager)
+- **Triggers**: New issues, issue updates, @squadron-dev mentions
+- **Responsibilities**: Triaging, labeling, assigning work to specialized agents
+- **Tools**: Issue management, registry introspection, escalation
+- **Lifecycle**: Ephemeral (runs once per event)
+
+### Development Agents
+- **feat-dev**: Implements new features
+- **bug-fix**: Fixes bugs and regressions  
+- **docs-dev**: Updates documentation
+- **infra-dev**: Infrastructure and deployment changes
+- **test-coverage**: Adds tests and improves coverage
+
+### Review Agents
+- **pr-review**: General code review
+- **security-review**: Security-focused review
+
+### Agent Configuration
+
+Agents are configured using Markdown files with YAML frontmatter:
+
+```yaml
+---
+name: feat-dev
+description: Feature development agent
+tools:
+  - read_issue
+  - open_pr
+  - git_push
+  - check_for_events
+  - report_complete
+lifecycle: persistent
+---
+
+# Feature Development Agent
+
+You implement new features by writing code, tests, and documentation...
+```
+
+See [Agent Configuration Reference](docs/reference/agent-configuration.md) for detailed configuration options.
+
+## Tools System
+
+Squadron provides 20+ specialized tools organized into categories:
+
+- **Framework Tools**: Agent lifecycle management (report_complete, check_for_events)
+- **Issue Management**: Create, read, update, label, assign issues
+- **Pull Request Tools**: Create PRs, get feedback, merge, review
+- **Repository Context**: CI status, repo info, branch management
+- **Introspection**: Agent registry, recent history, role information
+- **Communication**: Comments, notifications, escalations
+
+See [Tools Reference](docs/reference/tools.md) for complete tool documentation.
 
 ## Configuration
 
-All configuration lives in `.squadron/`:
-
-```
-.squadron/
-├── config.yaml      # Project config, labels, runtime, circuit breakers
-└── agents/          # Agent definitions (YAML frontmatter + markdown)
-    ├── pm.md
-    ├── feat-dev.md
-    ├── bug-fix.md
-    ├── pr-review.md
-    ├── security-review.md
-    ├── code-search.md
-    └── test-writer.md
-```
-
-### config.yaml
+### Project Configuration
 
 ```yaml
+# .squadron/config.yaml
 project:
   name: "my-project"
-  owner: "org-name"
+  owner: "github-org"
   repo: "repo-name"
   default_branch: main
-  bot_username: "squadron[bot]"  # for self-event filtering
+
+human_groups:
+  maintainers: ["alice", "bob"]
+  reviewers: ["charlie", "diana"]
 
 labels:
-  types: [feature, bug, security, docs]
+  types: [feature, bug, security, docs, infra]
   priorities: [critical, high, medium, low]
   states: [needs-triage, in-progress, blocked, needs-human]
 
-runtime:
-  default_model: "claude-sonnet-4"
-  provider:
-    type: "anthropic"          # or "copilot" for Copilot-native auth
-    base_url: "https://api.anthropic.com"
-    api_key_env: "ANTHROPIC_API_KEY"
-
-circuit_breakers:
-  defaults:
-    max_tool_calls: 200
-    max_turns: 50
-    max_active_duration: 7200  # 2 hours
-
-approval_flows:
-  enabled: true
-  default_reviewers: [pr-review]
-  rules:
-    - name: security-sensitive
-      match_labels: [security]
-      match_paths: ["src/**/auth/**"]
-      reviewers: [security-review]
+# Optional: Custom agent triggers
+agents:
+  custom-agent:
+    triggers:
+      - issue_opened
+      - issue_labeled: ["custom-label"]
 ```
 
-### Agent Definitions
-
-Agent `.md` files use YAML frontmatter that maps directly to Copilot SDK's `CustomAgentConfig`:
-
-```markdown
----
-name: feat-dev
-display_name: Feature Developer
-description: Implements features from GitHub issues.
-infer: true
-tools:
-  - check_for_events
-  - report_blocked
-  - report_complete
-  - open_pr
-  - comment_on_issue
-subagents:
-  - code-search
-  - test-writer
-mcp_servers:
-  my-server:
-    type: http
-    url: https://my-mcp-server.example.com
-tool_restrictions:
-  allowed_commands: [pytest, ruff, git]
-  denied_commands: [rm -rf]
-constraints:
-  max_time: 3600
-  can_write_code: true
----
-You are a feature development agent for **{project_name}**.
-
-Your task: implement the feature described in issue #{issue_number}.
-Branch: `{branch_name}`, base: `{base_branch}`.
-
-## Workflow
-1. Read the issue requirements
-2. Write code on your branch
-3. Run tests with `pytest`
-4. Open a PR with `open_pr`
-5. Call `report_complete` when done
-```
-
-**Frontmatter fields:**
-
-| Field | SDK Mapping | Description |
-|-------|-------------|-------------|
-| `name` | `CustomAgentConfig.name` | Agent identifier |
-| `display_name` | `CustomAgentConfig.display_name` | Human-readable name |
-| `description` | `CustomAgentConfig.description` | What the agent does |
-| `emoji` | *(Squadron extension)* | Emoji prefix for comments (default: 🤖) |
-| `infer` | `CustomAgentConfig.infer` | Whether SDK infers when to delegate |
-| `tools` | `CustomAgentConfig.tools` | Available tool names |
-| `subagents` | *(Squadron extension)* | Names of child agents |
-| `mcp_servers` | `CustomAgentConfig.mcp_servers` | MCP server configs |
-| `tool_restrictions` | *(Squadron extension)* | Allowed/denied shell commands |
-| `constraints` | *(Squadron extension)* | Time limits, permissions |
-
-The markdown body becomes the agent's **prompt** (system message).
-
-## Agent Lifecycle
-
-```
-CREATED → ACTIVE → SLEEPING → ACTIVE → COMPLETED
-                       ↑                    │
-                       └── (blocker resolved)│
-                                            ↓
-                                      ESCALATED / FAILED
-```
-
-| State | Description |
-|-------|-------------|
-| `CREATED` | Agent record exists, resources being provisioned |
-| `ACTIVE` | Agent has a live Copilot SDK session, working |
-| `SLEEPING` | Blocked on dependency — session preserved, task removed |
-| `COMPLETED` | Work done, PR merged, resources freed |
-| `ESCALATED` | Circuit breaker tripped or unhandled error |
-| `FAILED` | Lost state on restart — requires human re-trigger |
-
-## Interacting with Agents
-
-Users and agents can route work to specific agents using the `@squadron-dev` command syntax in issue or PR comments.
-
-### Command Syntax
-
-```
-@squadron-dev <agent>: <message>
-```
-
-**Examples:**
-
-```
-@squadron-dev pm: please triage this issue
-@squadron-dev feat-dev: implement the feature described above
-@squadron-dev pr-review: please review this PR
-```
-
-### Help Command
-
-To see all available agents:
-
-```
-@squadron-dev help
-```
-
-This posts a table with agent names, descriptions, and available tools.
-
-### Agent Responses
-
-Agent comments are automatically prefixed with an emoji and display name signature:
-
-```
-🎯 **Project Manager**
-
-**Triage complete**
-
-- **Type:** feature
-- **Priority:** medium
-- **Assignment:** feat-dev agent (auto-spawned via label)
-```
-
-### Available Agents
-
-| Agent | Description |
-|-------|-------------|
-| `pm` | Central coordinator — triages issues, assigns work |
-| `feat-dev` | Implements features — writes code, tests, opens PRs |
-| `bug-fix` | Diagnoses and fixes bugs with regression tests |
-| `pr-review` | Reviews PRs for code quality |
-| `security-review` | Reviews PRs for security vulnerabilities |
-| `docs-dev` | Writes and updates documentation |
-| `test-coverage` | Reviews test coverage adequacy |
-
-## Tools
-
-All 13 tools live in a unified `SquadronTools` registry. Each role gets only its configured subset via `tools:` in `config.yaml` (or lifecycle-based defaults if omitted).
-
-| Tool | Default For | Description |
-|------|-------------|-------------|
-| `check_for_events` | persistent | Poll for pending framework events |
-| `report_blocked` | persistent | Declare a dependency, enter SLEEPING |
-| `report_complete` | persistent | Mark work as done, enter COMPLETED |
-| `create_blocker_issue` | persistent | Create a blocking issue + register dependency |
-| `escalate_to_human` | persistent | Escalate to human with notification |
-| `comment_on_issue` | both | Post comments on a GitHub issue |
-| `submit_pr_review` | persistent | Submit a PR review (approve/request changes) |
-| `open_pr` | persistent | Open a pull request from the agent's branch |
-| `create_issue` | ephemeral | Create a new GitHub issue |
-| `assign_issue` | ephemeral | Assign an issue to users |
-| `label_issue` | ephemeral | Apply labels to an issue |
-| `read_issue` | ephemeral | Read an issue's full details |
-| `check_registry` | ephemeral | Query the agent registry for active agents |
-
-## Testing
+### Environment Variables
 
 ```bash
-# All tests (unit + E2E)
-uv run pytest
+# Required for GitHub integration
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----..."
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
 
-# Unit tests only (no credentials needed — runs everywhere)
-uv run pytest tests/ --ignore=tests/e2e/
+# Required for LLM access
+OPENAI_API_KEY=sk-...
+# OR
+ANTHROPIC_API_KEY=sk-ant-...
+# OR for GitHub Copilot
+GITHUB_TOKEN=ghp_...
 
-# E2E GitHub API tests (requires GitHub App credentials)
-uv run pytest tests/e2e/ -v -m "not live" --ignore=tests/e2e/test_lifecycle_e2e.py
-
-# E2E lifecycle tests (requires Copilot auth + GitHub App credentials)
-uv run pytest tests/e2e/test_lifecycle_e2e.py -v
-
-# Skip live LLM tests
-uv run pytest -m "not live"
+# Optional: Database and runtime
+DATABASE_URL=sqlite:///squadron.db
+LOG_LEVEL=INFO
 ```
-
-### Test tiers
-
-| Tier | Count | Credentials | Runs in CI? |
-|------|-------|-------------|-------------|
-| **Unit tests** | ~334 | None | Yes |
-| **E2E GitHub API** | ~26 | GitHub App secrets | Yes (with secrets configured) |
-| **E2E Copilot** | ~9 | Copilot CLI + GitHub App secrets | **No** — local only |
-| **Lifecycle E2E** | ~9 | Copilot CLI + GitHub App secrets | **No** — local only |
-
-Tests that require missing credentials **skip** automatically — they never fail
-due to missing auth. The `copilot_authenticated` fixture checks Copilot CLI
-auth status and skips if not authenticated.
-
-### CI/CD
-
-The CI pipeline (`.github/workflows/ci.yml`) runs:
-- **lint** + **unit tests** on every push/PR (no secrets needed)
-- **E2E GitHub API** tests on push to main (requires GitHub Actions secrets)
-- **Docker build** on push to main
-
-Lifecycle E2E tests (live LLM inference) require Copilot SDK auth via a
-fine-grained PAT from a **Copilot-licensed** GitHub account.
-
-#### Required GitHub Actions secrets for E2E
-
-| Secret | Value |
-|--------|-------|
-| `SQ_APP_ID_DEV` | App ID |
-| `SQ_APP_PRIVATE_KEY` | Full PEM content (not a file path) |
-| `SQ_INSTALLATION_ID_DEV` | Installation ID |
-| `SQ_COPILOT_TOKEN` | Fine-grained PAT from a Copilot-licensed user |
-
-#### Required repository variables
-
-| Variable | Value |
-|----------|-------|
-| `E2E_ENABLED` | `true` (enables the E2E job) |
-| `E2E_TEST_OWNER` | GitHub owner (e.g. `nbaertsch`) |
-| `E2E_TEST_REPO` | Test repo name (e.g. `squadron-e2e-test`) |
-
-### Local E2E setup
-
-```bash
-# 1. Set up .env with GitHub App credentials
-cp .env.example .env  # edit with your values
-
-# 2. Authenticate Copilot CLI (interactive — opens browser)
-COPILOT_BIN=$(find .venv -name copilot -type f -path '*/bin/*' | head -1)
-$COPILOT_BIN auth login
-
-# 3. Run all E2E tests
-uv run pytest tests/e2e/ -v
-```
-
-## Development
-
-```bash
-# Format + lint
-uv run ruff check --fix src/ tests/
-uv run ruff format src/ tests/
-
-# Run a specific test file
-uv run pytest tests/test_lifecycle.py -v
-
-# Run with logging
-uv run pytest tests/e2e/ -v --log-cli-level=INFO
-```
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GITHUB_APP_ID` | Yes | GitHub App ID |
-| `GITHUB_PRIVATE_KEY` | Yes | PEM-encoded private key |
-| `GITHUB_INSTALLATION_ID` | Yes | Installation ID for target repo |
-| `GITHUB_WEBHOOK_SECRET` | Yes | Webhook HMAC secret |
-| `COPILOT_GITHUB_TOKEN` | Yes | Fine-grained PAT from a Copilot-licensed account |
-| `SQUADRON_WORKTREE_DIR` | No | Override worktree base path (default: `.squadron-data/worktrees`) |
-| `ANTHROPIC_API_KEY` | BYOK only | API key for Anthropic provider |
-| `OPENAI_API_KEY` | BYOK only | API key for OpenAI provider |
 
 ## Deployment
 
-Squadron runs as a **standalone service** — you deploy a container instance and point it at your repo via the GitHub App. You don't install Squadron into your repo's codebase.
+Squadron can be deployed in several ways:
 
-**Quick start:**
-1. Install the [Squadron GitHub App](https://github.com/apps/squadron-dev) on your repo
-2. Copy `examples/.squadron/` into your repo root and customize
-3. Copy the deployment workflow template into `.github/workflows/`
-4. Set repository secrets and deploy
+### Local Development
+```bash
+squadron serve --repo-root /path/to/repo
+```
 
-See **[deploy/](deploy/)** for full instructions and workflow templates:
+### Azure Container Apps
+```bash
+# See deploy/azure-container-apps/README.md
+az deployment group create --template-file deploy/azure-container-apps/main.bicep
+```
 
-| Target | Guide |
-|--------|-------|
-| **Azure Container Apps** | [deploy/azure-container-apps/](deploy/azure-container-apps/) |
+### Docker
+```bash
+docker build -t squadron .
+docker run -d \
+  -e GITHUB_APP_ID=$GITHUB_APP_ID \
+  -e GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
+  -e OPENAI_API_KEY=$OPENAI_API_KEY \
+  -p 8000:8000 \
+  squadron
+```
 
-The pre-built container image `ghcr.io/nbaertsch/squadron:latest` is published on every push to main — you never need to build your own.
+See [Deployment Guide](deploy/README.md) for detailed deployment instructions.
+
+## Examples
+
+### Basic Feature Development
+```yaml
+# .squadron/agents/feat-dev.md
+---
+name: feat-dev
+tools: [read_issue, open_pr, git_push, check_for_events, report_complete]
+---
+
+# Feature Development Agent
+You implement new features by writing clean, tested code...
+```
+
+### Custom Agent for API Documentation
+```yaml
+# .squadron/agents/api-docs.md  
+---
+name: api-docs
+tools: [read_issue, open_pr, git_push, get_repo_info]
+---
+
+# API Documentation Agent
+You generate and maintain API documentation...
+```
+
+More examples in the [examples/](examples/) directory.
+
+## Monitoring and Observability
+
+Squadron provides built-in monitoring:
+
+```bash
+# View agent status
+squadron status
+
+# Check recent activity
+squadron logs --agent-id feat-dev-123
+
+# Monitor resource usage
+squadron monitor
+```
+
+## Contributing
+
+1. **Fork and clone** the repository
+2. **Install development dependencies**: `pip install -e ".[dev]"`
+3. **Set up pre-commit hooks**: `pre-commit install`
+4. **Run tests**: `pytest tests/`
+5. **Submit a pull request**
+
+See [Contributing Guide](CONTRIBUTING.md) for detailed guidelines.
 
 ## Development
 
 After installing (see above), set up the git hooks:
 
 ```bash
-uv run pre-commit install --hook-type pre-commit --hook-type pre-push
+pip install -e ".[dev]"
+pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
 This installs two hooks that run automatically:
@@ -457,15 +342,30 @@ You can also run them manually:
 
 ```bash
 # Lint + format
-uv run ruff check . --fix && uv run ruff format .
+ruff check . --fix && ruff format .
 
 # Unit tests
-uv run pytest tests/ --ignore=tests/e2e -x -q
+pytest tests/ --ignore=tests/e2e -x -q
 
-# E2E tests (requires credentials)
-uv run pytest tests/e2e/ -x -q
+# E2E tests (requires credentials)  
+pytest tests/e2e/ -x -q
 ```
+
+## Documentation
+
+- [Getting Started Guide](docs/getting-started.md) - Step-by-step setup
+- [Agent Configuration Reference](docs/reference/agent-configuration.md) - Complete agent config guide  
+- [Tools Reference](docs/reference/tools.md) - All available tools
+- [Deployment Guide](deploy/README.md) - Production deployment
+- [Architecture Deep Dive](docs/architecture.md) - Technical details
+- [Troubleshooting](docs/troubleshooting.md) - Common issues and solutions
 
 ## License
 
 MIT
+
+## Support
+
+- **GitHub Issues**: [Report bugs and request features](https://github.com/your-org/squadron/issues)
+- **Discussions**: [Community discussion and questions](https://github.com/your-org/squadron/discussions)
+- **Documentation**: [docs/](docs/) directory

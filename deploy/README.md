@@ -53,3 +53,65 @@ ghcr.io/nbaertsch/squadron:latest
 ```
 
 All deployment templates use this image by default. You never need to build your own.
+
+## Recent Updates
+
+**Note**: This deployment guide reflects the current Squadron architecture with the following recent improvements:
+
+- **Tool-based agents**: 20+ specialized tools with per-agent selection
+- **Introspection tools**: Agents use tools to understand state rather than injected context
+- **GitHub App authentication**: Improved git operations with proper GitHub App credentials
+- **Circuit breaker refinements**: Better resource limits and escalation flows
+- **Auto-merge system**: PR approval tracking and automatic merging
+
+### Updated Environment Variables
+
+The following environment variables are now required:
+
+```bash
+# GitHub App credentials (unchanged)
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----..."
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
+
+# LLM API credentials (unchanged)
+OPENAI_API_KEY=sk-...
+# OR
+ANTHROPIC_API_KEY=sk-ant-...
+
+# NEW: Optional GitHub token for enhanced API access
+GITHUB_TOKEN=ghp_...
+
+# Database and runtime (unchanged)
+DATABASE_URL=sqlite:///squadron.db
+LOG_LEVEL=INFO
+```
+
+### Configuration Hot-Reload
+
+Squadron now supports hot-reloading of agent configurations. When you push changes to `.squadron/` files, the system automatically:
+
+1. Detects changes via git pull
+2. Reloads agent definitions
+3. Validates new configuration
+4. Applies changes without restart
+
+This means you can iterate on agent configurations without redeploying the entire service.
+
+### New Monitoring Endpoints
+
+```bash
+# Health check
+GET /health
+
+# Agent status
+GET /api/agents/status
+
+# Recent activity
+GET /api/agents/history?limit=50
+
+# Configuration validation
+GET /api/config/validate
+```
+
+For complete setup instructions, see [Getting Started Guide](../docs/getting-started.md).
