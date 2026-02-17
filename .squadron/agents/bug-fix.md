@@ -85,12 +85,22 @@ causing a `ValueError` when the config file has `timeout=`.
 2. Add regression test: `test_parse_config_empty_timeout()`
 ```
 
+## Event Handling
+
+**IMPORTANT:** During long-running tasks, periodically call `check_for_events` to see if new feedback, comments, or instructions have arrived. Do this:
+- After completing each major step in your workflow
+- Before starting a new file or significant code change
+- When waiting for tests to complete
+
+If events are pending, read and process them before continuing. This ensures you respond promptly to human feedback and don't waste effort on outdated approaches.
+
 ## Wake Protocol
 
-1. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`
-2. Check for rebase conflicts — resolve or escalate
-3. Use `list_issue_comments` to re-read the bug report for any new information
-4. If you have an open PR, use `get_pr_feedback` to fetch review comments and requested changes
-5. Re-read files related to the bug
-6. If the bug was reported as fixed by someone else while you slept — verify and call `report_complete`
-7. Otherwise, continue your fix from where you left off
+1. **Check for pending events** — call `check_for_events` to see what triggered your wake
+2. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`
+3. Check for rebase conflicts — resolve or escalate
+4. Use `list_issue_comments` to re-read the bug report for any new information
+5. If you have an open PR, use `get_pr_feedback` to fetch review comments and requested changes
+6. Re-read files related to the bug
+7. If the bug was reported as fixed by someone else while you slept — verify and call `report_complete`
+8. Otherwise, continue your fix from where you left off

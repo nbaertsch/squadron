@@ -288,6 +288,21 @@ class AgentManager:
             if review.get("state", "").lower() != condition["review_state"].lower():
                 return False
 
+        # is_pr_comment: true — only match if comment is on a PR (not a plain issue)
+        # GitHub includes "pull_request" key in issue payload for PR comments
+        if condition.get("is_pr_comment"):
+            issue_data = payload.get("issue", {})
+            if not issue_data.get("pull_request"):
+                return False
+
+        # is_human_comment: true — only match if comment is from a human (not bot)
+        if condition.get("is_human_comment"):
+            comment = payload.get("comment", {})
+            user = comment.get("user", {})
+            user_type = user.get("type", "").lower()
+            if user_type == "bot":
+                return False
+
         return True
 
     async def _trigger_spawn(
@@ -701,6 +716,10 @@ class AgentManager:
         # Determine branch name (ephemeral agents don't need branches)
         branch = "" if is_ephemeral else self._branch_name(role, issue_number)
 
+        # Create inbox BEFORE registering agent (prevents race condition where
+        # events arrive before inbox exists — issue #30 agent responsiveness fix)
+        self.agent_inboxes[agent_id] = asyncio.Queue()
+
         # Create agent record
         record = AgentRecord(
             agent_id=agent_id,
@@ -725,9 +744,6 @@ class AgentManager:
         record.status = AgentStatus.ACTIVE
         record.active_since = datetime.now(timezone.utc)
         await self.registry.update_agent(record)
-
-        # Create inbox
-        self.agent_inboxes[agent_id] = asyncio.Queue()
 
         # Create CopilotAgent instance (one CLI subprocess per agent)
         copilot = CopilotAgent(
@@ -1775,11 +1791,55 @@ class AgentManager:
 
     @staticmethod
     def _extract_issue_number(body: str) -> int | None:
-        """Extract an issue number from PR body (e.g., 'Closes #42')."""
+        """Extract an issue number from PR body.
+
+        Tries multiple patterns in priority order:
+        1. GitHub closing keywords: "Closes #42", "Fixes #42", "Resolves #42"
+        2. Explicit references: "for issue #42", "addresses #42", "relates to #42"
+        3. Branch name pattern: "feat/issue-42", "fix/issue-42"
+        4. Any #N reference (fallback)
+
+        Returns the first match found, or None if no issue reference found.
+        """
         import re
 
-        match = re.search(r"(?:closes|fixes|resolves)\s+#(\d+)", body, re.IGNORECASE)
-        return int(match.group(1)) if match else None
+        if not body:
+            return None
+
+        # Priority 1: GitHub closing keywords (most explicit intent)
+        match = re.search(
+            r"(?:closes|fixes|resolves|close|fix|resolve)\s*:?\s*#(\d+)",
+            body,
+            re.IGNORECASE,
+        )
+        if match:
+            return int(match.group(1))
+
+        # Priority 2: Explicit issue references
+        match = re.search(
+            r"(?:for|addresses|relates?\s+to|implements|refs?|see)\s+(?:issue\s+)?#(\d+)",
+            body,
+            re.IGNORECASE,
+        )
+        if match:
+            return int(match.group(1))
+
+        # Priority 3: Branch name patterns in body (e.g., "Branch: feat/issue-42")
+        match = re.search(r"(?:feat|fix|bug|issue)[/-](?:issue[/-])?(\d+)", body, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+        # Priority 4: Simple "issue #N" or "issue N"
+        match = re.search(r"issue\s*#?(\d+)", body, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+        # Priority 5: Any #N at word boundary (fallback, less reliable)
+        match = re.search(r"\b#(\d+)\b", body)
+        if match:
+            return int(match.group(1))
+
+        return None
 
     # ── Command-Based Routing (Layer 2) ──────────────────────────────────
 

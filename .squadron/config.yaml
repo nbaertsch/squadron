@@ -97,6 +97,10 @@ agent_roles:
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
         action: wake
+      # Wake when human comments on PR (feedback that doesn't use formal review)
+      - event: "issue_comment.created"
+        condition: {is_pr_comment: true, is_human_comment: true}
+        action: wake
       - event: "pull_request.closed"
         condition: {merged: false}
         action: wake
@@ -114,6 +118,10 @@ agent_roles:
         action: sleep
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
+        action: wake
+      # Wake when human comments on PR (feedback that doesn't use formal review)
+      - event: "issue_comment.created"
+        condition: {is_pr_comment: true, is_human_comment: true}
         action: wake
       - event: "pull_request.closed"
         condition: {merged: false}

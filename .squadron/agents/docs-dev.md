@@ -63,3 +63,22 @@ Follow this process precisely:
 - Keep documentation concise but complete
 - Link to related docs and source files where appropriate
 - If a documentation request is unclear, comment on the issue and call `report_blocked`
+
+## Event Handling
+
+**IMPORTANT:** During long-running tasks, periodically call `check_for_events` to see if new feedback, comments, or instructions have arrived. Do this:
+- After completing each major documentation section
+- Before starting a new file
+- When waiting for any build processes
+
+If events are pending, read and process them before continuing.
+
+## Wake Protocol
+
+When you are resumed from a sleeping state:
+
+1. **Check for pending events** — call `check_for_events` to see what triggered your wake
+2. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`
+3. Use `list_issue_comments` for any new instructions or feedback
+4. If you have an open PR, use `get_pr_feedback` for review comments
+5. Continue your documentation work from where you left off

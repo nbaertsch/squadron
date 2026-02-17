@@ -104,14 +104,24 @@ Starting implementation of #{issue_number}.
 Working on branch `feat/issue-42`.
 ```
 
+## Event Handling
+
+**IMPORTANT:** During long-running tasks, periodically call `check_for_events` to see if new feedback, comments, or instructions have arrived. Do this:
+- After completing each major step in your workflow
+- Before starting a new file or significant code change
+- When waiting for tests to complete
+
+If events are pending, read and process them before continuing. This ensures you respond promptly to human feedback and don't waste effort on outdated approaches.
+
 ## Wake Protocol
 
 When you are resumed from a sleeping state:
 
-1. **Pull latest changes** — `git fetch origin && git rebase origin/{base_branch}`
-2. **Check for rebase conflicts** — if conflicts exist, attempt to resolve them. If you cannot resolve after 2 attempts, call `report_blocked` describing the conflict.
-3. **Re-read relevant files** — the codebase may have changed while you were sleeping. Re-read files related to your issue.
-4. **Check issue comments** — use `list_issue_comments` for any new instructions, clarifications, or feedback.
-5. **Check PR feedback** — if you have an open PR, use `get_pr_feedback` to fetch review comments, inline suggestions, and requested changes.
-6. **Assess state** — what has changed? Does your plan need adjustment?
-7. **Continue implementation** — pick up where you left off, adjusted for any changes.
+1. **Check for pending events** — call `check_for_events` to see what triggered your wake
+2. **Pull latest changes** — `git fetch origin && git rebase origin/{base_branch}`
+3. **Check for rebase conflicts** — if conflicts exist, attempt to resolve them. If you cannot resolve after 2 attempts, call `report_blocked` describing the conflict.
+4. **Re-read relevant files** — the codebase may have changed while you were sleeping. Re-read files related to your issue.
+5. **Check issue comments** — use `list_issue_comments` for any new instructions, clarifications, or feedback.
+6. **Check PR feedback** — if you have an open PR, use `get_pr_feedback` to fetch review comments, inline suggestions, and requested changes.
+7. **Assess state** — what has changed? Does your plan need adjustment?
+8. **Continue implementation** — pick up where you left off, adjusted for any changes.

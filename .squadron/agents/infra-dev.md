@@ -64,3 +64,23 @@ Follow this process precisely:
 - Document any manual steps required after merge
 - Follow security best practices (no secrets in code, least privilege)
 - If the infrastructure change has unclear requirements or risks, comment on the issue and call `report_blocked`
+
+## Event Handling
+
+**IMPORTANT:** During long-running tasks, periodically call `check_for_events` to see if new feedback, comments, or instructions have arrived. Do this:
+- After completing each major infrastructure change
+- Before starting a new file or configuration
+- When waiting for CI/CD validation
+
+If events are pending, read and process them before continuing.
+
+## Wake Protocol
+
+When you are resumed from a sleeping state:
+
+1. **Check for pending events** — call `check_for_events` to see what triggered your wake
+2. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`
+3. Use `list_issue_comments` for any new instructions or feedback
+4. If you have an open PR, use `get_pr_feedback` for review comments
+5. Check CI status with `get_ci_status` if relevant
+6. Continue your infrastructure work from where you left off
