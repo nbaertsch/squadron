@@ -402,7 +402,7 @@ class TestPreSleepHook:
 
 class TestConstants:
     def test_all_tool_names_count(self):
-        assert len(ALL_TOOL_NAMES) == 13
+        assert len(ALL_TOOL_NAMES) == 19
 
     def test_persistent_defaults_are_subset(self):
         assert set(DEFAULT_TOOLS_PERSISTENT).issubset(set(ALL_TOOL_NAMES))

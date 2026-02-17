@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 if TYPE_CHECKING:
     import asyncio
 
+    from squadron.config import SquadronConfig
     from squadron.github_client import GitHubClient
     from squadron.models import AgentRecord
     from squadron.registry import AgentRegistry
@@ -58,6 +59,12 @@ ALL_TOOL_NAMES = [
     "label_issue",
     "read_issue",
     "check_registry",
+    "get_recent_history",
+    "list_agent_roles",
+    "get_pr_feedback",
+    "list_issues",
+    "list_pull_requests",
+    "list_issue_comments",
 ]
 
 # Default tool sets by lifecycle type (used when no explicit tools list is configured)
@@ -172,6 +179,34 @@ class CheckRegistryParams(BaseModel):
     pass
 
 
+class GetRecentHistoryParams(BaseModel):
+    limit: int = Field(default=10, description="Number of recent agents to return (max 50)")
+
+
+class ListAgentRolesParams(BaseModel):
+    """No parameters needed — returns configured agent roles."""
+
+    pass
+
+
+class GetPRFeedbackParams(BaseModel):
+    pr_number: int = Field(description="The pull request number to get feedback for")
+
+
+class ListIssuesParams(BaseModel):
+    state: str = Field(default="open", description="Filter: 'open', 'closed', or 'all'")
+    labels: str = Field(default="", description="Comma-separated label filter, e.g. 'bug,critical'")
+
+
+class ListPullRequestsParams(BaseModel):
+    state: str = Field(default="open", description="Filter: 'open', 'closed', or 'all'")
+
+
+class ListIssueCommentsParams(BaseModel):
+    issue_number: int = Field(description="The GitHub issue number to read comments from")
+    limit: int = Field(default=20, description="Number of comments to return (most recent last)")
+
+
 # ── Unified Tool Implementations ─────────────────────────────────────────────
 
 
@@ -191,6 +226,7 @@ class SquadronTools:
         owner: str,
         repo: str,
         *,
+        config: SquadronConfig | None = None,
         pre_sleep_hook: Callable[[AgentRecord], Awaitable[None]] | None = None,
     ):
         self.registry = registry
@@ -198,6 +234,7 @@ class SquadronTools:
         self.agent_inboxes = agent_inboxes
         self.owner = owner
         self.repo = repo
+        self.config = config
         self._pre_sleep_hook = pre_sleep_hook
 
     # ── Framework Tools (agent lifecycle) ────────────────────────────────
@@ -483,6 +520,154 @@ class SquadronTools:
             )
         return "\n".join(lines)
 
+    # ── Introspection Tools ────────────────────────────────────────────────
+
+    async def get_recent_history(self, agent_id: str, params: GetRecentHistoryParams) -> str:
+        """Get recently completed/failed/escalated agents."""
+        limit = min(params.limit, 50)
+        agents = await self.registry.get_recent_agents(limit=limit)
+        if not agents:
+            return "No recently completed agents."
+
+        lines = [f"**Recent agent history** (last {len(agents)}):\n"]
+        lines.append("| Agent | Role | Issue | Outcome | Finished |")
+        lines.append("|-------|------|-------|---------|----------|")
+        for a in agents:
+            finished = a.updated_at.strftime("%Y-%m-%d %H:%M") if a.updated_at else "?"
+            lines.append(
+                f"| {a.agent_id} | {a.role} | #{a.issue_number} | {a.status.value} | {finished} |"
+            )
+        return "\n".join(lines)
+
+    async def list_agent_roles(self, agent_id: str, params: ListAgentRolesParams) -> str:
+        """List all configured agent roles, their triggers, and lifecycle type."""
+        if not self.config:
+            return "Error: config not available"
+
+        lines = ["**Configured agent roles:**\n"]
+        for role_name, role_config in self.config.agent_roles.items():
+            lifecycle = role_config.lifecycle if hasattr(role_config, "lifecycle") else "persistent"
+            singleton = "yes" if role_config.singleton else "no"
+            trigger_info = ", ".join(
+                f"{t.event}" + (f"[{t.label}]" if t.label else "") for t in role_config.triggers
+            )
+            lines.append(f"- **{role_name}** (lifecycle={lifecycle}, singleton={singleton})")
+            lines.append(f"  Mention: `@{role_name}` or `/{role_name}`")
+            if trigger_info:
+                lines.append(f"  Triggers: {trigger_info}")
+            if role_config.subagents:
+                lines.append(f"  Subagents: {', '.join(role_config.subagents)}")
+        return "\n".join(lines)
+
+    async def get_pr_feedback(self, agent_id: str, params: GetPRFeedbackParams) -> str:
+        """Get review comments, review status, and changed files for a PR."""
+        lines = [f"**PR #{params.pr_number} feedback:**\n"]
+
+        try:
+            # Reviews summary
+            reviews = await self.github.get_pr_reviews(self.owner, self.repo, params.pr_number)
+            if reviews:
+                lines.append("### Reviews\n")
+                for r in reviews:
+                    user = r.get("user", {}).get("login", "unknown")
+                    state = r.get("state", "?")
+                    body = r.get("body", "") or ""
+                    lines.append(f"- **{user}**: {state}")
+                    if body:
+                        lines.append(f"  {body[:500]}")
+
+            # Inline review comments
+            review_comments = await self.github.get_pr_review_comments(
+                self.owner, self.repo, params.pr_number
+            )
+            if review_comments:
+                lines.append("\n### Inline Comments\n")
+                for c in review_comments:
+                    path = c.get("path", "unknown")
+                    line_num = c.get("line") or c.get("original_line", "?")
+                    body = c.get("body", "")
+                    user = c.get("user", {}).get("login", "unknown")
+                    lines.append(f"- **{path}:{line_num}** ({user}): {body}")
+
+            # Changed files
+            changed = await self.github.list_pull_request_files(
+                self.owner, self.repo, params.pr_number
+            )
+            if changed:
+                lines.append("\n### Changed Files\n")
+                for f in changed:
+                    fname = f.get("filename", "unknown")
+                    status = f.get("status", "?")
+                    adds = f.get("additions", 0)
+                    dels = f.get("deletions", 0)
+                    lines.append(f"- {fname} ({status}, +{adds}/-{dels})")
+
+        except Exception:
+            logger.debug("Failed to fetch PR feedback for #%d", params.pr_number, exc_info=True)
+            lines.append("Error fetching PR feedback.")
+
+        return "\n".join(lines)
+
+    async def list_issues(self, agent_id: str, params: ListIssuesParams) -> str:
+        """List issues in the repository."""
+        issues = await self.github.list_issues(
+            self.owner,
+            self.repo,
+            state=params.state,
+            labels=params.labels or None,
+        )
+        if not issues:
+            return f"No {params.state} issues found."
+
+        lines = [f"**{len(issues)} {params.state} issue(s):**\n"]
+        for issue in issues[:50]:  # cap output
+            number = issue.get("number", "?")
+            title = issue.get("title", "N/A")
+            labels = ", ".join(lbl.get("name", "") for lbl in issue.get("labels", []))
+            assignees = ", ".join(a.get("login", "") for a in issue.get("assignees", []))
+            lines.append(f"- **#{number}** {title}")
+            if labels:
+                lines.append(f"  Labels: {labels}")
+            if assignees:
+                lines.append(f"  Assignees: {assignees}")
+        return "\n".join(lines)
+
+    async def list_pull_requests(self, agent_id: str, params: ListPullRequestsParams) -> str:
+        """List pull requests in the repository."""
+        prs = await self.github.list_pull_requests(
+            self.owner,
+            self.repo,
+            state=params.state,
+        )
+        if not prs:
+            return f"No {params.state} pull requests found."
+
+        lines = [f"**{len(prs)} {params.state} PR(s):**\n"]
+        for pr in prs[:50]:
+            number = pr.get("number", "?")
+            title = pr.get("title", "N/A")
+            user = pr.get("user", {}).get("login", "?")
+            head = pr.get("head", {}).get("ref", "?")
+            base = pr.get("base", {}).get("ref", "?")
+            lines.append(f"- **#{number}** {title} ({user}, {head} → {base})")
+        return "\n".join(lines)
+
+    async def list_issue_comments(self, agent_id: str, params: ListIssueCommentsParams) -> str:
+        """List comments on a GitHub issue."""
+        comments = await self.github.list_issue_comments(
+            self.owner, self.repo, params.issue_number, per_page=params.limit
+        )
+        if not comments:
+            return f"No comments on issue #{params.issue_number}."
+
+        lines = [f"**{len(comments)} comment(s) on #{params.issue_number}:**\n"]
+        for c in comments:
+            user = c.get("user", {}).get("login", "unknown")
+            created = c.get("created_at", "?")[:16]
+            body = c.get("body", "")[:500]
+            lines.append(f"**{user}** ({created}):\n{body}\n")
+        return "\n".join(lines)
+
     # ── Shared Tools ─────────────────────────────────────────────────────
 
     async def comment_on_issue(self, agent_id: str, params: CommentOnIssueParams) -> str:
@@ -628,6 +813,42 @@ class SquadronTools:
             "Query the agent registry to see all active agents and their current status.",
             CheckRegistryParams,
             tools.check_registry,
+        )
+        _register(
+            "get_recent_history",
+            "Get recently completed, failed, or escalated agents. Useful for understanding what work has been done and avoiding duplicates.",
+            GetRecentHistoryParams,
+            tools.get_recent_history,
+        )
+        _register(
+            "list_agent_roles",
+            "List all configured agent roles, their triggers, lifecycle type, and mention syntax. Use to understand which agents are available and how to invoke them.",
+            ListAgentRolesParams,
+            tools.list_agent_roles,
+        )
+        _register(
+            "get_pr_feedback",
+            "Get review comments, review status, and changed files for a pull request. Use when woken for PR review feedback.",
+            GetPRFeedbackParams,
+            tools.get_pr_feedback,
+        )
+        _register(
+            "list_issues",
+            "List issues in the repository, optionally filtered by state and labels.",
+            ListIssuesParams,
+            tools.list_issues,
+        )
+        _register(
+            "list_pull_requests",
+            "List pull requests in the repository, optionally filtered by state.",
+            ListPullRequestsParams,
+            tools.list_pull_requests,
+        )
+        _register(
+            "list_issue_comments",
+            "List comments on a GitHub issue. Use to read conversation history and context.",
+            ListIssueCommentsParams,
+            tools.list_issue_comments,
         )
 
         # Build and return only the requested tools

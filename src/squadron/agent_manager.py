@@ -62,6 +62,7 @@ class AgentManager:
             agent_inboxes=self.agent_inboxes,
             owner=config.project.owner,
             repo=config.project.repo,
+            config=config,
             pre_sleep_hook=self._wip_commit_and_push,
         )
 
@@ -1442,7 +1443,11 @@ class AgentManager:
         record: AgentRecord,
         trigger_event: SquadronEvent | None,
     ) -> str:
-        """Build the initial prompt for a new agent session."""
+        """Build the user-turn prompt for a new persistent agent session.
+
+        Contains only structured event context — no workflow instructions.
+        The agent's .md definition (system message) provides all behavioral guidance.
+        """
         lines = [f"## Assignment: Issue #{record.issue_number}\n"]
 
         if trigger_event:
@@ -1459,10 +1464,6 @@ class AgentManager:
 
         lines.append(f"\n**Your role:** {record.role}")
         lines.append(f"**Branch:** {record.branch}")
-        lines.append("\nBegin working on this issue. Use the available tools to read code,")
-        lines.append("make changes, run tests, and report progress.")
-        lines.append("Call `check_for_events` periodically to check for new instructions.")
-        lines.append("Call `report_complete` when finished, or `report_blocked` if stuck.")
 
         return "\n".join(lines)
 
@@ -1473,13 +1474,11 @@ class AgentManager:
     ) -> str:
         """Build the wake-up prompt for a resumed session.
 
-        Fetches review comments and changed files from GitHub for PR-related
-        wakes, giving the agent full context about what reviewers said.
+        Contains only structured event context — no workflow instructions.
+        The agent's .md definition provides the Wake Protocol.
+        Agents should use `get_pr_feedback` tool to fetch review details.
         """
         lines = [f"## Session Resumed: {record.agent_id}\n"]
-        lines.append(
-            "Your session has been resumed. Here's what happened while you were sleeping:\n"
-        )
 
         if trigger_event:
             lines.append(f"**Trigger:** {trigger_event.event_type.value}")
@@ -1489,7 +1488,7 @@ class AgentManager:
                 lines.append(f"**PR:** #{trigger_event.pr_number}")
 
             payload = trigger_event.data.get("payload", {})
-            # Include review from the triggering event
+            # Include review summary from the triggering event
             review = payload.get("review", {})
             if review:
                 state = review.get("state", "N/A")
@@ -1497,56 +1496,23 @@ class AgentManager:
                 review_body = review.get("body", "")
                 if review_body:
                     lines.append(f"**Review comment:** {review_body}")
-
                 reviewer = review.get("user", {}).get("login", "unknown")
                 lines.append(f"**Reviewer:** {reviewer}")
-
-            # Fetch detailed review context from GitHub for PR wakes
-            pr_number = trigger_event.pr_number or record.pr_number
-            if pr_number:
-                await self._inject_review_context(lines, pr_number)
 
             # Include resolved blocker info
             resolved = trigger_event.data.get("resolved_issue")
             if resolved:
                 lines.append(f"\n**Resolved blocker:** Issue #{resolved} has been closed.")
 
-        lines.append("\nContinue your work. Address the review feedback, then push your changes.")
-        lines.append("Call `check_for_events` periodically to check for new instructions.")
-        lines.append("Call `report_complete` when finished, or `report_blocked` if stuck.")
+            # Include comment text for mention-triggered wakes
+            comment_data = payload.get("comment", {})
+            if comment_data:
+                commenter = comment_data.get("user", {}).get("login", "unknown")
+                comment_body = comment_data.get("body", "")
+                if comment_body:
+                    lines.append(f"\n**Comment by {commenter}:**\n{comment_body[:1000]}")
 
         return "\n".join(lines)
-
-    async def _inject_review_context(self, lines: list[str], pr_number: int) -> None:
-        """Fetch and inject PR review details into the wake prompt."""
-        owner = self.config.project.owner
-        repo = self.config.project.repo
-
-        try:
-            # Fetch inline review comments (file-specific feedback)
-            review_comments = await self.github.get_pr_review_comments(owner, repo, pr_number)
-            if review_comments:
-                lines.append("\n### Inline Review Comments\n")
-                for comment in review_comments:
-                    path = comment.get("path", "unknown")
-                    line_num = comment.get("line") or comment.get("original_line", "?")
-                    body = comment.get("body", "")
-                    user = comment.get("user", {}).get("login", "unknown")
-                    lines.append(f"- **{path}:{line_num}** ({user}): {body}")
-
-            # Fetch changed files summary
-            changed_files = await self.github.list_pull_request_files(owner, repo, pr_number)
-            if changed_files:
-                lines.append("\n### Changed Files\n")
-                for f in changed_files:
-                    filename = f.get("filename", "unknown")
-                    status = f.get("status", "?")
-                    additions = f.get("additions", 0)
-                    deletions = f.get("deletions", 0)
-                    lines.append(f"- {filename} ({status}, +{additions}/-{deletions})")
-
-        except Exception:
-            logger.debug("Failed to fetch review context for PR #%d", pr_number, exc_info=True)
 
     # ── Event Handlers ───────────────────────────────────────────────────
 
@@ -1858,72 +1824,19 @@ class AgentManager:
         record: AgentRecord,
         trigger_event: SquadronEvent | None,
     ) -> str:
-        """Build the prompt for an ephemeral agent session.
+        """Build the user-turn prompt for an ephemeral agent session.
 
-        Ephemeral agents (like PM) get full project context injected
-        into each session since they have no memory between runs.
-        Includes: current workload, recent history, pending escalations,
-        event details, and available roles.
+        Contains only structured event context — no workflow instructions.
+        The agent's .md definition (system message) provides all behavioral
+        guidance.  Agents use introspection tools (check_registry,
+        get_recent_history, list_agent_roles, etc.) to gather system state.
         """
-        active_agents = await self.registry.get_all_active_agents()
-        recent_agents = await self.registry.get_recent_agents(limit=10)
-        escalated_agents = await self.registry.get_agents_by_status(AgentStatus.ESCALATED)
-
         lines = [f"## Event for Issue #{record.issue_number}\n"]
 
         # ── Project context ──────────────────────────────────────────
         lines.append(f"**Project:** {self.config.project.name}")
         lines.append(f"**Repo:** {self.config.project.owner}/{self.config.project.repo}")
-
-        # ── Current workload summary ─────────────────────────────────
-        lines.append("\n### Current Workload\n")
-
-        if active_agents:
-            # Group by status
-            by_status: dict[str, list[AgentRecord]] = {}
-            by_role: dict[str, int] = {}
-            for a in active_agents:
-                by_status.setdefault(a.status.value, []).append(a)
-                by_role[a.role] = by_role.get(a.role, 0) + 1
-
-            lines.append(f"**Total active:** {len(active_agents)} agents")
-            lines.append(
-                "**By status:** "
-                + ", ".join(f"{s}: {len(agents)}" for s, agents in sorted(by_status.items()))
-            )
-            lines.append(
-                "**By role:** " + ", ".join(f"{r}: {c}" for r, c in sorted(by_role.items()))
-            )
-
-            lines.append("\n| Agent | Role | Issue | Status | Blocked By |")
-            lines.append("|-------|------|-------|--------|------------|")
-            for a in active_agents:
-                blocked = ", ".join(f"#{b}" for b in a.blocked_by) if a.blocked_by else "-"
-                lines.append(
-                    f"| {a.agent_id} | {a.role} | #{a.issue_number} | {a.status.value} | {blocked} |"
-                )
-        else:
-            lines.append("No agents currently active.")
-
-        # ── Pending escalations ──────────────────────────────────────
-        if escalated_agents:
-            lines.append("\n### Pending Escalations\n")
-            lines.append(f"**{len(escalated_agents)} agent(s) need human attention:**")
-            for a in escalated_agents:
-                lines.append(
-                    f"- **{a.agent_id}** (issue #{a.issue_number}): escalated at {a.updated_at.strftime('%Y-%m-%d %H:%M') if a.updated_at else 'unknown'}"
-                )
-
-        # ── Recent triage history ────────────────────────────────────
-        if recent_agents:
-            lines.append("\n### Recent History (last 10)\n")
-            lines.append("| Agent | Role | Issue | Outcome | Completed |")
-            lines.append("|-------|------|-------|---------|-----------|")
-            for a in recent_agents:
-                completed_at = a.updated_at.strftime("%Y-%m-%d %H:%M") if a.updated_at else "?"
-                lines.append(
-                    f"| {a.agent_id} | {a.role} | #{a.issue_number} | {a.status.value} | {completed_at} |"
-                )
+        lines.append(f"**Your role:** {record.role}")
 
         # ── Triggering event details ─────────────────────────────────
         if trigger_event:
@@ -1943,58 +1856,13 @@ class AgentManager:
 
             comment_data = payload.get("comment", {})
             if comment_data:
-                lines.append(
-                    f"\n**Comment by {comment_data.get('user', {}).get('login', 'unknown')}:**"
-                )
+                commenter = comment_data.get("user", {}).get("login", "unknown")
+                lines.append(f"\n**Comment by {commenter}:**")
                 lines.append(comment_data.get("body", "")[:1000])
 
             pr_data = payload.get("pull_request", {})
             if pr_data:
                 lines.append(f"**PR Title:** {pr_data.get('title', 'N/A')}")
-
-        # ── Available agent roles ────────────────────────────────────
-        lines.append("\n### Available Agent Roles\n")
-        lines.append("You can mention other agents in your comments using `@role` syntax.")
-        lines.append("The mentioned agent will be spawned or woken automatically.\n")
-        for role_name, role_config in self.config.agent_roles.items():
-            trigger_info = ", ".join(
-                f"{t.event}" + (f"[{t.label}]" if t.label else "")
-                for t in role_config.triggers
-                if t.action == "spawn"  # Only show spawn triggers
-            )
-            mention_note = f"(mention with @{role_name})"
-            lines.append(
-                f"- **{role_name}** {mention_note}: triggers on {trigger_info or 'mention / approval flow'}"
-            )
-
-        # ── Instructions ─────────────────────────────────────────────
-        lines.append("\n### Instructions\n")
-        lines.append(f"**Your role:** {record.role}")
-        lines.append("Analyze this event and take appropriate action using your available tools.")
-        lines.append(
-            "Use the workload summary and recent history above to make informed decisions."
-        )
-        lines.append("")
-        lines.append("**For new issues:**")
-        lines.append("1. Read the issue content carefully")
-        lines.append("2. Check the workload — avoid duplicate assignments")
-        lines.append(
-            "3. Classify with labels: type (feature, bug, security, docs) + priority (critical, high, medium, low)"
-        )
-        lines.append("4. Post a triage comment explaining your analysis")
-        lines.append(
-            "5. IMPORTANT: Applying a type label automatically spawns the appropriate agent — do NOT manually assign"
-        )
-        lines.append("")
-        lines.append(
-            "**For comments (via @pm mention):** Respond to the request, re-triage if context has changed."
-        )
-        lines.append(
-            "**For agent coordination:** Mention other agents in your reply (e.g. @feat-dev, @docs-dev) to invoke them."
-        )
-        lines.append(
-            "**For escalations:** If agents are escalated, post guidance or notify maintainers."
-        )
 
         return "\n".join(lines)
 

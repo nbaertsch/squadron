@@ -314,6 +314,17 @@ class GitHubClient:
         )
         return resp.json()
 
+    async def list_issue_comments(
+        self, owner: str, repo: str, issue_number: int, *, per_page: int = 30
+    ) -> list[dict]:
+        """List comments on an issue (most recent last)."""
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+            params={"per_page": per_page},
+        )
+        return resp.json()
+
     async def assign_issue(
         self, owner: str, repo: str, issue_number: int, assignees: list[str]
     ) -> None:

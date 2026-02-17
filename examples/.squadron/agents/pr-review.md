@@ -9,6 +9,7 @@ tools:
   - comment_on_issue
   - escalate_to_human
   - report_complete
+  - get_pr_feedback
 ---
 
 # PR Review Agent

@@ -594,22 +594,6 @@ class TestWakePromptContext:
     async def test_wake_prompt_includes_review_context(self, registry):
         agent = _make_agent(pr_number=10)
         github = _make_github_mock()
-        github.get_pr_review_comments = AsyncMock(
-            return_value=[
-                {
-                    "path": "src/main.py",
-                    "line": 42,
-                    "body": "Fix this logic",
-                    "user": {"login": "reviewer1"},
-                },
-            ]
-        )
-        github.list_pull_request_files = AsyncMock(
-            return_value=[
-                {"filename": "src/main.py", "status": "modified", "additions": 10, "deletions": 5},
-            ]
-        )
-
         mgr = _make_manager(registry, github=github)
         event = SquadronEvent(
             event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
@@ -626,11 +610,12 @@ class TestWakePromptContext:
         )
 
         prompt = await mgr._build_wake_prompt(agent, event)
+        # Event-level review info is still included as context
         assert "changes_requested" in prompt
         assert "Needs work" in prompt
-        assert "src/main.py:42" in prompt
-        assert "Fix this logic" in prompt
-        assert "+10/-5" in prompt
+        assert "reviewer1" in prompt
+        # Inline review comments are no longer injected -- agents use
+        # the get_pr_feedback tool to fetch them on demand
 
     async def test_wake_prompt_handles_missing_review(self, registry):
         agent = _make_agent(pr_number=None)
@@ -648,10 +633,10 @@ class TestWakePromptContext:
         assert "#99" in prompt
 
     async def test_wake_prompt_survives_github_errors(self, registry):
+        """Wake prompt works even without github API calls (review context
+        is now fetched via get_pr_feedback tool, not injected)."""
         agent = _make_agent(pr_number=10)
         github = _make_github_mock()
-        github.get_pr_review_comments = AsyncMock(side_effect=Exception("API error"))
-        github.list_pull_request_files = AsyncMock(side_effect=Exception("API error"))
 
         mgr = _make_manager(registry, github=github)
         event = SquadronEvent(
@@ -660,86 +645,28 @@ class TestWakePromptContext:
             data={"payload": {"review": {"state": "changes_requested", "body": "Fix it"}}},
         )
 
-        # Should not raise — gracefully degrades
         prompt = await mgr._build_wake_prompt(agent, event)
         assert "Session Resumed" in prompt
         assert "Fix it" in prompt
 
 
 class TestStatelessPrompt:
-    """Test enriched ephemeral PM prompt with workload, history, and escalations."""
+    """Test ephemeral (PM) prompt — context-only, no workflow instructions.
 
-    async def test_includes_workload_summary(self, registry):
-        """Prompt should show active agent workload table."""
-        agent1 = _make_agent(agent_id="feat-dev-issue-42", role="feat-dev", issue_number=42)
-        agent2 = _make_agent(
-            agent_id="bug-fix-issue-43",
-            role="bug-fix",
-            issue_number=43,
-            status=AgentStatus.SLEEPING,
-        )
-        await registry.create_agent(agent1)
-        await registry.create_agent(agent2)
+    The prompt now contains only structured event context (project, role,
+    triggering event details).  Workload, history, escalations, and
+    available roles are fetched on-demand via introspection tools.
+    """
 
-        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
-        mgr = _make_manager(registry)
-
-        event = SquadronEvent(
-            event_type=SquadronEventType.ISSUE_OPENED,
-            issue_number=99,
-            data={
-                "payload": {
-                    "issue": {"title": "New feature request", "body": "Please add X", "labels": []}
-                }
-            },
-        )
-
-        prompt = await mgr._build_stateless_prompt(pm_record, event)
-
-        assert "Current Workload" in prompt
-        assert "Total active" in prompt
-        assert "feat-dev" in prompt
-        assert "bug-fix" in prompt
-        assert "#42" in prompt
-        assert "#43" in prompt
-
-    async def test_includes_escalated_agents(self, registry):
-        """Prompt should highlight escalated agents needing human attention."""
-        agent = _make_agent(
-            agent_id="feat-dev-issue-50",
-            role="feat-dev",
-            issue_number=50,
-            status=AgentStatus.ESCALATED,
-        )
-        await registry.create_agent(agent)
-
+    async def test_includes_project_and_role(self, registry):
+        """Prompt should show project name, repo, and role."""
         pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
         mgr = _make_manager(registry)
 
         prompt = await mgr._build_stateless_prompt(pm_record, None)
 
-        assert "Pending Escalations" in prompt
-        assert "feat-dev-issue-50" in prompt
-        assert "#50" in prompt
-
-    async def test_includes_recent_history(self, registry):
-        """Prompt should include recently completed agents."""
-        agent = _make_agent(
-            agent_id="feat-dev-issue-30",
-            role="feat-dev",
-            issue_number=30,
-            status=AgentStatus.COMPLETED,
-        )
-        await registry.create_agent(agent)
-
-        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
-        mgr = _make_manager(registry)
-
-        prompt = await mgr._build_stateless_prompt(pm_record, None)
-
-        assert "Recent History" in prompt
-        assert "feat-dev-issue-30" in prompt
-        assert "completed" in prompt
+        assert "squadron" in prompt
+        assert "pm" in prompt
 
     async def test_includes_event_details(self, registry):
         """Prompt should include triggering event information."""
@@ -767,50 +694,60 @@ class TestStatelessPrompt:
         assert "feature" in prompt
         assert "issue.opened" in prompt
 
-    async def test_includes_available_roles(self, registry):
-        """Prompt should list available agent roles."""
+    async def test_includes_comment_details(self, registry):
+        """Prompt should include comment text when triggered by a comment event."""
         pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
         mgr = _make_manager(registry)
 
-        prompt = await mgr._build_stateless_prompt(pm_record, None)
-
-        assert "Available Agent Roles" in prompt
-
-    async def test_empty_workload(self, registry):
-        """Prompt should handle no active agents gracefully."""
-        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
-        mgr = _make_manager(registry)
-
-        prompt = await mgr._build_stateless_prompt(pm_record, None)
-
-        assert "No agents currently active" in prompt
-
-    async def test_only_spawn_triggers_in_role_list(self, registry):
-        """Available Roles section should only show spawn triggers, not wake/sleep/complete."""
-        from squadron.config import AgentRoleConfig, AgentTrigger
-
-        config = _make_config(
-            agent_roles={
-                "feat-dev": AgentRoleConfig(
-                    agent_definition="agents/feat-dev.md",
-                    triggers=[
-                        AgentTrigger(event="issues.labeled", label="feature"),
-                        AgentTrigger(event="pull_request.opened", action="sleep"),
-                        AgentTrigger(event="pull_request.closed", action="complete"),
-                    ],
-                ),
-            }
+        event = SquadronEvent(
+            event_type=SquadronEventType.ISSUE_COMMENT,
+            issue_number=99,
+            data={
+                "payload": {
+                    "issue": {"title": "Something", "body": "body", "labels": []},
+                    "comment": {
+                        "body": "What is the status?",
+                        "user": {"login": "alice"},
+                    },
+                }
+            },
         )
+
+        prompt = await mgr._build_stateless_prompt(pm_record, event)
+
+        assert "What is the status?" in prompt
+        assert "alice" in prompt
+
+    async def test_includes_pr_data(self, registry):
+        """Prompt should include PR title when triggered by a PR event."""
         pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
-        mgr = _make_manager(registry, config=config)
+        mgr = _make_manager(registry)
+
+        event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED,
+            pr_number=10,
+            issue_number=99,
+            data={
+                "payload": {
+                    "pull_request": {"title": "feat: add OAuth support"},
+                }
+            },
+        )
+
+        prompt = await mgr._build_stateless_prompt(pm_record, event)
+
+        assert "feat: add OAuth support" in prompt
+
+    async def test_no_event_still_has_context(self, registry):
+        """Prompt should still contain project/role context even without an event."""
+        pm_record = _make_agent(agent_id="pm-issue-99", role="pm", issue_number=99)
+        mgr = _make_manager(registry)
 
         prompt = await mgr._build_stateless_prompt(pm_record, None)
 
-        # Should show the spawn trigger
-        assert "issues.labeled[feature]" in prompt
-        # Should NOT show sleep/complete triggers in the roles list
-        assert "pull_request.opened" not in prompt
-        assert "pull_request.closed" not in prompt
+        assert "squadron" in prompt
+        assert "pm" in prompt
+        assert "#99" in prompt
 
 
 # ── Issue Reassignment (D-12) ───────────────────────────────────────────────

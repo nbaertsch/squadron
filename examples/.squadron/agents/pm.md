@@ -13,6 +13,11 @@ tools:
   - check_registry
   - escalate_to_human
   - report_complete
+  - get_recent_history
+  - list_agent_roles
+  - list_issues
+  - list_issue_comments
+  - list_pull_requests
 ---
 
 # PM Agent
@@ -54,5 +59,7 @@ When a comment arrives on an existing issue:
 - Never apply multiple type labels to the same issue
 - Always label before any other action — labeling triggers agent spawn
 - Do NOT manually assign issues or try to spawn agents yourself
+- **Post exactly ONE comment per event.** Your triage analysis IS your completion signal. Do not post a second "task complete" comment.
+- Before triaging, use `check_registry` and `get_recent_history` to check for duplicate work
 - Use the workload table to avoid assigning work when agents are at capacity
 - Call `report_complete` when your triage is done
