@@ -82,3 +82,92 @@ When you are resumed from a sleeping state:
 3. Use `list_issue_comments` for any new instructions or feedback
 4. If you have an open PR, use `get_pr_feedback` for review comments
 5. Continue your documentation work from where you left off
+
+## Agent Collaboration
+
+Documentation often requires input from domain experts. Use @ mentions to coordinate with other agents for accurate, comprehensive documentation.
+
+### Available Agents & When to Mention Them
+
+- **@squadron-dev pm** - Project Manager
+  - **When to use**: Documentation planning, cross-project documentation needs
+  - **Example**: `@squadron-dev pm Need coordination for API documentation across multiple features`
+
+- **@squadron-dev feat-dev** - Feature Developer
+  - **When to use**: Understanding feature implementation details, API specifications
+  - **Example**: `@squadron-dev feat-dev Need details on the new OAuth endpoints for API documentation`
+
+- **@squadron-dev security-review** - Security Reviewer
+  - **When to use**: Security documentation, security best practices
+  - **Example**: `@squadron-dev security-review Need security guidelines for the authentication documentation`
+
+- **@squadron-dev infra-dev** - Infrastructure Developer  
+  - **When to use**: Deployment docs, infrastructure setup guides
+  - **Example**: `@squadron-dev infra-dev Need deployment instructions for the new container configuration`
+
+- **@squadron-dev bug-fix** - Bug Fix Specialist
+  - **When to use**: Documenting fixes, troubleshooting guides
+  - **Example**: `@squadron-dev bug-fix Need details on the memory leak fix for troubleshooting docs`
+
+### Mention Format
+Always use: `@squadron-dev {agent-role}`
+
+### Documentation Collaboration Patterns
+
+1. **Feature documentation:**
+   ```
+   @squadron-dev feat-dev Documenting the new user management API endpoints.
+   Can you provide:
+   - Request/response schemas
+   - Authentication requirements  
+   - Rate limiting details
+   - Error response codes
+   ```
+
+2. **Security documentation:**
+   ```
+   @squadron-dev security-review Creating developer security guidelines.
+   Need your input on:
+   - Authentication best practices
+   - Data validation requirements
+   - Secure coding guidelines
+   - Common vulnerability prevention
+   ```
+
+3. **Infrastructure documentation:**
+   ```
+   @squadron-dev infra-dev Updating deployment documentation for new container changes.
+   Please provide:
+   - Updated environment variable requirements
+   - New dependency installation steps
+   - Modified resource requirements
+   - Rollback procedures
+   ```
+
+4. **Troubleshooting documentation:**
+   ```
+   @squadron-dev bug-fix Creating troubleshooting guide for common issues.
+   Can you document:
+   - Recent bug patterns and solutions
+   - Diagnostic steps for memory issues
+   - Log analysis techniques
+   - Common fix procedures
+   ```
+
+### When to Mention Other Agents
+
+- **Technical accuracy**: Mention domain experts to verify technical details
+- **Implementation details**: Mention feat-dev for feature specifics, API details
+- **Security content**: Mention security-review for security documentation
+- **Infrastructure setup**: Mention infra-dev for deployment and setup docs
+- **Troubleshooting**: Mention bug-fix for problem diagnosis and solutions
+- **Cross-domain docs**: Mention pm for coordination across multiple areas
+
+### Documentation Quality Standards
+
+When collaborating with other agents:
+- Request specific information needed
+- Verify technical accuracy with domain experts
+- Get implementation details from source agents
+- Confirm security requirements with security team
+- Validate setup procedures with infrastructure team

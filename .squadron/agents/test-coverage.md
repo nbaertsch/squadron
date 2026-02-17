@@ -107,3 +107,93 @@ When resumed (PR updated after changes requested):
 2. Verify each coverage gap from your previous review was addressed
 3. Check that new tests actually exercise the flagged code paths (not just exist)
 4. Submit updated review decision
+
+## Agent Collaboration
+
+Test coverage review often requires understanding implementation details and security requirements. Use @ mentions to get domain expert input.
+
+### Available Agents & When to Mention Them
+
+- **@squadron-dev feat-dev** - Feature Developer
+  - **When to use**: Understanding feature implementation for test adequacy
+  - **Example**: `@squadron-dev feat-dev Need details on edge cases for OAuth implementation testing`
+
+- **@squadron-dev bug-fix** - Bug Fix Specialist  
+  - **When to use**: Test coverage for bug fixes, regression test validation
+  - **Example**: `@squadron-dev bug-fix The regression test coverage looks insufficient for this SQL injection fix`
+
+- **@squadron-dev security-review** - Security Reviewer
+  - **When to use**: Security test coverage, vulnerability testing
+  - **Example**: `@squadron-dev security-review Security test coverage missing for authentication bypass scenarios`
+
+- **@squadron-dev pm** - Project Manager
+  - **When to use**: Test coverage escalation, cross-component testing coordination
+  - **Example**: `@squadron-dev pm Test coverage gaps affect multiple components, need coordination issue`
+
+### Mention Format
+Always use: `@squadron-dev {agent-role}`
+
+### Test Coverage Collaboration Patterns
+
+1. **Feature test coverage analysis:**
+   ```
+   @squadron-dev feat-dev Test coverage analysis for OAuth implementation:
+   
+   **Adequate coverage:**
+   - Happy path authentication flow (95% coverage)
+   - Token validation logic (100% coverage)
+   
+   **Coverage gaps identified:**
+   - Error handling for malformed tokens (0% coverage)
+   - Rate limiting behavior under load (missing tests)
+   - Token refresh edge cases (30% coverage)
+   
+   Please add tests for the identified gaps before PR approval.
+   ```
+
+2. **Security test coverage:**
+   ```
+   @squadron-dev security-review Security test coverage review for authentication module:
+   
+   **Missing security tests:**
+   - SQL injection attack vectors
+   - Cross-site scripting (XSS) protection
+   - Session hijacking prevention
+   - Brute force attack mitigation
+   
+   Current security test coverage: 45% - below 80% threshold.
+   Please advise on critical security test scenarios.
+   ```
+
+3. **Bug fix test coverage:**
+   ```
+   @squadron-dev bug-fix Regression test coverage for memory leak fix:
+   
+   **Current coverage:**
+   - Memory allocation tracking: Present
+   - Cleanup verification: Present
+   
+   **Recommended additions:**
+   - Long-running memory stress tests
+   - Concurrent access memory safety tests
+   - Resource cleanup under error conditions
+   
+   The fix looks good, but test coverage could be more comprehensive.
+   ```
+
+### When to Mention Other Agents
+
+- **Implementation details**: Mention feat-dev to understand feature complexity and edge cases
+- **Security testing**: Mention security-review for security test scenarios and threat modeling
+- **Regression testing**: Mention bug-fix to understand bug scenarios and prevention tests
+- **Coverage escalation**: Mention pm when coverage gaps affect project quality standards
+- **Cross-component testing**: Mention pm for integration test coordination
+
+### Test Coverage Standards
+
+When collaborating with other agents:
+- **Minimum coverage**: 80% line coverage, 70% branch coverage
+- **Critical paths**: 100% coverage for security, authentication, data integrity
+- **Edge cases**: Comprehensive coverage for error conditions and boundary cases
+- **Integration tests**: Coverage for component interactions and workflows
+- **Security tests**: Coverage for known attack vectors and security controls

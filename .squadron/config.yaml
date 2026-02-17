@@ -1,404 +1,342 @@
-# .squadron/config.yaml — Squadron project configuration
-# See docs/project-plan/research/config-schema.md for full reference.
-
-# ─────────────────────────────────────────────
-# Command Configuration (issue #21)
-# ─────────────────────────────────────────────
+agent_roles:
+  bug-fix:
+    agent_definition: agents/bug-fix.md
+    lifecycle: stateful
+    triggers:
+    - event: issues.labeled
+      label: bug
+    - action: sleep
+      event: pull_request.opened
+    - action: wake
+      condition:
+        review_state: changes_requested
+      event: pull_request_review.submitted
+    - action: wake
+      condition:
+        is_human_comment: true
+        is_pr_comment: true
+      event: issue_comment.created
+    - action: wake
+      condition:
+        merged: false
+      event: pull_request.closed
+    - action: complete
+      condition:
+        merged: true
+      event: pull_request.closed
+  docs-dev:
+    agent_definition: agents/docs-dev.md
+    lifecycle: stateful
+    triggers:
+    - event: issues.labeled
+      label: documentation
+    - action: sleep
+      event: pull_request.opened
+    - action: wake
+      condition:
+        review_state: changes_requested
+      event: pull_request_review.submitted
+    - action: complete
+      condition:
+        merged: true
+      event: pull_request.closed
+  feat-dev:
+    agent_definition: agents/feat-dev.md
+    lifecycle: stateful
+    subagents:
+    - code-search
+    - test-writer
+    triggers:
+    - event: issues.labeled
+      label: feature
+    - action: sleep
+      event: pull_request.opened
+    - action: wake
+      condition:
+        review_state: changes_requested
+      event: pull_request_review.submitted
+    - action: wake
+      condition:
+        is_human_comment: true
+        is_pr_comment: true
+      event: issue_comment.created
+    - action: wake
+      condition:
+        merged: false
+      event: pull_request.closed
+    - action: complete
+      condition:
+        merged: true
+      event: pull_request.closed
+  infra-dev:
+    agent_definition: agents/infra-dev.md
+    lifecycle: stateful
+    triggers:
+    - event: issues.labeled
+      label: infrastructure
+    - action: sleep
+      event: pull_request.opened
+    - action: wake
+      condition:
+        review_state: changes_requested
+      event: pull_request_review.submitted
+    - action: complete
+      condition:
+        merged: true
+      event: pull_request.closed
+  merge-conflict:
+    agent_definition: agents/merge-conflict.md
+    lifecycle: ephemeral
+  pm:
+    agent_definition: agents/pm.md
+    lifecycle: ephemeral
+    singleton: true
+    subagents:
+    - feat-dev
+    - bug-fix
+    - pr-review
+    - security-review
+    - docs-dev
+    - infra-dev
+    triggers:
+    - event: issues.opened
+    - event: issues.reopened
+  pr-review:
+    agent_definition: agents/pr-review.md
+    lifecycle: stateful
+    triggers:
+    - condition:
+        approval_flow: true
+      event: pull_request.opened
+    - action: wake
+      event: pull_request.synchronize
+    - action: complete
+      event: pull_request.closed
+  security-review:
+    agent_definition: agents/security-review.md
+    lifecycle: stateful
+    triggers:
+    - event: issues.labeled
+      label: security
+    - condition:
+        approval_flow: true
+      event: pull_request.opened
+    - action: wake
+      event: pull_request.synchronize
+    - action: complete
+      event: pull_request.closed
+  test-coverage:
+    agent_definition: agents/test-coverage.md
+    lifecycle: stateful
+branch_naming:
+  bugfix: fix/issue-{issue_number}
+  chore: chore/{description}
+  docs: docs/issue-{issue_number}
+  feature: feat/issue-{issue_number}
+  hotfix: hotfix/issue-{issue_number}
+  infra: infra/issue-{issue_number}
+  security: security/issue-{issue_number}
+circuit_breakers:
+  defaults:
+    max_active_duration: 7200
+    max_iterations: 5
+    max_sleep_duration: 86400
+    max_tool_calls: 200
+    max_turns: 50
+    warning_threshold: 0.8
+  roles:
+    pm:
+      max_active_duration: 600
+      max_tool_calls: 50
+      max_turns: 10
+    pr-review:
+      max_active_duration: 1800
+      max_tool_calls: 100
+      max_turns: 20
+    security-review:
+      max_active_duration: 1800
+      max_tool_calls: 100
+      max_turns: 20
+    test-coverage:
+      max_active_duration: 1800
+      max_tool_calls: 100
+      max_turns: 20
 commands:
   help:
     enabled: true
     invoke_agent: false
-    response: |
-      ## Squadron Commands
+    response: '## Squadron Commands
+
 
       Available commands:
+
       - `@squadron-dev help` - Show this help message
+
       - `@squadron-dev status` - Show project status
+
 
       For more information, see the Squadron documentation.
 
+      '
   status:
+    delegate_to: pm
     enabled: true
     invoke_agent: true
-    delegate_to: pm
-
-# ─────────────────────────────────────────────
-# Project Identity
-# ─────────────────────────────────────────────
-project:
-  name: "squadron"
-  owner: "nbaertsch"
-  repo: "squadron"
-  default_branch: squadron-dev
-  bot_username: "squadron-dev[bot]"
-
-# ─────────────────────────────────────────────
-# Label Taxonomy
-# ─────────────────────────────────────────────
-labels:
-  types:
-    - feature
-    - bug
-    - security
-    - documentation
-    - infrastructure
-  priorities:
-    - critical
-    - high
-    - medium
-    - low
-  states:
-    - needs-triage
-    - in-progress
-    - blocked
-    - needs-human
-    - needs-clarification
-
-# ─────────────────────────────────────────────
-# Branch Naming Conventions
-# ─────────────────────────────────────────────
-branch_naming:
-  feature: "feat/issue-{issue_number}"
-  bugfix: "fix/issue-{issue_number}"
-  security: "security/issue-{issue_number}"
-  docs: "docs/issue-{issue_number}"
-  infra: "infra/issue-{issue_number}"
-  hotfix: "hotfix/issue-{issue_number}"
-  chore: "chore/{description}"
-
-# ─────────────────────────────────────────────
-# Human Groups
-# ─────────────────────────────────────────────
-human_groups:
-  maintainers: ["@noahbaertsch"]
-
-# ─────────────────────────────────────────────
-# Agent Roles
-# ─────────────────────────────────────────────
-agent_roles:
-  pm:
-    agent_definition: agents/pm.md
-    singleton: true
-    lifecycle: ephemeral
-    triggers:
-      - event: "issues.opened"
-      - event: "issues.reopened"
-      # Comments are routed via @pm / /pm mentions (Layer 2 routing).
-      # No issue_comment.created trigger needed — mention routing handles it.
-    subagents: [feat-dev, bug-fix, pr-review, security-review, docs-dev, infra-dev]
-
-  feat-dev:
-    agent_definition: agents/feat-dev.md
-    triggers:
-      - event: "issues.labeled"
-        label: feature
-      - event: "pull_request.opened"
-        action: sleep
-      - event: "pull_request_review.submitted"
-        condition: {review_state: "changes_requested"}
-        action: wake
-      # Wake when human comments on PR (feedback that doesn't use formal review)
-      - event: "issue_comment.created"
-        condition: {is_pr_comment: true, is_human_comment: true}
-        action: wake
-      - event: "pull_request.closed"
-        condition: {merged: false}
-        action: wake
-      - event: "pull_request.closed"
-        condition: {merged: true}
-        action: complete
-    subagents: [code-search, test-writer]
-
-  bug-fix:
-    agent_definition: agents/bug-fix.md
-    triggers:
-      - event: "issues.labeled"
-        label: bug
-      - event: "pull_request.opened"
-        action: sleep
-      - event: "pull_request_review.submitted"
-        condition: {review_state: "changes_requested"}
-        action: wake
-      # Wake when human comments on PR (feedback that doesn't use formal review)
-      - event: "issue_comment.created"
-        condition: {is_pr_comment: true, is_human_comment: true}
-        action: wake
-      - event: "pull_request.closed"
-        condition: {merged: false}
-        action: wake
-      - event: "pull_request.closed"
-        condition: {merged: true}
-        action: complete
-
-  pr-review:
-    agent_definition: agents/pr-review.md
-    triggers:
-      - event: "pull_request.opened"
-        condition: {approval_flow: true}
-      - event: "pull_request.synchronize"
-        action: wake
-      - event: "pull_request.closed"
-        action: complete
-
-  security-review:
-    agent_definition: agents/security-review.md
-    triggers:
-      - event: "issues.labeled"
-        label: security
-      - event: "pull_request.opened"
-        condition: {approval_flow: true}
-      - event: "pull_request.synchronize"
-        action: wake
-      - event: "pull_request.closed"
-        action: complete
-
-  docs-dev:
-    agent_definition: agents/docs-dev.md
-    triggers:
-      - event: "issues.labeled"
-        label: documentation
-      - event: "pull_request.opened"
-        action: sleep
-      - event: "pull_request_review.submitted"
-        condition: {review_state: "changes_requested"}
-        action: wake
-      - event: "pull_request.closed"
-        condition: {merged: true}
-        action: complete
-
-  infra-dev:
-    agent_definition: agents/infra-dev.md
-    triggers:
-      - event: "issues.labeled"
-        label: infrastructure
-      - event: "pull_request.opened"
-        action: sleep
-      - event: "pull_request_review.submitted"
-        condition: {review_state: "changes_requested"}
-        action: wake
-      - event: "pull_request.closed"
-        condition: {merged: true}
-        action: complete
-
-  test-coverage:
-    agent_definition: agents/test-coverage.md
-
-  merge-conflict:
-    agent_definition: agents/merge-conflict.md
-    lifecycle: ephemeral
-    # No triggers - spawned programmatically by auto-merge failure handler
-
-# ─────────────────────────────────────────────
-# Circuit Breakers
-# ─────────────────────────────────────────────
-circuit_breakers:
-  defaults:
-    max_iterations: 5
-    max_tool_calls: 200
-    max_turns: 50
-    max_active_duration: 7200    # 2 hours
-    max_sleep_duration: 86400    # 24 hours
-    warning_threshold: 0.80
-
-  roles:
-    pm:
-      max_tool_calls: 50
-      max_turns: 10
-      max_active_duration: 600   # 10 minutes
-    pr-review:
-      max_tool_calls: 100
-      max_turns: 20
-      max_active_duration: 1800  # 30 minutes
-    security-review:
-      max_tool_calls: 100
-      max_turns: 20
-      max_active_duration: 1800  # 30 minutes
-    test-coverage:
-      max_tool_calls: 100
-      max_turns: 20
-      max_active_duration: 1800  # 30 minutes
-
-# ─────────────────────────────────────────────
-# Runtime / LLM Configuration
-# ─────────────────────────────────────────────
-runtime:
-  default_model: "claude-sonnet-4"
-  # NOTE: reasoning_effort is NOT supported by claude-sonnet-4 via the
-  # Copilot SDK.  Omit per-role overrides until model support is added.
-
-  models:
-    pm:
-      model: "claude-sonnet-4"
-    feat-dev:
-      model: "claude-sonnet-4"
-    bug-fix:
-      model: "claude-sonnet-4"
-    pr-review:
-      model: "claude-sonnet-4"
-    security-review:
-      model: "claude-sonnet-4"
-    test-coverage:
-      model: "claude-sonnet-4"
-
-  # Provider: "copilot" uses the SDK's built-in Copilot auth (default).
-  # For BYOK (bring-your-own-key), set type to "anthropic" or "openai"
-  # and supply api_key_env pointing to an env var with the key.
-  provider:
-    type: "copilot"
-
-  reconciliation_interval: 300   # 5 minutes
-
-# ─────────────────────────────────────────────
-# Escalation / Notifications
-# ─────────────────────────────────────────────
 escalation:
   default_notify: maintainers
   escalation_labels:
-    - needs-human
-    - escalation
+  - needs-human
+  - escalation
   max_issue_depth: 3
-
-# ─────────────────────────────────────────────
-# Review Policy (replaces approval_flows + workflows)
-# ─────────────────────────────────────────────
+human_groups:
+  maintainers:
+  - '@noahbaertsch'
+human_invocation:
+  include_context: true
+  labels_to_add:
+  - needs-human
+  mention_format: '@{username}'
+  method: both
+labels:
+  priorities:
+  - critical
+  - high
+  - medium
+  - low
+  states:
+  - needs-triage
+  - in-progress
+  - blocked
+  - needs-human
+  - needs-clarification
+  types:
+  - feature
+  - bug
+  - security
+  - documentation
+  - infrastructure
+project:
+  bot_username: squadron-dev[bot]
+  default_branch: squadron-dev
+  name: squadron
+  owner: nbaertsch
+  repo: squadron
 review_policy:
-  enabled: true
-
-  # Auto-merge configuration
   auto_merge:
+    delete_branch: true
     enabled: true
     method: squash
-    delete_branch: true
-    require_ci_pass: false  # Set to true when CI is configured
-
-    # What to do when merge fails
-    on_merge_conflict:
+    on_ci_failed:
       action: notify
       target: maintainers
-    on_ci_failed:
+    on_merge_conflict:
       action: notify
       target: maintainers
     on_unknown_error:
       action: escalate
       target: maintainers
-
-  # What happens when a PR is updated after reviews
-  on_synchronize:
-    invalidate_approvals: true  # Full re-review required
-    respawn_reviewers: true     # Wake reviewer agents
-
-  # Default requirements for ALL PRs
+    require_ci_pass: false
   default_requirements:
-    - role: pr-review
-      count: 1
-
-  # Conditional rules (additive with defaults)
+  - count: 1
+    role: pr-review
+  enabled: true
+  on_synchronize:
+    invalidate_approvals: true
+    respawn_reviewers: true
   rules:
-    - name: security-sensitive
-      match:
-        labels: [security]
-        paths:
-          - "src/**/auth/**"
-          - "src/**/crypto/**"
-          - "**/security/**"
-      requirements:
-        - role: security-review
-          count: 1
-
-    - name: infrastructure
-      match:
-        labels: [infrastructure]
-        paths:
-          - ".squadron/**"
-          - "pyproject.toml"
-          - "Dockerfile"
-          - ".github/**"
-      requirements:
-        - role: pr-review
-          count: 1
-
-    # Sequential review pipeline for PRs targeting squadron-dev
-    # Replaces the old .squadron/workflows/pr-review-pipeline.yaml
-    - name: squadron-dev-pipeline
-      match:
-        base_branch: squadron-dev
-      requirements:
-        - role: test-coverage
-          count: 1
-        - role: security-review
-          count: 1
-        - role: pr-review
-          count: 1
-      sequence:
-        - test-coverage
-        - security-review
-        - pr-review
-
-# ─────────────────────────────────────────────
-# Human Invocation (how to notify humans)
-# ─────────────────────────────────────────────
-human_invocation:
-  method: both  # github_comment, issue_label, or both
-  mention_format: "@{username}"
-  include_context: true
-  labels_to_add:
-    - needs-human
-
-# NOTE: approval_flows section removed — superseded by review_policy above
-
-# ─────────────────────────────────────────────
-# Workflows (Multi-Stage Agent Orchestration)
-# ─────────────────────────────────────────────
-# Workflows define deterministic, multi-stage agent pipelines with
-# quality gates, retries, and context propagation.
-#
-# Example: Feature development workflow with planning, implementation,
-# and quality gates.
+  - match:
+      labels:
+      - security
+      paths:
+      - src/**/auth/**
+      - src/**/crypto/**
+      - '**/security/**'
+    name: security-sensitive
+    requirements:
+    - count: 1
+      role: security-review
+  - match:
+      labels:
+      - infrastructure
+      paths:
+      - .squadron/**
+      - pyproject.toml
+      - Dockerfile
+      - .github/**
+    name: infrastructure
+    requirements:
+    - count: 1
+      role: pr-review
+  - match:
+      base_branch: squadron-dev
+    name: squadron-dev-pipeline
+    requirements:
+    - count: 1
+      role: test-coverage
+    - count: 1
+      role: security-review
+    - count: 1
+      role: pr-review
+    sequence:
+    - test-coverage
+    - security-review
+    - pr-review
+runtime:
+  default_model: claude-sonnet-4
+  models:
+    bug-fix:
+      model: claude-sonnet-4
+    feat-dev:
+      model: claude-sonnet-4
+    pm:
+      model: claude-sonnet-4
+    pr-review:
+      model: claude-sonnet-4
+    security-review:
+      model: claude-sonnet-4
+    test-coverage:
+      model: claude-sonnet-4
+  provider:
+    type: copilot
+  reconciliation_interval: 300
 workflows:
   feature-dev-pipeline:
-    description: "Multi-stage feature development with quality gates"
-    trigger:
-      event: "issues.labeled"
-      conditions:
-        label: feature-pipeline
-
-    # Initial context passed to all stages
     context:
       require_tests: true
       test_coverage_threshold: 80
-
-    stages:
-      - id: plan
-        type: agent
-        agent: pm
-        action: "Create implementation plan for this feature"
-        on_complete: implement
-
-      - id: implement
-        type: agent
-        agent: feat-dev
-        action: "Implement the feature according to the plan"
-        timeout: "2h"
-        on_complete: quality-gate
-
-      - id: quality-gate
-        type: gate
-        conditions:
-          - check: command
-            run: "python -m pytest tests/"
-            expect: "exit_code == 0"
-        on_pass: complete
-        on_fail:
-          goto: implement
-          max_iterations: 3
-          then: escalate
-
+    description: Multi-stage feature development with quality gates
     on_complete:
-      - type: comment
-        body: "Feature implementation complete and all quality gates passed."
-
+    - body: Feature implementation complete and all quality gates passed.
+      type: comment
     on_error:
-      - type: label
-        add: needs-human
-      - type: comment
-        body: "Feature workflow encountered an error. Human review required."
+    - add: needs-human
+      type: label
+    - body: Feature workflow encountered an error. Human review required.
+      type: comment
+    stages:
+    - action: Create implementation plan for this feature
+      agent: pm
+      id: plan
+      on_complete: implement
+      type: agent
+    - action: Implement the feature according to the plan
+      agent: feat-dev
+      id: implement
+      on_complete: quality-gate
+      timeout: 2h
+      type: agent
+    - conditions:
+      - check: command
+        expect: exit_code == 0
+        run: python -m pytest tests/
+      id: quality-gate
+      on_fail:
+        goto: implement
+        max_iterations: 3
+        then: escalate
+      on_pass: complete
+      type: gate
+    trigger:
+      conditions:
+        label: feature-pipeline
+      event: issues.labeled
