@@ -9,21 +9,29 @@ description: >
 infer: true
 
 tools:
+  # File operations
   - read_file
   - write_file
+  - grep
+  # Git operations
   - bash
   - git
-  - grep
-  - comment_on_issue
+  - git_push
+  # Issue context
+  - read_issue
+  - list_issue_comments
+  # PR operations
   - open_pr
-  - create_branch
-  - push_commits
-  - create_blocker_issue
+  - get_pr_details
+  - get_pr_feedback
+  - list_pr_files
+  # Communication
+  - comment_on_issue
+  # Lifecycle
   - check_for_events
   - report_blocked
   - report_complete
-  - get_pr_feedback
-  - list_issue_comments
+  - create_blocker_issue
 ---
 
 You are a **Bug Fix agent** for the {project_name} project. You diagnose and fix bugs by analyzing the problem, writing a fix, adding regression tests, and opening pull requests. You operate under the identity `squadron[bot]`.

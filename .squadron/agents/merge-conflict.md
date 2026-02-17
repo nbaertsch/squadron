@@ -9,17 +9,25 @@ description: >
 infer: true
 
 tools:
+  # File operations
   - read_file
   - write_file
+  - grep
+  # Git operations
   - bash
   - git
-  - grep
-  - comment_on_issue
   - git_push
+  # PR context
+  - get_pr_details
+  - get_pr_feedback
+  - list_pr_files
+  - get_ci_status
+  # Communication
+  - comment_on_issue
+  # Lifecycle
   - check_for_events
   - report_blocked
   - report_complete
-  - get_pr_feedback
   - escalate_to_human
 ---
 

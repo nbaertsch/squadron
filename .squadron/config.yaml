@@ -315,28 +315,4 @@ human_invocation:
   labels_to_add:
     - needs-human
 
-# ─────────────────────────────────────────────
-# Approval Flows (DEPRECATED - use review_policy)
-# ─────────────────────────────────────────────
-approval_flows:
-  enabled: false  # Disabled - using review_policy instead
-  default_reviewers:
-    - pr-review
-  rules:
-    - name: security-sensitive
-      match_labels: [security]
-      match_paths:
-        - "src/**/auth/**"
-        - "src/**/crypto/**"
-        - "**/security/**"
-      reviewers: [security-review]
-      required_approvals: 1
-    - name: infrastructure
-      match_labels: [infrastructure]
-      match_paths:
-        - ".squadron/**"
-        - "pyproject.toml"
-        - "Dockerfile"
-        - ".github/**"
-      reviewers: [pr-review]
-      required_approvals: 1
+# NOTE: approval_flows section removed — superseded by review_policy above
