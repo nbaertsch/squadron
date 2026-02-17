@@ -262,14 +262,18 @@ class AgentManager:
         payload: dict,
     ) -> bool:
         """Evaluate a trigger condition dict. Returns True if all conditions pass."""
-        # approval_flow: true — only spawn if this role is in the approval flow reviewers
+        # approval_flow: true — only spawn if this role is required by review_policy
         if condition.get("approval_flow"):
-            if not self.config.approval_flows.enabled:
+            if not self.config.review_policy.enabled:
                 return False
             pr_data = payload.get("pull_request", {})
             labels = [lbl.get("name", "") for lbl in pr_data.get("labels", [])]
-            reviewer_roles = self.config.approval_flows.get_reviewers_for_pr(labels)
-            if role_name not in reviewer_roles:
+            base_branch = pr_data.get("base", {}).get("ref", "")
+            # TODO: could also pass changed_files for path-based rules
+            required_roles = self.config.review_policy.get_required_roles(
+                labels, changed_files=None, base_branch=base_branch
+            )
+            if role_name not in required_roles:
                 return False
 
         # merged: true/false — check if PR was merged
