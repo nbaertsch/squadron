@@ -345,3 +345,60 @@ human_invocation:
     - needs-human
 
 # NOTE: approval_flows section removed — superseded by review_policy above
+
+# ─────────────────────────────────────────────
+# Workflows (Multi-Stage Agent Orchestration)
+# ─────────────────────────────────────────────
+# Workflows define deterministic, multi-stage agent pipelines with
+# quality gates, retries, and context propagation.
+#
+# Example: Feature development workflow with planning, implementation,
+# and quality gates.
+workflows:
+  feature-dev-pipeline:
+    description: "Multi-stage feature development with quality gates"
+    trigger:
+      event: "issues.labeled"
+      conditions:
+        label: feature-pipeline
+
+    # Initial context passed to all stages
+    context:
+      require_tests: true
+      test_coverage_threshold: 80
+
+    stages:
+      - id: plan
+        type: agent
+        agent: pm
+        action: "Create implementation plan for this feature"
+        on_complete: implement
+
+      - id: implement
+        type: agent
+        agent: feat-dev
+        action: "Implement the feature according to the plan"
+        timeout: "2h"
+        on_complete: quality-gate
+
+      - id: quality-gate
+        type: gate
+        conditions:
+          - check: command
+            run: "python -m pytest tests/"
+            expect: "exit_code == 0"
+        on_pass: complete
+        on_fail:
+          goto: implement
+          max_iterations: 3
+          then: escalate
+
+    on_complete:
+      - type: comment
+        body: "Feature implementation complete and all quality gates passed."
+
+    on_error:
+      - type: label
+        add: needs-human
+      - type: comment
+        body: "Feature workflow encountered an error. Human review required."

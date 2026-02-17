@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -381,87 +384,374 @@ class SquadronConfig(BaseModel):
     # DEPRECATED: kept for backward compatibility, use review_policy instead
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
     commands: dict[str, "CommandDefinition"] = Field(default_factory=dict)
-    workflows: list["WorkflowDefinition"] = Field(default_factory=list)
+
+    # Workflows - deterministic multi-agent orchestration (inline in config)
+    workflows: dict[str, "WorkflowConfig"] = Field(default_factory=dict)
 
 
 # ── Workflow Definitions ─────────────────────────────────────────────────────
 
 
-class WorkflowStage(BaseModel):
-    """A single stage in a workflow pipeline.
+class StageType(str, Enum):
+    """Types of workflow stages."""
 
-    Stages execute sequentially. Each stage spawns an agent, and the
-    pipeline advances when the agent completes its action (e.g. approves a PR).
-    """
-
-    name: str  # unique within workflow, e.g. "test-coverage"
-    agent: str  # agent role from .squadron/agents/
-    action: str = "review"  # review | review_and_merge | develop | custom
-    on_approve: str = "next"  # next | complete | stage-name
-    on_reject: str = "stop"  # stop | restart | stage-name
-    on_timeout: str = "escalate"  # escalate | stop | stage-name
+    AGENT = "agent"  # Execute an agent
+    GATE = "gate"  # Quality/approval checkpoint
+    PARALLEL = "parallel"  # Concurrent execution
+    DELAY = "delay"  # Timed wait
+    ACTION = "action"  # Built-in operation
+    WEBHOOK = "webhook"  # External webhook trigger
 
 
 class WorkflowTrigger(BaseModel):
     """Defines when a workflow activates."""
 
-    event: str  # e.g. "pull_request.opened", "issues.opened", "push"
+    event: str  # e.g. "issues.labeled", "pull_request.opened"
     conditions: dict[str, Any] = Field(default_factory=dict)
     # Supported condition keys:
+    #   label: str — match specific label on labeled event
+    #   labels: list[str] — require any of these labels on issue
     #   base_branch: str — match PR target branch
-    #   head_branch_pattern: str — glob match on PR source branch
-    #   labels: list[str] — require any of these labels
-    #   paths: list[str] — glob match on changed files
 
-    def matches_event(self, event_type: str) -> bool:
-        """Check if the trigger event type matches."""
-        return self.event == event_type
+    def matches(self, event_type: str, payload: dict) -> bool:
+        """Check if this trigger matches an event."""
+        if self.event != event_type:
+            return False
 
-    def matches_conditions(self, payload: dict) -> bool:
-        """Evaluate conditions against a webhook payload."""
-        import fnmatch
+        # Label condition (for issues.labeled events)
+        if "label" in self.conditions:
+            event_label = payload.get("label", {}).get("name", "")
+            if event_label != self.conditions["label"]:
+                return False
 
-        # base_branch condition
-        base = self.conditions.get("base_branch")
-        if base:
+        # Labels (any match on issue labels)
+        if "labels" in self.conditions:
+            required = set(self.conditions["labels"])
+            issue_labels = {
+                lbl.get("name", "") for lbl in payload.get("issue", {}).get("labels", [])
+            }
+            if not required & issue_labels:
+                return False
+
+        # Base branch
+        if "base_branch" in self.conditions:
             pr_base = payload.get("pull_request", {}).get("base", {}).get("ref", "")
-            if pr_base != base:
-                return False
-
-        # head_branch_pattern condition
-        head_pattern = self.conditions.get("head_branch_pattern")
-        if head_pattern:
-            pr_head = payload.get("pull_request", {}).get("head", {}).get("ref", "")
-            if not fnmatch.fnmatch(pr_head, head_pattern):
-                return False
-
-        # labels condition (any match)
-        required_labels = self.conditions.get("labels")
-        if required_labels:
-            event_labels = [
-                lbl.get("name", "")
-                for lbl in (
-                    payload.get("pull_request", {}).get("labels", [])
-                    or payload.get("issue", {}).get("labels", [])
-                )
-            ]
-            if not any(lbl in required_labels for lbl in event_labels):
+            if pr_base != self.conditions["base_branch"]:
                 return False
 
         return True
 
 
-class WorkflowDefinition(BaseModel):
-    """A complete workflow definition loaded from .squadron/workflows/*.yaml."""
+class StageTransition(BaseModel):
+    """Defines what happens after a stage completes."""
 
-    name: str
-    description: str = ""
-    trigger: WorkflowTrigger
-    stages: list[WorkflowStage] = Field(min_length=1)
+    goto: str | None = Field(default=None, description="Stage ID to jump to")
+    delay: str | None = Field(default=None, description="Delay before transition, e.g. '30s'")
+    context: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional context to pass to next stage",
+    )
+    max_iterations: int | None = Field(
+        default=None,
+        description="Max times this transition can be taken (prevents infinite loops)",
+    )
+    then: str | None = Field(
+        default=None,
+        description="Fallback if max_iterations exceeded",
+    )
 
-    def matches(self, event_type: str, payload: dict) -> bool:
-        """Check if this workflow should activate for a given event."""
-        return self.trigger.matches_event(event_type) and self.trigger.matches_conditions(payload)
+    @classmethod
+    def from_value(cls, value: str | dict | None) -> "StageTransition | None":
+        """Parse a transition from various formats."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if value == "complete":
+                return cls(goto="__complete__")
+            if value == "escalate":
+                return cls(goto="__escalate__")
+            return cls(goto=value)
+        return cls(**value)
+
+
+class GateCondition(BaseModel):
+    """A single condition in a gate stage."""
+
+    check: str = Field(..., description="Type of check: command, file_exists, pr_approval")
+
+    # Command check
+    run: str | None = Field(default=None, description="Command to execute")
+    expect: str | None = Field(default=None, description="Expected result, e.g. 'exit_code == 0'")
+
+    # File check
+    paths: list[str] | None = Field(default=None, description="File paths to check")
+
+    # PR approval check
+    count: int | None = Field(default=None, description="Number of approvals required")
+
+    def evaluate_command_result(self, exit_code: int, stdout: str, stderr: str) -> bool:
+        """Evaluate a command check result."""
+        if not self.expect:
+            return exit_code == 0
+
+        if "exit_code" in self.expect:
+            if "==" in self.expect:
+                expected = int(self.expect.split("==")[1].strip())
+                return exit_code == expected
+            if "!=" in self.expect:
+                expected = int(self.expect.split("!=")[1].strip())
+                return exit_code != expected
+
+        return exit_code == 0
+
+
+_STAGE_ID_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]*$")
+
+
+class StageDefinition(BaseModel):
+    """A single stage in a workflow."""
+
+    id: str = Field(..., description="Unique stage identifier")
+    name: str | None = Field(default=None, description="Human-readable name")
+    type: StageType = Field(default=StageType.AGENT, description="Stage type")
+
+    # Agent stage config
+    agent: str | None = Field(default=None, description="Agent role to execute")
+    action: str | None = Field(default=None, description="Action hint for agent")
+
+    # Gate stage config
+    conditions: list[GateCondition] = Field(
+        default_factory=list,
+        description="Conditions that must pass (for gate stages)",
+    )
+
+    # Delay stage config
+    duration: str | None = Field(default=None, description="Delay duration, e.g. '30s', '5m'")
+
+    # Transitions
+    on_complete: str | dict | None = Field(default=None, description="Transition on success")
+    on_pass: str | dict | None = Field(default=None, description="Transition when gate passes")
+    on_fail: str | dict | None = Field(default=None, description="Transition on failure")
+    on_error: str | dict | None = Field(default=None, description="Transition on error")
+
+    # Timeout
+    timeout: str | None = Field(default=None, description="Stage timeout, e.g. '30m'")
+
+    @model_validator(mode="after")
+    def validate_stage_config(self) -> "StageDefinition":
+        """Validate stage configuration based on type."""
+        # Validate stage ID format
+        if not _STAGE_ID_PATTERN.match(self.id):
+            raise ValueError(
+                f"Stage ID '{self.id}' is invalid. Must start with a letter "
+                "and contain only alphanumeric characters, dashes, and underscores."
+            )
+
+        if self.type == StageType.AGENT and not self.agent:
+            raise ValueError(f"Stage '{self.id}': agent stages require 'agent' field")
+        if self.type == StageType.GATE and not self.conditions:
+            raise ValueError(f"Stage '{self.id}': gate stages require 'conditions'")
+        if self.type == StageType.DELAY and not self.duration:
+            raise ValueError(f"Stage '{self.id}': delay stages require 'duration'")
+        return self
+
+    def get_next_stage(self, result: str) -> StageTransition | None:
+        """Get the transition for a given result."""
+        if result == "complete" and self.on_complete:
+            return StageTransition.from_value(self.on_complete)
+        if result == "pass" and self.on_pass:
+            return StageTransition.from_value(self.on_pass)
+        if result == "fail" and self.on_fail:
+            return StageTransition.from_value(self.on_fail)
+        if result == "error" and self.on_error:
+            return StageTransition.from_value(self.on_error)
+
+        # Default: complete/pass goes to next stage in sequence
+        if result in ("complete", "pass"):
+            return StageTransition(goto="__next__")
+        return None
+
+    def parse_timeout_seconds(self) -> int | None:
+        """Parse timeout string to seconds."""
+        if not self.timeout:
+            return None
+
+        value = self.timeout.strip().lower()
+        if value.endswith("s"):
+            return int(value[:-1])
+        if value.endswith("m"):
+            return int(value[:-1]) * 60
+        if value.endswith("h"):
+            return int(value[:-1]) * 3600
+        return int(value)
+
+
+class WorkflowConfig(BaseModel):
+    """Complete workflow configuration (inline in config.yaml)."""
+
+    description: str = Field(default="", description="Human-readable description")
+    trigger: WorkflowTrigger = Field(..., description="When this workflow activates")
+
+    # Context variables
+    context: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Initial context variables",
+    )
+
+    # Stages
+    stages: list[StageDefinition] = Field(
+        ...,
+        min_length=1,
+        description="Ordered list of stages to execute",
+    )
+
+    # Completion handlers
+    on_complete: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Actions to run on successful completion",
+    )
+    on_error: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Actions to run on failure",
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_stage_ids(self) -> "WorkflowConfig":
+        """Ensure all stage IDs are unique."""
+        ids = [stage.id for stage in self.stages]
+        duplicates = {id_ for id_ in ids if ids.count(id_) > 1}
+        if duplicates:
+            raise ValueError(f"Duplicate stage IDs: {', '.join(sorted(duplicates))}")
+        return self
+
+    def get_stage(self, stage_id: str) -> StageDefinition | None:
+        """Get a stage by ID."""
+        for stage in self.stages:
+            if stage.id == stage_id:
+                return stage
+        return None
+
+    def get_stage_index(self, stage_id: str) -> int | None:
+        """Get the index of a stage by ID."""
+        for i, stage in enumerate(self.stages):
+            if stage.id == stage_id:
+                return i
+        return None
+
+    def get_next_stage_id(self, current_id: str) -> str | None:
+        """Get the next stage in sequence after current_id."""
+        idx = self.get_stage_index(current_id)
+        if idx is None or idx >= len(self.stages) - 1:
+            return None
+        return self.stages[idx + 1].id
+
+
+# ── Workflow Runtime State ───────────────────────────────────────────────────
+
+
+class WorkflowRunStatus(str, Enum):
+    """Status of a workflow run."""
+
+    PENDING = "pending"  # Created but not started
+    RUNNING = "running"  # Actively executing stages
+    COMPLETED = "completed"  # All stages finished successfully
+    FAILED = "failed"  # Stage failed with no recovery
+    ESCALATED = "escalated"  # Handed off to human
+    CANCELLED = "cancelled"  # Manually cancelled
+
+
+class StageRunStatus(str, Enum):
+    """Status of a stage execution."""
+
+    PENDING = "pending"  # Not yet started
+    RUNNING = "running"  # Currently executing
+    COMPLETED = "completed"  # Finished successfully
+    FAILED = "failed"  # Failed (may retry)
+    SKIPPED = "skipped"  # Skipped due to condition
+    WAITING = "waiting"  # Waiting for external event
+
+
+class WorkflowRun(BaseModel):
+    """Runtime state of a workflow execution."""
+
+    run_id: str = Field(..., description="Unique run identifier")
+    workflow_name: str = Field(..., description="Name of the workflow definition")
+
+    # Trigger context
+    trigger_event: str | None = Field(default=None)
+    trigger_delivery_id: str | None = Field(default=None)
+    issue_number: int | None = Field(default=None)
+    pr_number: int | None = Field(default=None)
+
+    # Execution state
+    status: WorkflowRunStatus = Field(default=WorkflowRunStatus.PENDING)
+    current_stage_id: str | None = Field(default=None)
+    current_stage_index: int = Field(default=0)
+
+    # Iteration tracking (for loop detection)
+    iteration_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of times each stage has been visited",
+    )
+
+    # Context and outputs
+    context: dict[str, Any] = Field(default_factory=dict)
+    outputs: dict[str, Any] = Field(default_factory=dict)
+
+    # Timestamps
+    created_at: datetime | None = Field(default=None)
+    started_at: datetime | None = Field(default=None)
+    completed_at: datetime | None = Field(default=None)
+
+    # Error tracking
+    error_message: str | None = Field(default=None)
+    error_stage: str | None = Field(default=None)
+
+
+class StageRun(BaseModel):
+    """Runtime state of a stage execution."""
+
+    id: int | None = Field(default=None, description="Database ID")
+    run_id: str = Field(..., description="Parent workflow run ID")
+    stage_id: str = Field(..., description="Stage definition ID")
+    stage_index: int = Field(..., description="Stage index in workflow")
+
+    # Execution
+    status: StageRunStatus = Field(default=StageRunStatus.PENDING)
+    agent_id: str | None = Field(default=None)
+
+    # For parallel stages
+    branch_id: str | None = Field(default=None)
+    parent_stage_id: str | None = Field(default=None)
+
+    # Results
+    outputs: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = Field(default=None)
+
+    # Timing
+    started_at: datetime | None = Field(default=None)
+    completed_at: datetime | None = Field(default=None)
+
+    # Retry tracking
+    attempt_number: int = Field(default=1)
+    max_attempts: int = Field(default=1)
+
+    @property
+    def duration_seconds(self) -> float | None:
+        """Calculate duration in seconds."""
+        if self.started_at and self.completed_at:
+            return (self.completed_at - self.started_at).total_seconds()
+        return None
+
+
+class GateCheckResult(BaseModel):
+    """Result of evaluating a gate condition."""
+
+    check_type: str
+    passed: bool
+    result_data: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = Field(default=None)
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ── Agent Definition Loading ─────────────────────────────────────────────────
@@ -698,43 +988,6 @@ def load_agent_definitions(squadron_dir: Path) -> dict[str, AgentDefinition]:
         content = md_file.read_text()
         definitions[role] = parse_agent_definition(role, content)
         logger.info("Loaded agent definition: %s", role)
-
-    return definitions
-
-
-def load_workflow_definitions(squadron_dir: Path) -> list[WorkflowDefinition]:
-    """Load workflow definitions from .squadron/workflows/*.yaml.
-
-    Each YAML file defines one or more workflows with triggers,
-    conditions, and sequential stage pipelines.
-
-    Returns:
-        List of validated WorkflowDefinition objects.
-    """
-    workflows_dir = squadron_dir / "workflows"
-    definitions: list[WorkflowDefinition] = []
-
-    if not workflows_dir.exists():
-        logger.debug("No workflows directory found at %s", workflows_dir)
-        return definitions
-
-    for yaml_file in sorted(workflows_dir.glob("*.yaml")):
-        try:
-            with open(yaml_file) as f:
-                raw = yaml.safe_load(f) or {}
-
-            # A file can contain a single workflow or a list
-            if isinstance(raw, list):
-                for item in raw:
-                    wf = WorkflowDefinition(**item)
-                    definitions.append(wf)
-                    logger.info("Loaded workflow: %s (from %s)", wf.name, yaml_file.name)
-            else:
-                wf = WorkflowDefinition(**raw)
-                definitions.append(wf)
-                logger.info("Loaded workflow: %s (from %s)", wf.name, yaml_file.name)
-        except Exception:
-            logger.exception("Failed to load workflow from %s", yaml_file)
 
     return definitions
 

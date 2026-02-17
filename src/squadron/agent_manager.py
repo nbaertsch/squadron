@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from squadron.event_router import EventRouter
     from squadron.github_client import GitHubClient
     from squadron.registry import AgentRegistry
-    from squadron.workflow_engine import WorkflowEngine
+    from squadron.workflow import WorkflowEngine
 
 logger = logging.getLogger(__name__)
 

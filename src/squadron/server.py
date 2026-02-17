@@ -27,12 +27,13 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+import aiosqlite
+
 from squadron.agent_manager import AgentManager
 from squadron.config import (
     SquadronConfig,
     load_agent_definitions,
     load_config,
-    load_workflow_definitions,
 )
 from squadron.event_router import EventRouter
 from squadron.github_client import GitHubClient
@@ -42,7 +43,8 @@ from squadron.registry import AgentRegistry
 from squadron.resource_monitor import ResourceMonitor
 from squadron.webhook import configure as configure_webhook
 from squadron.webhook import router as webhook_router
-from squadron.workflow_engine import WorkflowEngine
+from squadron.workflow import WorkflowEngine
+from squadron.workflow.registry import WorkflowRegistryV2
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,8 @@ class SquadronServer:
         self.resource_monitor: ResourceMonitor | None = None
         self._config_version: str | None = None  # Commit SHA of current config
         self.workflow_engine: WorkflowEngine | None = None
+        self.workflow_db: aiosqlite.Connection | None = None
+        self.workflow_registry: WorkflowRegistryV2 | None = None
 
     async def start(self) -> None:
         """Initialize all components and start background loops."""
@@ -78,17 +82,16 @@ class SquadronServer:
         # 1. Load config
         self.config = load_config(self.squadron_dir)
         agent_definitions = load_agent_definitions(self.squadron_dir)
-        workflow_definitions = load_workflow_definitions(self.squadron_dir)
         logger.info(
             "Loaded %d agent definitions: %s",
             len(agent_definitions),
             list(agent_definitions.keys()),
         )
-        if workflow_definitions:
+        if self.config.workflows:
             logger.info(
                 "Loaded %d workflow definitions: %s",
-                len(workflow_definitions),
-                [w.name for w in workflow_definitions],
+                len(self.config.workflows),
+                list(self.config.workflows.keys()),
             )
 
         # 2. Initialize database (container-local disk, NOT a network mount)
@@ -161,11 +164,16 @@ class SquadronServer:
         )
 
         # 8b. Create workflow engine (if workflows are defined)
-        if workflow_definitions:
+        if self.config.workflows:
+            workflow_db_path = str(data_dir / "workflow.db")
+            self.workflow_db = await aiosqlite.connect(workflow_db_path)
+            self.workflow_db.row_factory = aiosqlite.Row
+            self.workflow_registry = WorkflowRegistryV2(self.workflow_db)
+            await self.workflow_registry.initialize()
+
             self.workflow_engine = WorkflowEngine(
-                config=self.config,
-                registry=self.registry,
-                workflows=workflow_definitions,
+                registry=self.workflow_registry,
+                workflows=self.config.workflows,
             )
             self.workflow_engine.set_spawn_callback(
                 self.agent_manager.spawn_workflow_agent,
@@ -207,6 +215,8 @@ class SquadronServer:
             await self.github.close()
         if self.registry:
             await self.registry.close()
+        if self.workflow_db:
+            await self.workflow_db.close()
 
         logger.info("Squadron server stopped")
 
@@ -419,7 +429,6 @@ class SquadronServer:
         try:
             new_config = load_config(self.squadron_dir)
             new_agent_defs = load_agent_definitions(self.squadron_dir)
-            new_workflow_defs = load_workflow_definitions(self.squadron_dir)
         except Exception:
             logger.exception(
                 "Config reload failed — keeping old config. Fix the config and push again."
@@ -450,15 +459,15 @@ class SquadronServer:
         self.reconciliation.config = new_config
 
         # Update workflow engine if present
-        if self._workflow_engine_exists() and new_workflow_defs:
-            self.workflow_engine.workflows = new_workflow_defs
+        if self._workflow_engine_exists() and new_config.workflows:
+            self.workflow_engine.workflows = new_config.workflows
 
         logger.info(
             "Config reloaded successfully (version: %s → %s, %d agent defs, %d workflows)",
             old_version or "initial",
             head_sha[:8],
             len(new_agent_defs),
-            len(new_workflow_defs),
+            len(new_config.workflows),
         )
 
     def _workflow_engine_exists(self) -> bool:
