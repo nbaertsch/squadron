@@ -108,7 +108,7 @@ agent_roles:
 #     max_sleep_duration: 86400      # 24 hours
 
 # runtime:
-#   default_model: claude-sonnet-4
+#   default_model: claude-sonnet-4.6
 #   max_concurrent_agents: 10
 #   provider:
 #     type: copilot                  # or "anthropic" for BYOK

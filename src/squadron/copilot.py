@@ -202,7 +202,7 @@ def build_session_config(
     model = model_override.model if model_override else runtime_config.default_model
 
     # Resolve reasoning_effort: role override > global default > omit entirely.
-    # Not all models support it (e.g. claude-sonnet-4 rejects it), so only
+    # Not all models support it (e.g. claude-sonnet-4.6 rejects it), so only
     # include when explicitly set.
     reasoning = (
         model_override.reasoning_effort if model_override else None
@@ -225,7 +225,7 @@ def build_session_config(
     if provider_dict:
         config["provider"] = provider_dict
     # Only include reasoning_effort when explicitly configured
-    # (not all models support it — e.g. claude-sonnet-4 rejects it)
+    # (not all models support it — e.g. claude-sonnet-4.6 rejects it)
     if reasoning:
         config["reasoning_effort"] = reasoning
     if tools:

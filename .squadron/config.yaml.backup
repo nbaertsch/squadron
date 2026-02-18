@@ -222,23 +222,23 @@ circuit_breakers:
 # Runtime / LLM Configuration
 # ─────────────────────────────────────────────
 runtime:
-  default_model: "claude-sonnet-4"
-  # NOTE: reasoning_effort is NOT supported by claude-sonnet-4 via the
+  default_model: "claude-sonnet-4.6"
+  # NOTE: reasoning_effort is NOT supported by claude-sonnet-4.6 via the
   # Copilot SDK.  Omit per-role overrides until model support is added.
 
   models:
     pm:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
     feat-dev:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
     bug-fix:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
     pr-review:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
     security-review:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
     test-coverage:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
 
   # Provider: "copilot" uses the SDK's built-in Copilot auth (default).
   # For BYOK (bring-your-own-key), set type to "anthropic" or "openai"

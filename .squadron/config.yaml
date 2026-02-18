@@ -286,20 +286,20 @@ review_policy:
     - security-review
     - pr-review
 runtime:
-  default_model: claude-sonnet-4
+  default_model: claude-sonnet-4.6
   models:
     bug-fix:
-      model: claude-sonnet-4
+      model: claude-sonnet-4.6
     feat-dev:
-      model: claude-sonnet-4
+      model: claude-sonnet-4.6
     pm:
-      model: claude-sonnet-4
+      model: claude-sonnet-4.6
     pr-review:
-      model: claude-sonnet-4
+      model: claude-sonnet-4.6
     security-review:
-      model: claude-sonnet-4
+      model: claude-sonnet-4.6
     test-coverage:
-      model: claude-sonnet-4
+      model: claude-sonnet-4.6
   provider:
     type: copilot
   reconciliation_interval: 300

@@ -67,7 +67,7 @@ labels:
   states: [e2e-in-progress]
 
 runtime:
-  default_model: "claude-sonnet-4"
+  default_model: "claude-sonnet-4.6"
   provider:
     type: anthropic
     base_url: "https://api.anthropic.com"

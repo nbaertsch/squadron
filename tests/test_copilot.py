@@ -13,8 +13,8 @@ from squadron.copilot import build_session_config, build_resume_config
 class TestBuildSessionConfig:
     def test_build_for_dev_agent(self):
         runtime = RuntimeConfig(
-            default_model="claude-sonnet-4",
-            models={"feat-dev": ModelOverride(model="claude-sonnet-4", reasoning_effort="high")},
+            default_model="claude-sonnet-4.6",
+            models={"feat-dev": ModelOverride(model="claude-sonnet-4.6", reasoning_effort="high")},
             provider=ProviderConfig(type="anthropic", api_key_env="ANTHROPIC_API_KEY"),
         )
         config = build_session_config(
@@ -25,7 +25,7 @@ class TestBuildSessionConfig:
             runtime_config=runtime,
         )
         assert config["session_id"] == "squadron-feat-dev-issue-42"
-        assert config["model"] == "claude-sonnet-4"
+        assert config["model"] == "claude-sonnet-4.6"
         assert config["reasoning_effort"] == "high"
         assert config["system_message"] == {
             "mode": "replace",
@@ -37,8 +37,8 @@ class TestBuildSessionConfig:
 
     def test_build_for_pm_with_override(self):
         runtime = RuntimeConfig(
-            default_model="claude-sonnet-4",
-            models={"pm": ModelOverride(model="claude-sonnet-4", reasoning_effort="low")},
+            default_model="claude-sonnet-4.6",
+            models={"pm": ModelOverride(model="claude-sonnet-4.6", reasoning_effort="low")},
         )
         config = build_session_config(
             role="pm",
@@ -49,7 +49,7 @@ class TestBuildSessionConfig:
             session_id_override="squadron-pm-batch-123",
         )
         assert config["session_id"] == "squadron-pm-batch-123"
-        assert config["model"] == "claude-sonnet-4"
+        assert config["model"] == "claude-sonnet-4.6"
         assert config["reasoning_effort"] == "low"
 
     def test_build_uses_default_model(self):

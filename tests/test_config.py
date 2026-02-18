@@ -39,7 +39,7 @@ def squadron_dir(tmp_path: Path) -> Path:
             "roles": {"pm": {"max_tool_calls": 50, "max_turns": 10}},
         },
         "runtime": {
-            "default_model": "claude-sonnet-4",
+            "default_model": "claude-sonnet-4.6",
             "provider": {"type": "anthropic", "api_key_env": "TEST_API_KEY"},
         },
         "escalation": {"default_notify": "maintainers", "max_issue_depth": 3},
@@ -99,7 +99,7 @@ class TestLoadConfig:
 
     def test_runtime_config(self, squadron_dir: Path):
         config = load_config(squadron_dir)
-        assert config.runtime.default_model == "claude-sonnet-4"
+        assert config.runtime.default_model == "claude-sonnet-4.6"
         assert config.runtime.provider.type == "anthropic"
 
     def test_bot_username_default(self, squadron_dir: Path):

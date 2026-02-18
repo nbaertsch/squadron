@@ -96,7 +96,7 @@ When resuming, you can change many settings. This is powerful for Squadron — e
 
 ```python
 session = await client.resume_session("squadron-dev-agent-issue-42", {
-    "model": "claude-sonnet-4",       # Switch model mid-workflow
+    "model": "claude-sonnet-4.6",       # Switch model mid-workflow
     "reasoning_effort": "high",        # Increase reasoning 
     "provider": {                      # Re-provide BYOK credentials (required)
         "type": "anthropic",
@@ -365,7 +365,7 @@ The `SessionContext` tracks `branch` and `repository`. We can:
 # Dev agent uses Claude for code generation
 dev_session = await client.create_session({
     "session_id": "squadron-dev-issue-42",
-    "model": "claude-sonnet-4",
+    "model": "claude-sonnet-4.6",
     "provider": {"type": "anthropic", "base_url": "...", "api_key": "..."},
 })
 
