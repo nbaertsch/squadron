@@ -82,7 +82,7 @@ class AgentTrigger(BaseModel):
 class AgentRoleConfig(BaseModel):
     agent_definition: str  # Relative path to agent .md file
     singleton: bool = False
-    lifecycle: Literal["ephemeral", "persistent"] = "persistent"
+    lifecycle: Literal["ephemeral", "persistent", "stateful"] = "persistent"
     triggers: list[AgentTrigger] = Field(default_factory=list)  # Event triggers for this agent
     subagents: list[str] = Field(default_factory=list)  # Other agent roles available as subagents
     branch_template: str | None = (
@@ -99,6 +99,7 @@ class AgentRoleConfig(BaseModel):
 
     @property
     def is_ephemeral(self) -> bool:
+        """Check if this is an ephemeral (stateless) agent."""
         return self.lifecycle == "ephemeral"
 
 
