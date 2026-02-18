@@ -1,0 +1,150 @@
+# PR Review Flow Enforcement
+#
+# Ensures that:
+# 1. PR review communication happens on the PR, not the issue
+# 2. The same agent that submitted the PR responds to review feedback
+# 3. Review-related events wake the correct agent
+
+name: PR Review Flow
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  enforce-pr-communication:
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'issue_comment' && 
+       github.event.issue.pull_request && 
+       contains(github.event.comment.body, 'squadron-dev[bot]')) ||
+      github.event_name == 'pull_request_review' ||
+      github.event_name == 'pull_request'
+    
+    steps:
+      - name: Redirect issue comment to PR
+        if: github.event_name == 'issue_comment' && github.event.issue.pull_request
+        run: |
+          # Get the PR number from the issue
+          PR_NUMBER="${{ github.event.issue.number }}"
+          COMMENT_BODY="${{ github.event.comment.body }}"
+          COMMENTER="${{ github.event.comment.user.login }}"
+          
+          # If this is a squadron agent comment on an issue that's actually a PR,
+          # add a notice that communication should happen on the PR
+          if [[ "$COMMENTER" == "squadron-dev[bot]" ]]; then
+            REDIRECT_COMMENT="🔄 **Communication Notice**
+
+This comment was posted on the issue, but since this is related to PR #$PR_NUMBER, please continue the conversation on the [pull request page](${{ github.event.issue.pull_request.html_url }}) for better visibility and context.
+
+Agent communication for PR reviews should happen directly on the PR to ensure all reviewers and stakeholders can see the full conversation."
+
+            echo "Adding redirect notice to issue #$PR_NUMBER"
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+              -f "body=$REDIRECT_COMMENT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Tag responsible agent for review response
+        if: github.event_name == 'pull_request_review' && github.event.review.state != 'approved'
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REVIEW_STATE="${{ github.event.review.state }}"
+          REVIEWER="${{ github.event.review.user.login }}"
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          
+          # If this is a "changes_requested" or "commented" review, notify on the PR
+          if [[ "$REVIEW_STATE" == "changes_requested" || "$REVIEW_STATE" == "commented" ]]; then
+            
+            # Extract branch name to identify the responsible agent
+            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+            
+            # Parse agent role from branch name (e.g., "feat/issue-123" -> "feat-dev")
+            AGENT_ROLE=""
+            if [[ "$BRANCH_NAME" == feat/* ]]; then
+              AGENT_ROLE="feat-dev"
+            elif [[ "$BRANCH_NAME" == fix/* || "$BRANCH_NAME" == bugfix/* ]]; then
+              AGENT_ROLE="bug-fix"  
+            elif [[ "$BRANCH_NAME" == docs/* ]]; then
+              AGENT_ROLE="docs-dev"
+            elif [[ "$BRANCH_NAME" == infra/* ]]; then
+              AGENT_ROLE="infra-dev"
+            elif [[ "$BRANCH_NAME" == security/* ]]; then
+              AGENT_ROLE="security-review"
+            fi
+            
+            if [[ -n "$AGENT_ROLE" ]]; then
+              NOTIFICATION_COMMENT="🔔 **Review Feedback Received**
+
+@squadron-dev The **$AGENT_ROLE** agent responsible for this PR needs to address the review feedback.
+
+**Reviewer:** @$REVIEWER  
+**Action Required:** $REVIEW_STATE  
+**Branch:** \`$BRANCH_NAME\`
+
+The responsible agent should:
+1. Review the feedback comments above
+2. Address any requested changes  
+3. Respond to questions or clarify implementation decisions
+4. Push updated code if needed
+
+All responses should be made directly on this PR to maintain conversation context."
+
+              echo "Notifying $AGENT_ROLE agent about review feedback on PR #$PR_NUMBER"
+              gh api \
+                --method POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "/repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+                -f "body=$NOTIFICATION_COMMENT"
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Acknowledge PR opened
+        if: github.event_name == 'pull_request' && github.event.action == 'opened'
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          
+          # Add a welcome comment establishing PR-based communication
+          WELCOME_COMMENT="🚀 **Pull Request Review Process**
+
+This PR will be reviewed according to Squadron's PR-based communication flow:
+
+✅ **All review discussions happen here on this PR**  
+✅ **The agent that created this PR will respond to review feedback**  
+✅ **Automatic cleanup will happen when merged (branch deletion, issue closure)**
+
+**PR Details:**
+- **Title:** $PR_TITLE
+- **Branch:** \`$BRANCH_NAME\`
+- **Review required:** Yes
+
+Reviewers will be automatically assigned based on the review policy. Please keep all communication and feedback on this PR for better visibility."
+
+          echo "Adding PR process notice to PR #$PR_NUMBER"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+            -f "body=$WELCOME_COMMENT"
+        env:
+          GH_TOKEN: ${{ github.token }}

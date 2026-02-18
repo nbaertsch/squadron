@@ -1,0 +1,153 @@
+# PR Cleanup Automation
+#
+# Automatically handles cleanup tasks when PRs are closed/merged:
+# - Delete merged branch (unless it's a protected branch)
+# - Comment on linked issue with merge status
+# - Close linked issue if PR was merged successfully
+
+name: PR Cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    
+    steps:
+      - name: Extract issue number from PR body
+        id: extract_issue
+        run: |
+          PR_BODY="${{ github.event.pull_request.body }}"
+          
+          # Try to find "Fixes #123", "Closes #123", "Resolves #123", etc.
+          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiE '(fixes|closes?|resolves?) #([0-9]+)' | head -n1 | grep -oE '[0-9]+' || echo "")
+          
+          if [ -n "$ISSUE_NUMBER" ]; then
+            echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "Found linked issue: #$ISSUE_NUMBER"
+          else
+            echo "No linked issue found in PR body"
+            echo "issue_number=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Delete merged branch
+        run: |
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          
+          # Don't delete protected branches
+          if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "master" || "$BRANCH_NAME" == "development" || "$BRANCH_NAME" == "squadron-dev" ]]; then
+            echo "Skipping deletion of protected branch: $BRANCH_NAME"
+            exit 0
+          fi
+          
+          # Don't delete if it's the same as base branch
+          if [[ "$BRANCH_NAME" == "$BASE_BRANCH" ]]; then
+            echo "Skipping deletion - head and base are the same: $BRANCH_NAME"
+            exit 0
+          fi
+          
+          echo "Deleting merged branch: $BRANCH_NAME"
+          
+          # Delete the remote branch
+          gh api \
+            --method DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/git/refs/heads/$BRANCH_NAME" \
+            || echo "Branch may have already been deleted or deletion failed"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Update linked issue
+        if: steps.extract_issue.outputs.issue_number != ''
+        run: |
+          ISSUE_NUMBER="${{ steps.extract_issue.outputs.issue_number }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          
+          # Comment on the issue with merge status
+          COMMENT_BODY="🎉 **PR #$PR_NUMBER merged successfully!**
+
+**PR Title:** $PR_TITLE
+**Branch:** \`$BRANCH_NAME\` (deleted)
+**Merged at:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+This issue has been resolved and the associated branch has been cleaned up automatically."
+
+          echo "Commenting on issue #$ISSUE_NUMBER"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments" \
+            -f "body=$COMMENT_BODY"
+          
+          # Close the issue since the PR was merged
+          echo "Closing resolved issue #$ISSUE_NUMBER"
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER" \
+            -f "state=closed" \
+            -f "state_reason=completed"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  cleanup-failed:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == false
+    
+    steps:
+      - name: Extract issue number from PR body  
+        id: extract_issue
+        run: |
+          PR_BODY="${{ github.event.pull_request.body }}"
+          
+          # Try to find "Fixes #123", "Closes #123", "Resolves #123", etc.
+          ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiE '(fixes|closes?|resolves?) #([0-9]+)' | head -n1 | grep -oE '[0-9]+' || echo "")
+          
+          if [ -n "$ISSUE_NUMBER" ]; then
+            echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "Found linked issue: #$ISSUE_NUMBER"
+          else
+            echo "No linked issue found in PR body"
+            echo "issue_number=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify issue of PR closure
+        if: steps.extract_issue.outputs.issue_number != ''
+        run: |
+          ISSUE_NUMBER="${{ steps.extract_issue.outputs.issue_number }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          
+          # Comment on the issue about PR closure without merge
+          COMMENT_BODY="❌ **PR #$PR_NUMBER was closed without merging**
+
+**PR Title:** $PR_TITLE
+**Branch:** \`$BRANCH_NAME\`
+**Closed at:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+The pull request was closed without being merged. The issue remains open for further work."
+
+          echo "Commenting on issue #$ISSUE_NUMBER about PR closure"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/issues/$ISSUE_NUMBER/comments" \
+            -f "body=$COMMENT_BODY"
+        env:
+          GH_TOKEN: ${{ github.token }}

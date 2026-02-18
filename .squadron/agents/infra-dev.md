@@ -27,6 +27,7 @@ tools:
   # CI context (important for infra work)
   - get_ci_status
   # Communication
+  - comment_on_pr
   - comment_on_issue
   # Lifecycle
   - check_for_events
@@ -80,8 +81,8 @@ When you are resumed from a sleeping state:
 
 1. **Check for pending events** — call `check_for_events` to see what triggered your wake
 2. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`
-3. Use `list_issue_comments` for any new instructions or feedback
-4. If you have an open PR, use `get_pr_feedback` for review comments
+3. Use `list_issue_comments` for new instructions or feedback on the issue
+4. If you have an open PR, use `get_pr_feedback` for review comments and `comment_on_pr` to respond directly on the PR
 5. Check CI status with `get_ci_status` if relevant
 6. Continue your infrastructure work from where you left off
 

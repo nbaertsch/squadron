@@ -59,6 +59,7 @@ Tools for querying GitHub resources.
 Tools for posting updates and communicating.
 
 - **`comment_on_issue`** - Post a comment on a GitHub issue
+- **`comment_on_pr`** - Post a comment on a GitHub pull request
 
 ## Tool Selection
 
@@ -74,6 +75,7 @@ tools:
   - assign_issue
   - create_issue
   - comment_on_issue
+  - comment_on_pr
   - check_registry
   - list_agent_roles
 ---
@@ -89,6 +91,7 @@ tools:
   - assign_issue
   - create_issue
   - comment_on_issue
+  - comment_on_pr
   - check_registry
   - escalate_to_human
   - get_recent_history
@@ -102,6 +105,7 @@ tools:
 tools:
   - read_issue
   - comment_on_issue
+  - comment_on_pr
   - open_pr
   - git_push
   - check_for_events
@@ -119,6 +123,7 @@ tools:
   - list_pr_files
   - submit_pr_review
   - comment_on_issue
+  - comment_on_pr
   - check_for_events
   - report_complete
 ```
@@ -128,7 +133,7 @@ tools:
 1. **Minimal Tool Sets**: Only include tools the agent actually needs to reduce complexity
 2. **Role-Appropriate Access**: Dev agents shouldn't have issue management tools, PM agents shouldn't have git tools
 3. **Common Patterns**: Most agents need `check_for_events` and `report_complete` for lifecycle management
-4. **Communication**: All agents typically need `comment_on_issue` for status updates
+4. **Communication**: All agents typically need `comment_on_issue` for status updates. Use `comment_on_pr` when responding to PR review feedback.
 
 ## Tool Implementation
 

@@ -1,0 +1,83 @@
+name: PR Review Routing
+
+# Routes PR review events to the appropriate Squadron agent
+# Ensures the agent that submitted the PR responds to review feedback
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [review_requested]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  route_review:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Route review to PR author agent
+        if: github.event.review.state == 'changes_requested' || github.event.review.state == 'commented'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const reviewState = context.payload.review?.state || 'review_requested';
+            const reviewerLogin = context.payload.review?.user?.login || context.payload.requested_reviewer?.login;
+            const prAuthor = context.payload.pull_request.user.login;
+            
+            // Only route if it's not a self-review and requires action
+            if (reviewerLogin === prAuthor) {
+              console.log('Skipping self-review');
+              return;
+            }
+            
+            let message = `🔄 **PR Review Notification**\n\n`;
+            message += `Your PR #${prNumber} has received review feedback.\n\n`;
+            
+            if (reviewState === 'changes_requested') {
+              message += `**Status**: Changes Requested by @${reviewerLogin}\n`;
+              message += `**Action needed**: Please address the review comments and update your PR.\n\n`;
+            } else if (reviewState === 'commented') {
+              message += `**Status**: Review Comments from @${reviewerLogin}\n`;
+              message += `**Action needed**: Please review the feedback and respond as appropriate.\n\n`;
+            } else {
+              message += `**Status**: Review Requested\n`;
+              message += `**Action needed**: Please monitor for incoming review feedback.\n\n`;
+            }
+            
+            if (context.payload.review?.body) {
+              message += `**Review Summary**:\n${context.payload.review.body}\n\n`;
+            }
+            
+            message += `Use \`get_pr_feedback\` to see detailed review comments and \`comment_on_pr\` to respond directly on this PR.`;
+            
+            // Comment on the PR itself (not the linked issue)
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: message
+            });
+            
+            console.log(`Routed review notification for PR #${prNumber}`);
+
+      - name: Notify on approval
+        if: github.event.review.state == 'approved'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const reviewerLogin = context.payload.review.user.login;
+            
+            const message = `✅ **PR Approved!**\n\nYour PR #${prNumber} has been approved by @${reviewerLogin}.\n\nIf all checks pass, this PR is ready for merge.`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: message
+            });
