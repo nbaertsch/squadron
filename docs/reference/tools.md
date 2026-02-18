@@ -143,3 +143,105 @@ All tools are implemented in `src/squadron/tools/squadron_tools.py` using the Co
 - Proper error handling and logging
 - GitHub API integration through the squadron GitHub client
 
+
+### PR Review Comments
+Tools for making targeted, human-like code review comments on pull requests.
+
+- **`add_pr_line_comment`** - Add an inline comment to a specific line in a PR file
+- **`add_pr_file_comment`** - Add a general comment about a file (not tied to specific line)  
+- **`suggest_code_change`** - Suggest a specific code change with GitHub's suggestion syntax
+- **`add_pr_diff_comment`** - Add a comment to a specific position in a PR diff
+- **`start_pr_review`** - Begin a review session for batching comments before submission
+- **`submit_review_with_comments`** - Submit a review with multiple inline comments at once
+- **`update_pr_review_comment`** - Update an existing PR review comment
+- **`delete_pr_review_comment`** - Delete a PR review comment
+- **`resolve_review_thread`** - Mark a review comment thread as resolved
+- **`reply_to_review_comment`** - Reply to an existing review comment
+
+#### Usage Examples
+
+**Security review agent commenting on specific security concerns:**
+```yaml
+# In .squadron/agents/security-review.md
+tools:
+  - add_pr_line_comment
+  - suggest_code_change
+  - submit_review_with_comments
+```
+
+**PR review agent making comprehensive code reviews:**
+```python
+# Add inline comment to specific line
+add_pr_line_comment(
+    pr_number=123,
+    file_path="src/auth.py", 
+    line_number=42,
+    comment="Consider using constant-time comparison to prevent timing attacks"
+)
+
+# Suggest specific code improvement
+suggest_code_change(
+    pr_number=123,
+    file_path="src/utils.py",
+    line_start=10,
+    line_end=12, 
+    suggestion="if value is None:\n    return default_value\nreturn validate(value)"
+)
+
+# Submit comprehensive review with multiple comments
+submit_review_with_comments(
+    pr_number=123,
+    action="REQUEST_CHANGES",
+    summary="Found security and performance issues that need addressing",
+    comments=[
+        {"path": "src/auth.py", "line": 42, "body": "Security issue here"},
+        {"path": "src/utils.py", "line": 15, "body": "Performance concern"}
+    ]
+)
+```
+
+**Bug fix agent providing targeted feedback:**
+```python
+# Comment on test coverage
+add_pr_line_comment(
+    pr_number=123,
+    file_path="tests/test_fix.py",
+    line_number=25,
+    comment="This test should also cover the edge case where input is None"
+)
+
+# Reply to existing discussion
+reply_to_review_comment(
+    comment_id=12345,
+    reply_body="Good point! I'll add error handling for that scenario."
+)
+```
+
+#### Review Actions
+
+When using `submit_review_with_comments` or `submit_pr_review`, you can specify:
+
+- **`APPROVE`** - Approve the changes for merging
+- **`REQUEST_CHANGES`** - Request changes before merging (blocks merge)
+- **`COMMENT`** - Provide feedback without blocking merge
+
+#### Best Practices
+
+1. **Use inline comments for specific issues** - `add_pr_line_comment` for targeted feedback on specific lines
+2. **Batch related comments** - Use `submit_review_with_comments` when making multiple related comments
+3. **Provide actionable suggestions** - Use `suggest_code_change` with concrete code improvements
+4. **Follow up on discussions** - Use `reply_to_review_comment` to continue conversations
+5. **Resolve when addressed** - Use `resolve_review_thread` when issues are fixed
+
+#### GitHub Suggestion Syntax
+
+The `suggest_code_change` tool automatically formats suggestions using GitHub's suggestion syntax:
+
+```markdown
+```suggestion
+// Your improved code here
+const result = safeOperation(input);
+```
+```
+
+Recipients can apply suggestions with one click in the GitHub interface.

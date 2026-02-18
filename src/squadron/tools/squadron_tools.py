@@ -81,6 +81,18 @@ ALL_TOOL_NAMES = [
     "list_pull_requests",
     "list_issue_comments",
     # Communication
+    # PR Review Comments
+    "add_pr_line_comment",
+    "add_pr_file_comment",
+    "suggest_code_change",
+    "add_pr_diff_comment",
+    "start_pr_review",
+    "add_review_comment",
+    "submit_review_with_comments",
+    "update_pr_review_comment",
+    "delete_pr_review_comment",
+    "resolve_review_thread",
+    "reply_to_review_comment",
     "comment_on_issue",
     "comment_on_pr",
 ]
@@ -277,6 +289,83 @@ class DeleteBranchParams(BaseModel):
 
 
 class GetRepoInfoParams(BaseModel):
+    """Get repository information."""
+
+    pass
+
+# ── PR Review Comment Parameter Models ───────────────────────────────
+
+class AddPRLineCommentParams(BaseModel):
+    """Add an inline comment to a specific line in a PR file."""
+    pr_number: int = Field(description="The pull request number")
+    file_path: str = Field(description="Path to the file in the repository")
+    line_number: int = Field(description="Line number to comment on (1-indexed)")
+    comment: str = Field(description="Comment text (markdown supported)")
+    commit_sha: str | None = Field(default=None, description="Optional specific commit SHA (uses PR head if not provided)")
+
+class AddPRFileCommentParams(BaseModel):
+    """Add a general comment about a file (not tied to specific line)."""
+    pr_number: int = Field(description="The pull request number")
+    file_path: str = Field(description="Path to the file")
+    comment: str = Field(description="Comment text about the file (markdown supported)")
+
+class SuggestCodeChangeParams(BaseModel):
+    """Suggest a code change for a range of lines."""
+    pr_number: int = Field(description="The pull request number")
+    file_path: str = Field(description="Path to the file")
+    line_start: int = Field(description="Starting line number (1-indexed)")
+    line_end: int = Field(description="Ending line number (1-indexed, inclusive)")
+    suggestion: str = Field(description="Suggested replacement code")
+    commit_sha: str | None = Field(default=None, description="Optional specific commit SHA")
+
+class AddPRDiffCommentParams(BaseModel):
+    """Add a comment to a specific position in a PR diff."""
+    pr_number: int = Field(description="The pull request number")
+    commit_sha: str = Field(description="Commit SHA to comment on")
+    file_path: str = Field(description="Path to the file")
+    position: int = Field(description="Position in the diff (not line number, but diff position)")
+    comment: str = Field(description="Comment text (markdown supported)")
+
+class StartPRReviewParams(BaseModel):
+    """Begin a review session for batching comments."""
+    pr_number: int = Field(description="The pull request number to start reviewing")
+
+class AddReviewCommentParams(BaseModel):
+    """Add a comment to a pending review session."""
+    pr_number: int = Field(description="The pull request number")
+    review_id: int = Field(description="ID of the pending review")
+    file_path: str = Field(description="Path to the file")
+    line: int = Field(description="Line number to comment on")
+    comment: str = Field(description="Comment text")
+    commit_sha: str | None = Field(default=None, description="Optional specific commit SHA")
+
+class SubmitReviewWithCommentsParams(BaseModel):
+    """Submit a review with multiple inline comments."""
+    pr_number: int = Field(description="The pull request number")
+    action: str = Field(description="Review action: APPROVE, REQUEST_CHANGES, or COMMENT")
+    summary: str = Field(description="Overall review summary comment")
+    comments: list[dict] = Field(
+        description="List of comment dicts with path, line, body keys",
+        default_factory=list
+    )
+
+class UpdatePRReviewCommentParams(BaseModel):
+    """Update an existing PR review comment."""
+    comment_id: int = Field(description="ID of the comment to update")
+    new_body: str = Field(description="New comment text")
+
+class DeletePRReviewCommentParams(BaseModel):
+    """Delete a PR review comment."""
+    comment_id: int = Field(description="ID of the comment to delete")
+
+class ResolveReviewThreadParams(BaseModel):
+    """Mark a review comment thread as resolved."""
+    comment_id: int = Field(description="ID of the comment thread to resolve")
+
+class ReplyToReviewCommentParams(BaseModel):
+    """Reply to an existing review comment."""
+    comment_id: int = Field(description="ID of the original comment")
+    reply_body: str = Field(description="Reply text")
     """Get repository information."""
 
     pass
@@ -1259,6 +1348,251 @@ class SquadronTools:
 
         return f"Posted comment on PR #{params.pr_number}"
 
+    # ── PR Review Comment Tools ─────────────────────────────────────────
+
+    async def add_pr_line_comment(self, agent_id: str, params: AddPRLineCommentParams) -> str:
+        """Add an inline comment to a specific line in a PR file."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        comment = await self.github.add_pr_line_comment(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            params.file_path,
+            params.line_number,
+            f"{prefix}{params.comment}",
+            params.commit_sha,
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_line_comment",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=params.pr_number,
+            content=f"Added line comment on {params.file_path}:{params.line_number}",
+            tool_name="add_pr_line_comment",
+        )
+
+        return f"Added inline comment on PR #{params.pr_number} at {params.file_path}:{params.line_number}"
+
+    async def add_pr_file_comment(self, agent_id: str, params: AddPRFileCommentParams) -> str:
+        """Add a general comment about a file (not tied to specific line)."""
+        # For file-level comments, we add a general comment on line 1
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+        
+        comment_text = f"{prefix}**File: {params.file_path}**\n\n{params.comment}"
+        
+        await self.github.comment_on_pr(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            comment_text,
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_file_comment",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=params.pr_number,
+            content=f"Added file comment on {params.file_path}",
+            tool_name="add_pr_file_comment",
+        )
+
+        return f"Added file comment on PR #{params.pr_number} for {params.file_path}"
+
+    async def suggest_code_change(self, agent_id: str, params: SuggestCodeChangeParams) -> str:
+        """Suggest a code change for a range of lines."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+        
+        comment = await self.github.suggest_code_change(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            params.file_path,
+            params.line_start,
+            params.line_end,
+            f"{prefix}Code suggestion:\n\n{params.suggestion}",
+            params.commit_sha,
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_code_suggestion",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=params.pr_number,
+            content=f"Suggested code change on {params.file_path}:{params.line_start}-{params.line_end}",
+            tool_name="suggest_code_change",
+        )
+
+        return f"Suggested code change on PR #{params.pr_number} at {params.file_path}:{params.line_start}-{params.line_end}"
+
+    async def add_pr_diff_comment(self, agent_id: str, params: AddPRDiffCommentParams) -> str:
+        """Add a comment to a specific position in a PR diff."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        comment = await self.github.add_pr_diff_comment(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            params.commit_sha,
+            params.file_path,
+            params.position,
+            f"{prefix}{params.comment}",
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_diff_comment",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=params.pr_number,
+            content=f"Added diff comment on {params.file_path} at position {params.position}",
+            tool_name="add_pr_diff_comment",
+        )
+
+        return f"Added diff comment on PR #{params.pr_number} at {params.file_path}:position-{params.position}"
+
+    async def start_pr_review(self, agent_id: str, params: StartPRReviewParams) -> str:
+        """Begin a review session for batching comments."""
+        review = await self.github.start_pr_review(
+            self.owner,
+            self.repo,
+            params.pr_number,
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_review_started",
+            issue_number=None,
+            pr_number=params.pr_number,
+            content=f"Started review session for PR #{params.pr_number}",
+            tool_name="start_pr_review",
+        )
+
+        return f"Started review session for PR #{params.pr_number}. Review ID: {review['id']}"
+
+    async def submit_review_with_comments(self, agent_id: str, params: SubmitReviewWithCommentsParams) -> str:
+        """Submit a review with multiple inline comments."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        review = await self.github.submit_review_with_comments(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            params.action,
+            f"{prefix}{params.summary}",
+            params.comments,
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_review_submitted",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=params.pr_number,
+            content=f"Submitted {params.action} review for PR #{params.pr_number} with {len(params.comments)} comments",
+            tool_name="submit_review_with_comments",
+        )
+
+        return f"Submitted {params.action} review for PR #{params.pr_number} with {len(params.comments)} inline comments"
+
+    async def update_pr_review_comment(self, agent_id: str, params: UpdatePRReviewCommentParams) -> str:
+        """Update an existing PR review comment."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        comment = await self.github.update_pr_review_comment(
+            self.owner,
+            self.repo,
+            params.comment_id,
+            f"{prefix}{params.new_body}",
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_comment_updated",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=None,  # Comment ID doesn't directly give us PR number
+            content=f"Updated review comment {params.comment_id}",
+            tool_name="update_pr_review_comment",
+        )
+
+        return f"Updated review comment {params.comment_id}"
+
+    async def delete_pr_review_comment(self, agent_id: str, params: DeletePRReviewCommentParams) -> str:
+        """Delete a PR review comment."""
+        deleted = await self.github.delete_pr_review_comment(
+            self.owner,
+            self.repo,
+            params.comment_id,
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="pr_comment_deleted",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=None,
+            content=f"Deleted review comment {params.comment_id}",
+            tool_name="delete_pr_review_comment",
+        )
+
+        return f"Deleted review comment {params.comment_id}" if deleted else f"Review comment {params.comment_id} was already deleted"
+
+    async def resolve_review_thread(self, agent_id: str, params: ResolveReviewThreadParams) -> str:
+        """Mark a review comment thread as resolved."""
+        comment = await self.github.resolve_review_thread(
+            self.owner,
+            self.repo,
+            params.comment_id,
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="review_thread_resolved",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=None,
+            content=f"Resolved review thread {params.comment_id}",
+            tool_name="resolve_review_thread",
+        )
+
+        return f"Resolved review thread {params.comment_id}"
+
+    async def reply_to_review_comment(self, agent_id: str, params: ReplyToReviewCommentParams) -> str:
+        """Reply to an existing review comment."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        reply = await self.github.reply_to_review_comment(
+            self.owner,
+            self.repo,
+            params.comment_id,
+            f"{prefix}{params.reply_body}",
+        )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="review_comment_reply",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=None,
+            content=f"Replied to review comment {params.comment_id}",
+            tool_name="reply_to_review_comment",
+        )
+
+        return f"Replied to review comment {params.comment_id}"
+
     # ── Tool Selection ───────────────────────────────────────────────────
 
     def get_tools(
@@ -1349,6 +1683,66 @@ class SquadronTools:
             "Post a comment on a GitHub pull request. Use to communicate progress, ask clarifying questions, or post status updates on PRs.",
             CommentOnPRParams,
             tools.comment_on_pr,
+        )
+        _register(
+            "add_pr_line_comment",
+            "Add an inline comment to a specific line in a PR file. Use to flag specific code issues, ask questions about implementation details, or suggest improvements.",
+            AddPRLineCommentParams,
+            tools.add_pr_line_comment,
+        )
+        _register(
+            "add_pr_file_comment",
+            "Add a general comment about a file (not tied to a specific line). Use to discuss overall file structure, approach, or general feedback.",
+            AddPRFileCommentParams,
+            tools.add_pr_file_comment,
+        )
+        _register(
+            "suggest_code_change",
+            "Suggest a specific code change for a range of lines. Creates an inline suggestion that the author can accept with one click.",
+            SuggestCodeChangeParams,
+            tools.suggest_code_change,
+        )
+        _register(
+            "add_pr_diff_comment",
+            "Add a comment to a specific position in a PR diff. Use when you need to comment on the exact diff position rather than a line number.",
+            AddPRDiffCommentParams,
+            tools.add_pr_diff_comment,
+        )
+        _register(
+            "start_pr_review",
+            "Begin a review session for batching multiple comments before submission. Use when you want to add many comments and submit them all at once.",
+            StartPRReviewParams,
+            tools.start_pr_review,
+        )
+        _register(
+            "submit_review_with_comments",
+            "Submit a review with multiple inline comments all at once. More efficient than individual comments when doing comprehensive code review.",
+            SubmitReviewWithCommentsParams,
+            tools.submit_review_with_comments,
+        )
+        _register(
+            "update_pr_review_comment",
+            "Update an existing PR review comment. Use to correct mistakes, add more details, or respond to feedback on your comment.",
+            UpdatePRReviewCommentParams,
+            tools.update_pr_review_comment,
+        )
+        _register(
+            "delete_pr_review_comment",
+            "Delete a PR review comment. Use when your comment is no longer relevant or was posted in error.",
+            DeletePRReviewCommentParams,
+            tools.delete_pr_review_comment,
+        )
+        _register(
+            "resolve_review_thread",
+            "Mark a review comment thread as resolved. Use when the discussion point has been addressed or agreed upon.",
+            ResolveReviewThreadParams,
+            tools.resolve_review_thread,
+        )
+        _register(
+            "reply_to_review_comment",
+            "Reply to an existing review comment to continue the discussion. Use for back-and-forth conversations on specific code points.",
+            ReplyToReviewCommentParams,
+            tools.reply_to_review_comment,
         )
         _register(
             "submit_pr_review",

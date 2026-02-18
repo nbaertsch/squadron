@@ -450,3 +450,181 @@ class TestConstants:
     def test_git_push_in_all_tools(self):
         """git_push should be available for explicit selection."""
         assert "git_push" in ALL_TOOL_NAMES
+
+
+# ── PR Review Comment Tool Tests ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_add_pr_line_comment_tool(squadron_tools, mock_registry, mock_activity_logger):
+    """Test add_pr_line_comment squadron tool."""
+    # Mock agent record
+    mock_registry.get_agent.return_value = AgentRecord(
+        agent_id="test-agent",
+        role="security-review",
+        issue_number=68,
+        pr_number=None,
+    )
+
+    # Mock GitHub client response
+    squadron_tools.github.add_pr_line_comment = AsyncMock(return_value={
+        "id": 12345,
+        "body": "🔒 **Security Review:** Found potential security issue",
+        "path": "src/auth.py",
+        "line": 42,
+    })
+
+    from squadron.tools.squadron_tools import AddPRLineCommentParams
+
+    params = AddPRLineCommentParams(
+        pr_number=123,
+        file_path="src/auth.py",
+        line_number=42,
+        comment="Found potential security issue",
+    )
+
+    result = await squadron_tools.add_pr_line_comment("test-agent", params)
+
+    assert result == "Added inline comment on PR #123 at src/auth.py:42"
+    
+    # Verify GitHub client was called correctly
+    squadron_tools.github.add_pr_line_comment.assert_called_once_with(
+        "test-owner",
+        "test-repo",
+        123,
+        "src/auth.py",
+        42,
+        "🔒 **Security Review:** Found potential security issue",
+        None,
+    )
+
+    # Verify activity was logged
+    mock_activity_logger.log.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_suggest_code_change_tool(squadron_tools, mock_registry, mock_activity_logger):
+    """Test suggest_code_change squadron tool."""
+    # Mock agent record
+    mock_registry.get_agent.return_value = AgentRecord(
+        agent_id="test-agent",
+        role="pr-review",
+        issue_number=None,
+        pr_number=123,
+    )
+
+    # Mock GitHub client response
+    squadron_tools.github.suggest_code_change = AsyncMock(return_value={
+        "id": 67890,
+        "body": "Code suggestion",
+    })
+
+    from squadron.tools.squadron_tools import SuggestCodeChangeParams
+
+    params = SuggestCodeChangeParams(
+        pr_number=123,
+        file_path="src/utils.py",
+        line_start=10,
+        line_end=12,
+        suggestion="if value is None:\n    return default_value\nreturn value",
+    )
+
+    result = await squadron_tools.suggest_code_change("test-agent", params)
+
+    assert result == "Suggested code change on PR #123 at src/utils.py:10-12"
+    
+    # Verify GitHub client was called with formatted suggestion
+    squadron_tools.github.suggest_code_change.assert_called_once_with(
+        "test-owner",
+        "test-repo",
+        123,
+        "src/utils.py",
+        10,
+        12,
+        "📝 **PR Review:** Code suggestion:\n\nif value is None:\n    return default_value\nreturn value",
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_review_with_comments_tool(squadron_tools, mock_registry, mock_activity_logger):
+    """Test submit_review_with_comments squadron tool."""
+    # Mock agent record
+    mock_registry.get_agent.return_value = AgentRecord(
+        agent_id="test-agent",
+        role="bug-fix",
+        issue_number=42,
+        pr_number=None,
+    )
+
+    # Mock GitHub client response
+    squadron_tools.github.submit_review_with_comments = AsyncMock(return_value={
+        "id": 11111,
+        "state": "CHANGES_REQUESTED",
+    })
+
+    from squadron.tools.squadron_tools import SubmitReviewWithCommentsParams
+
+    comments = [
+        {"path": "src/bug.py", "line": 5, "body": "This could cause a race condition"},
+        {"path": "tests/test_bug.py", "line": 20, "body": "Add test for edge case"},
+    ]
+
+    params = SubmitReviewWithCommentsParams(
+        pr_number=123,
+        action="REQUEST_CHANGES",
+        summary="Found issues that need to be fixed before merging",
+        comments=comments,
+    )
+
+    result = await squadron_tools.submit_review_with_comments("test-agent", params)
+
+    assert result == "Submitted REQUEST_CHANGES review for PR #123 with 2 inline comments"
+    
+    # Verify GitHub client was called correctly
+    squadron_tools.github.submit_review_with_comments.assert_called_once_with(
+        "test-owner",
+        "test-repo", 
+        123,
+        "REQUEST_CHANGES",
+        "🐛 **Bug Fix:** Found issues that need to be fixed before merging",
+        comments,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reply_to_review_comment_tool(squadron_tools, mock_registry, mock_activity_logger):
+    """Test reply_to_review_comment squadron tool."""
+    # Mock agent record
+    mock_registry.get_agent.return_value = AgentRecord(
+        agent_id="test-agent",
+        role="feat-dev",
+        issue_number=100,
+        pr_number=None,
+    )
+
+    # Mock GitHub client response
+    squadron_tools.github.reply_to_review_comment = AsyncMock(return_value={
+        "id": 22222,
+        "body": "Thanks for the feedback! I'll implement that suggestion.",
+        "in_reply_to_id": 12345,
+    })
+
+    from squadron.tools.squadron_tools import ReplyToReviewCommentParams
+
+    params = ReplyToReviewCommentParams(
+        comment_id=12345,
+        reply_body="Thanks for the feedback! I'll implement that suggestion.",
+    )
+
+    result = await squadron_tools.reply_to_review_comment("test-agent", params)
+
+    assert result == "Replied to review comment 12345"
+    
+    # Verify GitHub client was called with agent signature
+    squadron_tools.github.reply_to_review_comment.assert_called_once_with(
+        "test-owner",
+        "test-repo",
+        12345,
+        "⚡ **Feature Dev:** Thanks for the feedback! I'll implement that suggestion.",
+    )

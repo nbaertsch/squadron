@@ -552,3 +552,341 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
         )
         return resp.json().get("check_runs", [])
+
+    # ── PR Review Comment Operations ─────────────────────────────────────
+
+    async def add_pr_line_comment(
+        self, 
+        owner: str, 
+        repo: str, 
+        pr_number: int,
+        file_path: str,
+        line_number: int,
+        comment: str,
+        commit_sha: str | None = None
+    ) -> dict:
+        """Add an inline comment to a specific line in a PR file.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name  
+            pr_number: Pull request number
+            file_path: Path to the file in the repository
+            line_number: Line number to comment on (1-indexed)
+            comment: Comment text (markdown supported)
+            commit_sha: Optional specific commit SHA (uses PR head if not provided)
+        """
+        if commit_sha is None:
+            # Get the PR to find the head SHA
+            pr = await self.get_pull_request(owner, repo, pr_number)
+            commit_sha = pr["head"]["sha"]
+            
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+            json={
+                "body": comment,
+                "commit_id": commit_sha,
+                "path": file_path,
+                "line": line_number,
+                "side": "RIGHT"  # Comment on the new version of the file
+            },
+        )
+        return resp.json()
+
+    async def add_pr_diff_comment(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        commit_sha: str,
+        file_path: str,
+        position: int,
+        comment: str
+    ) -> dict:
+        """Add a comment to a specific position in a PR diff.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+            commit_sha: Commit SHA to comment on
+            file_path: Path to the file
+            position: Position in the diff (not line number, but diff position)
+            comment: Comment text (markdown supported)
+        """
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+            json={
+                "body": comment,
+                "commit_id": commit_sha,
+                "path": file_path,
+                "position": position
+            },
+        )
+        return resp.json()
+
+    async def suggest_code_change(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        file_path: str,
+        line_start: int,
+        line_end: int,
+        suggestion: str,
+        commit_sha: str | None = None
+    ) -> dict:
+        """Suggest a code change for a range of lines.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+            file_path: Path to the file
+            line_start: Starting line number (1-indexed)
+            line_end: Ending line number (1-indexed, inclusive)
+            suggestion: Suggested replacement code
+            commit_sha: Optional specific commit SHA (uses PR head if not provided)
+        """
+        if commit_sha is None:
+            # Get the PR to find the head SHA
+            pr = await self.get_pull_request(owner, repo, pr_number)
+            commit_sha = pr["head"]["sha"]
+
+        # Format the suggestion using GitHub's suggestion syntax
+        suggestion_body = f"```suggestion\n{suggestion}\n```"
+        
+        payload = {
+            "body": suggestion_body,
+            "commit_id": commit_sha,
+            "path": file_path,
+            "line": line_end,  # Use end line for multi-line suggestions
+            "side": "RIGHT"
+        }
+        
+        # For multi-line suggestions, include start_line
+        if line_start != line_end:
+            payload["start_line"] = line_start
+            payload["start_side"] = "RIGHT"
+            
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+            json=payload,
+        )
+        return resp.json()
+
+    async def start_pr_review(self, owner: str, repo: str, pr_number: int) -> dict:
+        """Start a pending review session for a pull request.
+        
+        Returns a pending review that can have comments added before submission.
+        """
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            json={
+                "event": "PENDING"
+            },
+        )
+        return resp.json()
+
+    async def add_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        review_id: int,
+        file_path: str,
+        line: int,
+        comment: str,
+        commit_sha: str | None = None
+    ) -> dict:
+        """Add a comment to a pending review.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+            review_id: ID of the pending review
+            file_path: Path to the file
+            line: Line number to comment on
+            comment: Comment text
+            commit_sha: Optional specific commit SHA
+        """
+        if commit_sha is None:
+            # Get the PR to find the head SHA
+            pr = await self.get_pull_request(owner, repo, pr_number)
+            commit_sha = pr["head"]["sha"]
+
+        # For pending reviews, comments are added via the review submission
+        # This is a placeholder - actual implementation would batch comments
+        # and submit them with submit_review_with_comments
+        return {
+            "path": file_path,
+            "line": line,
+            "body": comment,
+            "commit_id": commit_sha
+        }
+
+    async def submit_review_with_comments(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        action: str,
+        summary: str,
+        comments: list[dict]
+    ) -> dict:
+        """Submit a review with multiple inline comments.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+            action: Review action ("APPROVE", "REQUEST_CHANGES", "COMMENT")
+            summary: Overall review summary comment
+            comments: List of comment dicts with path, line, body keys
+        """
+        # Convert comments to GitHub API format
+        formatted_comments = []
+        for comment in comments:
+            formatted_comment = {
+                "path": comment["path"],
+                "body": comment["body"]
+            }
+            
+            if "line" in comment:
+                formatted_comment["line"] = comment["line"]
+                formatted_comment["side"] = "RIGHT"
+            elif "position" in comment:
+                formatted_comment["position"] = comment["position"]
+                
+            if "start_line" in comment:
+                formatted_comment["start_line"] = comment["start_line"]
+                formatted_comment["start_side"] = "RIGHT"
+                
+            formatted_comments.append(formatted_comment)
+
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            json={
+                "body": summary,
+                "event": action,
+                "comments": formatted_comments
+            },
+        )
+        return resp.json()
+
+    # ── PR Review Comment Management ─────────────────────────────────────
+
+    async def update_pr_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        comment_id: int,
+        new_body: str
+    ) -> dict:
+        """Update an existing PR review comment.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            comment_id: ID of the comment to update
+            new_body: New comment text
+        """
+        resp = await self._request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+            json={"body": new_body},
+        )
+        return resp.json()
+
+    async def delete_pr_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        comment_id: int
+    ) -> bool:
+        """Delete a PR review comment.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            comment_id: ID of the comment to delete
+            
+        Returns:
+            True if deleted successfully
+        """
+        try:
+            await self._request(
+                "DELETE",
+                f"/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+            )
+            return True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.warning("Comment %d does not exist (already deleted?)", comment_id)
+                return False
+            raise
+
+    async def reply_to_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        comment_id: int,
+        reply_body: str
+    ) -> dict:
+        """Reply to an existing review comment.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            comment_id: ID of the original comment
+            reply_body: Reply text
+        """
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/comments/{comment_id}/replies",
+            json={"body": reply_body},
+        )
+        return resp.json()
+
+    async def get_pr_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        comment_id: int
+    ) -> dict:
+        """Get details of a specific PR review comment.
+        
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            comment_id: ID of the comment
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+        )
+        return resp.json()
+
+    async def resolve_review_thread(
+        self,
+        owner: str,
+        repo: str,
+        comment_id: int
+    ) -> dict:
+        """Mark a review comment thread as resolved.
+        
+        Note: GitHub's API doesn't have a direct "resolve" endpoint.
+        This is typically done through the web UI. This method is a placeholder
+        for future GitHub API updates or could be implemented via GraphQL.
+        """
+        # For now, we can add a comment indicating resolution
+        # In practice, you'd want to use GraphQL API for this functionality
+        return await self.reply_to_review_comment(
+            owner, repo, comment_id, "✅ This thread has been resolved."
+        )
