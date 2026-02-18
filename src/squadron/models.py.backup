@@ -135,9 +135,6 @@ class SquadronEventType(str, enum.Enum):
     PR_CLOSED = "pr.closed"
     PR_REVIEW_SUBMITTED = "pr.review_submitted"
     PR_SYNCHRONIZED = "pr.synchronized"
-    PR_REVIEW_COMMENT_CREATED = "pr.review_comment_created"
-    PR_REVIEW_COMMENT_EDITED = "pr.review_comment_edited"
-    PR_REVIEW_COMMENT_DELETED = "pr.review_comment_deleted"
     PUSH = "push"
 
     # Framework-internal

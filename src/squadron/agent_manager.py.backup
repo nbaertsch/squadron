@@ -673,21 +673,6 @@ class AgentManager:
                     event.pr_number,
                 )
 
-        # 3. For PR review comment events, note for future workflow integration
-        if event.event_type in [
-            SquadronEventType.PR_REVIEW_COMMENT_CREATED,
-            SquadronEventType.PR_REVIEW_COMMENT_EDITED,
-            SquadronEventType.PR_REVIEW_COMMENT_DELETED,
-        ] and event.pr_number:
-            comment = payload.get("comment", {})
-            logger.info(
-                "PR review comment %s for PR #%d by %s (future workflow integration)",
-                event.action,
-                event.pr_number,
-                comment.get("user", {}).get("login", "unknown"),
-            )
-            # TODO: Add workflow engine method handle_pr_review_comment when implemented
-
     # ── Agent Creation ───────────────────────────────────────────────────
 
     async def create_agent(

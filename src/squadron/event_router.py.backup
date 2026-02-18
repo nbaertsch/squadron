@@ -54,9 +54,6 @@ EVENT_MAP: dict[str, SquadronEventType] = {
     "pull_request.closed": SquadronEventType.PR_CLOSED,
     "pull_request.synchronize": SquadronEventType.PR_SYNCHRONIZED,
     "pull_request_review.submitted": SquadronEventType.PR_REVIEW_SUBMITTED,
-    "pull_request_review_comment.created": SquadronEventType.PR_REVIEW_COMMENT_CREATED,
-    "pull_request_review_comment.edited": SquadronEventType.PR_REVIEW_COMMENT_EDITED,
-    "pull_request_review_comment.deleted": SquadronEventType.PR_REVIEW_COMMENT_DELETED,
     "push": SquadronEventType.PUSH,
 }
 
@@ -163,9 +160,6 @@ class EventRouter:
 
         For comment events, parses ``@squadron-dev <agent>: <message>``
         command syntax and populates ``command``.
-        
-        Enhanced to handle PR review comment events with proper PR number
-        extraction and review context preservation.
         """
         issue_number = None
         pr_number = None
@@ -177,43 +171,11 @@ class EventRouter:
         # issue_comment events on PRs have both issue and pull_request
         if event.payload.get("issue", {}).get("pull_request"):
             pr_number = event.payload["issue"]["number"]
-            
-        # Handle pull_request_review_comment events
-        # These events have a "comment" object with pull_request info
-        if event_type in [
-            SquadronEventType.PR_REVIEW_COMMENT_CREATED,
-            SquadronEventType.PR_REVIEW_COMMENT_EDITED,
-            SquadronEventType.PR_REVIEW_COMMENT_DELETED,
-        ]:
-            # PR review comments have pull_request info in the comment
-            review_comment = event.payload.get("comment", {})
-            pr_info = review_comment.get("pull_request_url", "")
-            # Extract PR number from URL like: /repos/owner/repo/pulls/123
-            if pr_info:
-                import re
-                pr_match = re.search(r"/pulls/(\d+)", pr_info)
-                if pr_match:
-                    pr_number = int(pr_match.group(1))
-            
-            # Also try direct payload.pull_request
-            if not pr_number and event.pull_request:
-                pr_number = event.pull_request.get("number")
 
         # Parse @squadron-dev command syntax from comment body
         command: ParsedCommand | None = None
-        comment_body = ""
-        
         if event_type == SquadronEventType.ISSUE_COMMENT:
             comment_body = (event.comment or {}).get("body", "")
-        elif event_type in [
-            SquadronEventType.PR_REVIEW_COMMENT_CREATED,
-            SquadronEventType.PR_REVIEW_COMMENT_EDITED,
-        ]:
-            # PR review comments also support @squadron-dev commands
-            review_comment = event.payload.get("comment", {})
-            comment_body = review_comment.get("body", "")
-        
-        if comment_body:
             command = parse_command(comment_body)
 
         return SquadronEvent(

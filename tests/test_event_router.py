@@ -282,3 +282,191 @@ class TestDispatch:
         )
         await r._route_event(event)
         assert calls == ["a", "b"]
+
+
+class TestPRReviewCommentEventRouting:
+    """Test event routing for new PR review comment events."""
+
+    @pytest.fixture
+    def event_router(self):
+        """Create an EventRouter for testing."""
+        event_queue = asyncio.Queue()
+        registry = MagicMock()
+        config = MagicMock()
+        return EventRouter(event_queue, registry, config)
+
+    def test_pr_review_comment_events_in_event_map(self):
+        """Test that new events are properly mapped."""
+        from squadron.event_router import EVENT_MAP
+        from squadron.models import SquadronEventType
+        
+        expected_mappings = {
+            "pull_request_review_comment.created": SquadronEventType.PR_REVIEW_COMMENT_CREATED,
+            "pull_request_review_comment.edited": SquadronEventType.PR_REVIEW_COMMENT_EDITED,
+            "pull_request_review_comment.deleted": SquadronEventType.PR_REVIEW_COMMENT_DELETED,
+        }
+        
+        for github_event, squadron_type in expected_mappings.items():
+            assert github_event in EVENT_MAP
+            assert EVENT_MAP[github_event] == squadron_type
+
+    def test_pr_review_comment_created_squadron_event(self, event_router):
+        """Test conversion of PR review comment created event."""
+        from squadron.models import GitHubEvent, SquadronEventType
+        
+        github_event = GitHubEvent(
+            delivery_id="test-123",
+            event_type="pull_request_review_comment",
+            action="created",
+            payload={
+                "comment": {
+                    "id": 456,
+                    "body": "This needs refactoring @squadron-dev feat-dev: please update",
+                    "path": "src/module.py",
+                    "line": 25,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/42",
+                    "user": {"login": "reviewer"},
+                },
+                "pull_request": {"number": 42, "title": "Feature addition"},
+                "sender": {"login": "reviewer", "type": "User"},
+            }
+        )
+        
+        squadron_event = event_router._to_squadron_event(
+            github_event, SquadronEventType.PR_REVIEW_COMMENT_CREATED
+        )
+        
+        assert squadron_event.event_type == SquadronEventType.PR_REVIEW_COMMENT_CREATED
+        assert squadron_event.pr_number == 42
+        assert squadron_event.issue_number is None
+        assert squadron_event.command is not None
+        assert squadron_event.source_delivery_id == "test-123"
+
+    def test_pr_review_comment_edited_squadron_event(self, event_router):
+        """Test conversion of PR review comment edited event."""
+        from squadron.models import GitHubEvent, SquadronEventType
+        
+        github_event = GitHubEvent(
+            delivery_id="test-456",
+            event_type="pull_request_review_comment",
+            action="edited",
+            payload={
+                "comment": {
+                    "id": 789,
+                    "body": "Updated comment: This looks better now!",
+                    "path": "src/module.py",
+                    "line": 25,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/43",
+                    "user": {"login": "reviewer"},
+                },
+                "pull_request": {"number": 43, "title": "Bug fix"},
+                "sender": {"login": "reviewer", "type": "User"},
+            }
+        )
+        
+        squadron_event = event_router._to_squadron_event(
+            github_event, SquadronEventType.PR_REVIEW_COMMENT_EDITED
+        )
+        
+        assert squadron_event.event_type == SquadronEventType.PR_REVIEW_COMMENT_EDITED
+        assert squadron_event.pr_number == 43
+
+    def test_pr_review_comment_deleted_squadron_event(self, event_router):
+        """Test conversion of PR review comment deleted event."""
+        from squadron.models import GitHubEvent, SquadronEventType
+        
+        github_event = GitHubEvent(
+            delivery_id="test-789",
+            event_type="pull_request_review_comment",
+            action="deleted",
+            payload={
+                "comment": {
+                    "id": 999,
+                    "body": "(deleted)",
+                    "path": "src/module.py",
+                    "line": 30,
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/44",
+                    "user": {"login": "reviewer"},
+                },
+                "pull_request": {"number": 44, "title": "Hotfix"},
+                "sender": {"login": "reviewer", "type": "User"},
+            }
+        )
+        
+        squadron_event = event_router._to_squadron_event(
+            github_event, SquadronEventType.PR_REVIEW_COMMENT_DELETED
+        )
+        
+        assert squadron_event.event_type == SquadronEventType.PR_REVIEW_COMMENT_DELETED
+        assert squadron_event.pr_number == 44
+
+    def test_pr_number_extraction_from_url_only(self, event_router):
+        """Test PR number extraction when only pull_request_url is available."""
+        from squadron.models import GitHubEvent, SquadronEventType
+        
+        github_event = GitHubEvent(
+            delivery_id="test-url-extraction",
+            event_type="pull_request_review_comment", 
+            action="created",
+            payload={
+                "comment": {
+                    "id": 111,
+                    "body": "Comment without direct PR object",
+                    "path": "src/test.py",
+                    "line": 10,
+                    "pull_request_url": "https://api.github.com/repos/test/repo/pulls/777",
+                    "user": {"login": "commenter"},
+                },
+                "sender": {"login": "commenter", "type": "User"},
+                # Note: No pull_request object in payload, only URL
+            }
+        )
+        
+        squadron_event = event_router._to_squadron_event(
+            github_event, SquadronEventType.PR_REVIEW_COMMENT_CREATED
+        )
+        
+        assert squadron_event.pr_number == 777
+
+    def test_command_parsing_in_review_comments(self, event_router):
+        """Test that @squadron-dev commands are parsed in PR review comments."""
+        from squadron.models import GitHubEvent, SquadronEventType
+        
+        github_event = GitHubEvent(
+            delivery_id="test-command-parsing",
+            event_type="pull_request_review_comment",
+            action="created", 
+            payload={
+                "comment": {
+                    "id": 222,
+                    "body": "@squadron-dev security-review: Please check this for vulnerabilities",
+                    "path": "src/auth.py",
+                    "line": 15,
+                    "pull_request_url": "https://api.github.com/repos/test/repo/pulls/555",
+                    "user": {"login": "developer"},
+                },
+                "pull_request": {"number": 555, "title": "Auth improvements"},
+                "sender": {"login": "developer", "type": "User"},
+            }
+        )
+        
+        squadron_event = event_router._to_squadron_event(
+            github_event, SquadronEventType.PR_REVIEW_COMMENT_CREATED
+        )
+        
+        assert squadron_event.command is not None
+        assert squadron_event.command.agent == "security-review"
+        assert "vulnerabilities" in squadron_event.command.message
+
+    def test_reverse_event_map_includes_new_events(self):
+        """Test that REVERSE_EVENT_MAP includes new PR review comment events."""
+        from squadron.event_router import REVERSE_EVENT_MAP
+        from squadron.models import SquadronEventType
+        
+        assert SquadronEventType.PR_REVIEW_COMMENT_CREATED in REVERSE_EVENT_MAP
+        assert SquadronEventType.PR_REVIEW_COMMENT_EDITED in REVERSE_EVENT_MAP
+        assert SquadronEventType.PR_REVIEW_COMMENT_DELETED in REVERSE_EVENT_MAP
+        
+        assert REVERSE_EVENT_MAP[SquadronEventType.PR_REVIEW_COMMENT_CREATED] == "pull_request_review_comment.created"
+        assert REVERSE_EVENT_MAP[SquadronEventType.PR_REVIEW_COMMENT_EDITED] == "pull_request_review_comment.edited"
+        assert REVERSE_EVENT_MAP[SquadronEventType.PR_REVIEW_COMMENT_DELETED] == "pull_request_review_comment.deleted"
