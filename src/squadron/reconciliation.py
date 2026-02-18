@@ -186,11 +186,15 @@ class ReconciliationLoop:
 
             # Hard limit
             if active_seconds > limits.max_active_duration:
+                # Calculate overage to detect watchdog failures
+                overage = int(active_seconds - limits.max_active_duration)
                 logger.error(
-                    "Agent %s exceeded max active duration (%ds > %ds) — escalating",
+                    "RECONCILIATION CAUGHT TIMEOUT (layer 3) — Agent %s exceeded max active duration "
+                    "(%ds > %ds, overage=%ds). Primary watchdog may have failed.",
                     agent.agent_id,
                     int(active_seconds),
                     limits.max_active_duration,
+                    overage,
                 )
                 agent.status = AgentStatus.ESCALATED
                 await self.registry.update_agent(agent)
@@ -208,10 +212,13 @@ class ReconciliationLoop:
                                 f"limit of {limits.max_active_duration}s.\n\n"
                                 f"**Issue:** #{agent.issue_number}\n"
                                 f"**Branch:** {agent.branch}\n\n"
+                                f"**Overage:** {overage}s (timeout detected by reconciliation, "
+                                f"not primary watchdog — investigate watchdog failure)\n\n"
                                 "The agent has been escalated and stopped. "
-                                "Please investigate and take manual action."
+                                "Please investigate and take manual action.\n\n"
+                                "_Timeout enforced by: reconciliation loop (layer 3)_"
                             ),
-                            labels=["needs-human", "escalation"],
+                            labels=["needs-human", "escalation", "watchdog-failure"],
                         )
                     except Exception:
                         logger.exception(

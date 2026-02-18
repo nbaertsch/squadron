@@ -1357,7 +1357,13 @@ class AgentManager:
         This is the primary circuit breaker enforcement mechanism. It runs
         independently of the agent's tool calls or reasoning — if the timer
         fires, the agent is cancelled and escalated.
+
+        Fix for issue #46: Bounded timeouts on all cleanup operations and
+        proper cancellation waiting to prevent race conditions.
         """
+        # Timeout for cleanup operations (30s is generous but bounded)
+        CLEANUP_TIMEOUT = 30
+
         try:
             await asyncio.sleep(max_seconds)
         except asyncio.CancelledError:
@@ -1365,33 +1371,67 @@ class AgentManager:
 
         # Timer expired — kill the agent
         logger.warning(
-            "WATCHDOG FIRED — agent %s exceeded max_active_duration (%ds), cancelling",
+            "WATCHDOG FIRED (layer 1) — agent %s exceeded max_active_duration (%ds), cancelling",
             agent_id,
             max_seconds,
         )
 
-        # Cancel the agent task
+        # Cancel the agent task and WAIT for it to actually stop (fix race condition)
         agent_task = self._agent_tasks.get(agent_id)
         if agent_task and not agent_task.done():
             agent_task.cancel()
+            try:
+                # Wait up to CLEANUP_TIMEOUT for the task to actually stop
+                await asyncio.wait_for(
+                    asyncio.shield(agent_task),
+                    timeout=CLEANUP_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Agent %s did not stop within %ds after cancel — may be stuck in blocking operation",
+                    agent_id,
+                    CLEANUP_TIMEOUT,
+                )
+            except asyncio.CancelledError:
+                pass  # Expected — task was cancelled
 
-        # Mark agent as ESCALATED
-        agent = await self.registry.get_agent(agent_id)
+        # Mark agent as ESCALATED (with bounded timeout)
+        try:
+            agent = await asyncio.wait_for(
+                self.registry.get_agent(agent_id),
+                timeout=CLEANUP_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Timed out fetching agent %s from registry", agent_id)
+            return
+
         if agent and agent.status == AgentStatus.ACTIVE:
             agent.status = AgentStatus.ESCALATED
-            await self.registry.update_agent(agent)
-
-            # Post escalation comment on the issue
             try:
-                await self.github.comment_on_issue(
-                    self.config.project.owner,
-                    self.config.project.repo,
-                    agent.issue_number,
-                    f"{self._agent_signature(agent.role)}⚠️ **Agent timed out** — exceeded maximum "
-                    f"active duration ({max_seconds}s). Escalating to human.\n\n"
-                    f"Agent `{agent_id}` has been stopped. Branch `{agent.branch}` "
-                    f"is preserved for manual pickup.",
+                await asyncio.wait_for(
+                    self.registry.update_agent(agent),
+                    timeout=CLEANUP_TIMEOUT,
                 )
+            except asyncio.TimeoutError:
+                logger.error("Timed out updating agent %s status to ESCALATED", agent_id)
+
+            # Post escalation comment on the issue (with bounded timeout)
+            try:
+                await asyncio.wait_for(
+                    self.github.comment_on_issue(
+                        self.config.project.owner,
+                        self.config.project.repo,
+                        agent.issue_number,
+                        f"{self._agent_signature(agent.role)}⚠️ **Agent timed out** — exceeded maximum "
+                        f"active duration ({max_seconds}s). Escalating to human.\n\n"
+                        f"Agent `{agent_id}` has been stopped. Branch `{agent.branch}` "
+                        f"is preserved for manual pickup.\n\n"
+                        f"_Timeout enforced by: watchdog (layer 1)_",
+                    ),
+                    timeout=CLEANUP_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Timed out posting watchdog escalation comment for %s", agent_id)
             except Exception:
                 logger.exception("Failed to post watchdog escalation comment for %s", agent_id)
 
