@@ -552,3 +552,317 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
         )
         return resp.json().get("check_runs", [])
+
+    # ── Comprehensive Review Operations ──────────────────────────────────
+
+    async def get_pr_review_threads(self, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """Get threaded review discussions on a pull request.
+        
+        This combines review comments and regular issue comments to provide
+        a comprehensive view of the discussion threads.
+        """
+        # Get inline review comments (file-specific)
+        review_comments = await self.get_pr_review_comments(owner, repo, pr_number)
+        
+        # Get regular issue comments on the PR
+        issue_comments = await self.list_issue_comments(owner, repo, pr_number)
+        
+        threads = []
+        
+        # Group review comments by position/line
+        review_comment_groups = {}
+        for comment in review_comments:
+            # Group by file + position for threading
+            key = f"{comment.get('path', '')}:{comment.get('original_position', comment.get('position', 0))}"
+            if key not in review_comment_groups:
+                review_comment_groups[key] = []
+            
+            # Handle both dict and string user formats
+            user = comment['user']['login'] if isinstance(comment['user'], dict) else str(comment.get('user', 'unknown'))
+            
+            review_comment_groups[key].append({
+                'type': 'review_comment',
+                'id': comment['id'],
+                'user': user,
+                'body': comment['body'],
+                'created_at': comment['created_at'],
+                'path': comment.get('path'),
+                'line': comment.get('line'),
+                'diff_hunk': comment.get('diff_hunk'),
+                'in_reply_to_id': comment.get('in_reply_to_id')
+            })
+        
+        # Add review comment threads
+        for key, comments in review_comment_groups.items():
+            threads.append({
+                'type': 'review_thread',
+                'location': key,
+                'comments': sorted(comments, key=lambda x: x['created_at'])
+            })
+        
+        # Add general discussion comments
+        general_comments = []
+        for comment in issue_comments:
+            # Handle both dict and string user formats
+            user = comment['user']['login'] if isinstance(comment['user'], dict) else str(comment.get('user', 'unknown'))
+            
+            general_comments.append({
+                'type': 'issue_comment',
+                'id': comment['id'],
+                'user': user,
+                'body': comment['body'],
+                'created_at': comment['created_at']
+            })
+        
+        if general_comments:
+            threads.append({
+                'type': 'general_discussion',
+                'location': 'pr_discussion',
+                'comments': sorted(general_comments, key=lambda x: x['created_at'])
+            })
+        
+        return threads
+
+    async def get_pr_review_status(self, owner: str, repo: str, pr_number: int) -> dict:
+        """Get comprehensive review status for a pull request.
+        
+        Returns approval state, change requests, pending reviewers, etc.
+        """
+        # Get all reviews
+        reviews = await self.get_pr_reviews(owner, repo, pr_number)
+        
+        # Get PR details for requested reviewers
+        pr_data = await self.get_pull_request(owner, repo, pr_number)
+        
+        # Analyze review states
+        user_latest_reviews = {}
+        for review in reviews:
+            user = review['user']['login']
+            # Keep only the latest review from each user
+            if user not in user_latest_reviews or review['submitted_at'] > user_latest_reviews[user]['submitted_at']:
+                user_latest_reviews[user] = review
+        
+        approvals = []
+        change_requests = []
+        comments_only = []
+        
+        for user, review in user_latest_reviews.items():
+            state = review['state']
+            review_summary = {
+                'user': user,
+                'state': state,
+                'submitted_at': review['submitted_at'],
+                'body': review.get('body', ''),
+                'review_id': review['id']
+            }
+            
+            if state == 'APPROVED':
+                approvals.append(review_summary)
+            elif state == 'CHANGES_REQUESTED':
+                change_requests.append(review_summary)
+            elif state == 'COMMENTED':
+                comments_only.append(review_summary)
+        
+        # Get requested reviewers
+        requested_reviewers = []
+        for reviewer in pr_data.get('requested_reviewers', []):
+            requested_reviewers.append(reviewer['login'])
+        
+        # Get requested teams
+        requested_teams = []
+        for team in pr_data.get('requested_teams', []):
+            requested_teams.append(team['name'])
+        
+        # Calculate overall status
+        has_approvals = len(approvals) > 0
+        has_changes_requested = len(change_requests) > 0
+        has_pending = len(requested_reviewers) > 0 or len(requested_teams) > 0
+        
+        if has_changes_requested:
+            overall_status = 'changes_requested'
+        elif has_approvals and not has_pending:
+            overall_status = 'approved'
+        elif has_approvals:
+            overall_status = 'partially_approved'
+        elif has_pending:
+            overall_status = 'pending'
+        else:
+            overall_status = 'no_reviews'
+        
+        return {
+            'overall_status': overall_status,
+            'approvals': approvals,
+            'change_requests': change_requests,
+            'comments_only': comments_only,
+            'requested_reviewers': requested_reviewers,
+            'requested_teams': requested_teams,
+            'review_summary': {
+                'total_reviews': len(reviews),
+                'unique_reviewers': len(user_latest_reviews),
+                'approval_count': len(approvals),
+                'change_request_count': len(change_requests),
+                'comment_count': len(comments_only)
+            }
+        }
+
+    async def get_pr_change_requests(self, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """Get detailed change request information from PR reviews.
+        
+        Returns only reviews with CHANGES_REQUESTED state and their details.
+        """
+        reviews = await self.get_pr_reviews(owner, repo, pr_number)
+        review_comments = await self.get_pr_review_comments(owner, repo, pr_number)
+        
+        change_requests = []
+        for review in reviews:
+            if review['state'] == 'CHANGES_REQUESTED':
+                # Find associated inline comments for this review
+                related_comments = []
+                review_id = review['id']
+                
+                for comment in review_comments:
+                    if comment.get('pull_request_review_id') == review_id:
+                        related_comments.append({
+                            'path': comment.get('path'),
+                            'line': comment.get('line'),
+                            'body': comment['body'],
+                            'diff_hunk': comment.get('diff_hunk')
+                        })
+                
+                change_requests.append({
+                    'review_id': review['id'],
+                    'user': review['user']['login'],
+                    'submitted_at': review['submitted_at'],
+                    'body': review.get('body', ''),
+                    'state': review['state'],
+                    'inline_comments': related_comments
+                })
+        
+        return change_requests
+
+    async def list_requested_reviewers(self, owner: str, repo: str, pr_number: int) -> dict:
+        """List currently requested reviewers for a pull request."""
+        pr_data = await self.get_pull_request(owner, repo, pr_number)
+        
+        users = []
+        for reviewer in pr_data.get('requested_reviewers', []):
+            users.append({
+                'login': reviewer['login'],
+                'type': 'user'
+            })
+        
+        teams = []
+        for team in pr_data.get('requested_teams', []):
+            teams.append({
+                'name': team['name'],
+                'slug': team['slug'],
+                'type': 'team'
+            })
+        
+        return {
+            'users': users,
+            'teams': teams,
+            'total_pending': len(users) + len(teams)
+        }
+
+    async def get_review_details(self, owner: str, repo: str, pr_number: int, review_id: int) -> dict:
+        """Get detailed information about a specific review."""
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}"
+        )
+        review = resp.json()
+        
+        # Get associated comments
+        comments_resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/comments"
+        )
+        comments = comments_resp.json()
+        
+        return {
+            'review': review,
+            'comments': comments
+        }
+
+    async def get_issue_comprehensive(self, owner: str, repo: str, issue_number: int) -> dict:
+        """Get comprehensive issue information including all comments, events, and related data."""
+        # Get basic issue data
+        issue = await self.get_issue(owner, repo, issue_number)
+        
+        # Get all comments
+        comments = await self.list_issue_comments(owner, repo, issue_number, per_page=100)
+        
+        # Get issue events (timeline)
+        events = []
+        try:
+            resp = await self._request(
+                "GET",
+                f"/repos/{owner}/{repo}/issues/{issue_number}/timeline",
+                headers={"Accept": "application/vnd.github.mockingbird-preview+json"}
+            )
+            events = resp.json()
+        except Exception:
+            # Timeline API might not be available or accessible
+            pass
+        
+        return {
+            'issue': issue,
+            'comments': comments,
+            'events': events,
+            'summary': {
+                'number': issue['number'],
+                'title': issue['title'],
+                'state': issue['state'],
+                'author': issue['user']['login'],
+                'assignees': [a['login'] for a in issue.get('assignees', [])],
+                'labels': [l['name'] for l in issue.get('labels', [])],
+                'comment_count': len(comments),
+                'created_at': issue['created_at'],
+                'updated_at': issue['updated_at']
+            }
+        }
+
+    async def get_pr_comprehensive(self, owner: str, repo: str, pr_number: int) -> dict:
+        """Get comprehensive PR information including reviews, comments, files, and status."""
+        # Get basic PR data
+        pr = await self.get_pull_request(owner, repo, pr_number)
+        
+        # Get all reviews and review status
+        review_status = await self.get_pr_review_status(owner, repo, pr_number)
+        
+        # Get review threads
+        threads = await self.get_pr_review_threads(owner, repo, pr_number)
+        
+        # Get changed files
+        files = await self.list_pull_request_files(owner, repo, pr_number)
+        
+        # Get CI status
+        ci_status = None
+        try:
+            ci_status = await self.get_combined_status(owner, repo, pr['head']['sha'])
+        except Exception:
+            pass
+        
+        return {
+            'pr': pr,
+            'review_status': review_status,
+            'review_threads': threads,
+            'files': files,
+            'ci_status': ci_status,
+            'summary': {
+                'number': pr['number'],
+                'title': pr['title'],
+                'state': pr['state'],
+                'author': pr['user']['login'],
+                'head_branch': pr['head']['ref'],
+                'base_branch': pr['base']['ref'],
+                'mergeable': pr.get('mergeable'),
+                'mergeable_state': pr.get('mergeable_state'),
+                'file_count': len(files),
+                'review_summary': review_status['review_summary'],
+                'created_at': pr['created_at'],
+                'updated_at': pr['updated_at']
+            }
+        }
+

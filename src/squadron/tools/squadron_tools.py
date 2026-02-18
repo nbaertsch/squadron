@@ -1259,6 +1259,538 @@ class SquadronTools:
 
         return f"Posted comment on PR #{params.pr_number}"
 
+    # ── Comprehensive GitHub Review Tools ──────────────────────────────────────
+
+    async def read_issue_comprehensive(self, agent_id: str, params: ReadIssueComprehensiveParams) -> str:
+        """Read comprehensive issue information including all comments, events, and related data."""
+        comprehensive_data = await self.github.get_issue_comprehensive(
+            self.owner, self.repo, params.issue_number
+        )
+        
+        issue = comprehensive_data["issue"]
+        comments = comprehensive_data["comments"]
+        events = comprehensive_data["events"]
+        summary = comprehensive_data["summary"]
+        
+        lines = [
+            f"**Issue #{summary['number']}:** {summary['title']}",
+            f"**State:** {summary['state']} | **Author:** {summary['author']} | **Created:** {summary['created_at']}",
+            f"**Assignees:** {', '.join(summary['assignees']) if summary['assignees'] else 'None'}",
+            f"**Labels:** {', '.join(summary['labels']) if summary['labels'] else 'None'}",
+            f"**Comments:** {summary['comment_count']} | **Last Updated:** {summary['updated_at']}",
+            "",
+            "**Description:**",
+            issue.get("body", "No description provided."),
+            ""
+        ]
+        
+        if comments:
+            lines.append("**Comments:**")
+            for comment in comments:
+                user = comment["user"]["login"]
+                created = comment["created_at"][:19].replace("T", " ")
+                body = comment["body"]
+                lines.append(f"**{user}** ({created}):\n{body}\n")
+        
+        if events:
+            lines.append("**Timeline Events:**")
+            for event in events[:10]:  # Limit to recent events
+                event_type = event.get("event", "unknown")
+                actor = event.get("actor", {}).get("login", "system")
+                created = event.get("created_at", "")[:19].replace("T", " ")
+                lines.append(f"- **{event_type}** by {actor} at {created}")
+        
+        return "\n".join(lines)
+
+    async def read_pr_comprehensive(self, agent_id: str, params: ReadPRComprehensiveParams) -> str:
+        """Read comprehensive PR information including reviews, comments, files, and status."""
+        comprehensive_data = await self.github.get_pr_comprehensive(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        pr = comprehensive_data["pr"]
+        review_status = comprehensive_data["review_status"]
+        threads = comprehensive_data["review_threads"]
+        files = comprehensive_data["files"]
+        summary = comprehensive_data["summary"]
+        
+        lines = [
+            f"**PR #{summary['number']}:** {summary['title']}",
+            f"**State:** {summary['state']} | **Author:** {summary['author']} | **Created:** {summary['created_at']}",
+            f"**Branch:** {summary['head_branch']} → {summary['base_branch']}",
+            f"**Mergeable:** {summary['mergeable']} | **State:** {summary['mergeable_state']}",
+            f"**Files Changed:** {summary['file_count']} | **Last Updated:** {summary['updated_at']}",
+            "",
+            "**Description:**",
+            pr.get("body", "No description provided."),
+            ""
+        ]
+        
+        # Review Status Summary
+        rs = review_status["review_summary"]
+        lines.extend([
+            "**Review Status:**",
+            f"- Overall: **{review_status['overall_status']}**",
+            f"- Approvals: {rs['approval_count']} | Changes Requested: {rs['change_request_count']} | Comments: {rs['comment_count']}",
+            f"- Total Reviews: {rs['total_reviews']} from {rs['unique_reviewers']} reviewers",
+            ""
+        ])
+        
+        # Detailed Review Status
+        if review_status["approvals"]:
+            lines.append("**✓ Approvals:**")
+            for approval in review_status["approvals"]:
+                lines.append(f"- **{approval['user']}** at {approval['submitted_at'][:19].replace('T', ' ')}")
+                if approval["body"]:
+                    lines.append(f"  {approval['body']}")
+        
+        if review_status["change_requests"]:
+            lines.append("**⚠ Change Requests:**")
+            for change in review_status["change_requests"]:
+                lines.append(f"- **{change['user']}** at {change['submitted_at'][:19].replace('T', ' ')}")
+                if change["body"]:
+                    lines.append(f"  {change['body']}")
+        
+        if review_status["requested_reviewers"] or review_status["requested_teams"]:
+            lines.append("**⏳ Pending Reviewers:**")
+            for reviewer in review_status["requested_reviewers"]:
+                lines.append(f"- {reviewer} (user)")
+            for team in review_status["requested_teams"]:
+                lines.append(f"- {team} (team)")
+        
+        # Review Threads Summary
+        if threads:
+            lines.append("")
+            lines.append(f"**Discussion Threads:** {len(threads)}")
+            for thread in threads[:5]:  # Show first 5 threads
+                if thread["type"] == "review_thread":
+                    lines.append(f"- Code review thread at {thread['location']} ({len(thread['comments'])} comments)")
+                else:
+                    lines.append(f"- General discussion ({len(thread['comments'])} comments)")
+        
+        return "\n".join(lines)
+
+    async def list_pr_reviews(self, agent_id: str, params: ListPRReviewsParams) -> str:
+        """List all reviews on a pull request with detailed information."""
+        reviews = await self.github.get_pr_reviews(self.owner, self.repo, params.pr_number)
+        
+        if not reviews:
+            return f"No reviews found for PR #{params.pr_number}."
+        
+        lines = [f"**Reviews for PR #{params.pr_number}:**\n"]
+        
+        for review in reviews:
+            user = review["user"]["login"]
+            state = review["state"]
+            submitted_at = review["submitted_at"][:19].replace("T", " ")
+            body = review.get("body", "")
+            
+            # Format state with emoji
+            state_icon = {
+                "APPROVED": "✅",
+                "CHANGES_REQUESTED": "⚠️",
+                "COMMENTED": "💬"
+            }.get(state, "❓")
+            
+            lines.append(f"{state_icon} **{user}** - **{state}** at {submitted_at}")
+            if body:
+                lines.append(f"   {body}")
+            lines.append("")
+        
+        return "\n".join(lines)
+
+    async def read_review_details(self, agent_id: str, params: ReadReviewDetailsParams) -> str:
+        """Get detailed information about a specific review."""
+        details = await self.github.get_review_details(
+            self.owner, self.repo, params.pr_number, params.review_id
+        )
+        
+        review = details["review"]
+        comments = details["comments"]
+        
+        lines = [
+            f"**Review #{params.review_id} on PR #{params.pr_number}**",
+            f"**Reviewer:** {review['user']['login']}",
+            f"**State:** {review['state']}",
+            f"**Submitted:** {review['submitted_at'][:19].replace('T', ' ')}",
+            ""
+        ]
+        
+        if review.get("body"):
+            lines.extend([
+                "**Review Comment:**",
+                review["body"],
+                ""
+            ])
+        
+        if comments:
+            lines.append(f"**Inline Comments:** ({len(comments)})")
+            for comment in comments:
+                path = comment.get("path", "unknown file")
+                line = comment.get("line", "?")
+                body = comment["body"]
+                lines.extend([
+                    f"**{path}:{line}**",
+                    f"{body}",
+                    ""
+                ])
+        
+        return "\n".join(lines)
+
+    async def get_inline_comments(self, agent_id: str, params: GetInlineCommentsParams) -> str:
+        """Get all inline code review comments for a pull request."""
+        comments = await self.github.get_pr_review_comments(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        if not comments:
+            return f"No inline comments found for PR #{params.pr_number}."
+        
+        lines = [f"**Inline Comments for PR #{params.pr_number}:**\n"]
+        
+        # Group comments by file
+        by_file = {}
+        for comment in comments:
+            path = comment.get("path", "unknown")
+            if path not in by_file:
+                by_file[path] = []
+            by_file[path].append(comment)
+        
+        for path, file_comments in by_file.items():
+            lines.append(f"**📄 {path}**")
+            
+            # Sort by line number
+            file_comments.sort(key=lambda x: x.get("line", 0))
+            
+            for comment in file_comments:
+                user = comment["user"]["login"]
+                line = comment.get("line", "?")
+                created = comment["created_at"][:19].replace("T", " ")
+                body = comment["body"]
+                
+                lines.extend([
+                    f"  **Line {line}** - {user} ({created}):",
+                    f"  {body}",
+                    ""
+                ])
+        
+        return "\n".join(lines)
+
+    async def get_review_threads(self, agent_id: str, params: GetReviewThreadsParams) -> str:
+        """Get threaded review discussions on a pull request."""
+        threads = await self.github.get_pr_review_threads(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        if not threads:
+            return f"No review threads found for PR #{params.pr_number}."
+        
+        lines = [f"**Review Threads for PR #{params.pr_number}:**\n"]
+        
+        for thread in threads:
+            thread_type = thread["type"]
+            location = thread["location"]
+            comments = thread["comments"]
+            
+            if thread_type == "review_thread":
+                lines.append(f"🔗 **Code Review Thread** at {location}")
+            else:
+                lines.append(f"💬 **General Discussion**")
+            
+            lines.append(f"   {len(comments)} comments")
+            
+            # Show first few comments in each thread
+            for comment in comments[:3]:
+                user = comment["user"]
+                created = comment["created_at"][:19].replace("T", " ")
+                body = comment["body"][:100] + ("..." if len(comment["body"]) > 100 else "")
+                lines.append(f"   **{user}** ({created}): {body}")
+            
+            if len(comments) > 3:
+                lines.append(f"   ... and {len(comments) - 3} more comments")
+            
+            lines.append("")
+        
+        return "\n".join(lines)
+
+    async def get_pr_review_status(self, agent_id: str, params: GetPRReviewStatusParams) -> str:
+        """Get comprehensive review status for a pull request."""
+        status = await self.github.get_pr_review_status(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        lines = [
+            f"**Review Status for PR #{params.pr_number}:**",
+            f"**Overall Status:** {status['overall_status']}",
+            ""
+        ]
+        
+        # Summary stats
+        summary = status["review_summary"]
+        lines.extend([
+            "**Summary:**",
+            f"- Total Reviews: {summary['total_reviews']}",
+            f"- Unique Reviewers: {summary['unique_reviewers']}",
+            f"- Approvals: {summary['approval_count']}",
+            f"- Change Requests: {summary['change_request_count']}",
+            f"- Comments Only: {summary['comment_count']}",
+            ""
+        ])
+        
+        # Detailed breakdown
+        if status["approvals"]:
+            lines.append("✅ **Approvals:**")
+            for approval in status["approvals"]:
+                lines.append(f"- {approval['user']} at {approval['submitted_at'][:19]}")
+        
+        if status["change_requests"]:
+            lines.append("⚠️ **Change Requests:**")
+            for change in status["change_requests"]:
+                lines.append(f"- {change['user']} at {change['submitted_at'][:19]}")
+        
+        if status["requested_reviewers"] or status["requested_teams"]:
+            lines.append("⏳ **Pending Reviews:**")
+            for reviewer in status["requested_reviewers"]:
+                lines.append(f"- {reviewer} (user)")
+            for team in status["requested_teams"]:
+                lines.append(f"- {team} (team)")
+        
+        return "\n".join(lines)
+
+    async def list_requested_reviewers(self, agent_id: str, params: ListRequestedReviewersParams) -> str:
+        """List currently requested reviewers for a pull request."""
+        reviewers = await self.github.list_requested_reviewers(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        if reviewers["total_pending"] == 0:
+            return f"No pending reviewer requests for PR #{params.pr_number}."
+        
+        lines = [f"**Requested Reviewers for PR #{params.pr_number}:**\n"]
+        
+        if reviewers["users"]:
+            lines.append("**Users:**")
+            for user in reviewers["users"]:
+                lines.append(f"- {user['login']}")
+        
+        if reviewers["teams"]:
+            lines.append("**Teams:**")
+            for team in reviewers["teams"]:
+                lines.append(f"- {team['name']} (@{team['slug']})")
+        
+        lines.append(f"\n**Total Pending:** {reviewers['total_pending']}")
+        
+        return "\n".join(lines)
+
+    async def get_pr_change_requests(self, agent_id: str, params: GetPRChangeRequestsParams) -> str:
+        """Get detailed change request information from PR reviews."""
+        change_requests = await self.github.get_pr_change_requests(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        if not change_requests:
+            return f"No change requests found for PR #{params.pr_number}."
+        
+        lines = [f"**Change Requests for PR #{params.pr_number}:**\n"]
+        
+        for i, change in enumerate(change_requests, 1):
+            user = change["user"]
+            submitted_at = change["submitted_at"][:19].replace("T", " ")
+            body = change.get("body", "")
+            inline_comments = change["inline_comments"]
+            
+            lines.extend([
+                f"**{i}. {user}** at {submitted_at}",
+                ""
+            ])
+            
+            if body:
+                lines.extend([
+                    "**Review Comment:**",
+                    body,
+                    ""
+                ])
+            
+            if inline_comments:
+                lines.append(f"**Inline Comments:** ({len(inline_comments)})")
+                for comment in inline_comments:
+                    path = comment.get("path", "unknown file")
+                    line = comment.get("line", "?")
+                    comment_body = comment["body"]
+                    lines.extend([
+                        f"📄 **{path}:{line}**",
+                        f"{comment_body}",
+                        ""
+                    ])
+            
+            lines.append("---\n")
+        
+        return "\n".join(lines)
+
+    async def get_review_summary(self, agent_id: str, params: GetReviewSummaryParams) -> str:
+        """Get consolidated review state summary for a pull request."""
+        status = await self.github.get_pr_review_status(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        overall = status["overall_status"]
+        summary = status["review_summary"]
+        
+        # Create a concise summary
+        status_emoji = {
+            "approved": "✅",
+            "changes_requested": "⚠️", 
+            "partially_approved": "🟡",
+            "pending": "⏳",
+            "no_reviews": "⚪"
+        }.get(overall, "❓")
+        
+        lines = [
+            f"**Review Summary for PR #{params.pr_number}:** {status_emoji} {overall.replace('_', ' ').title()}",
+            ""
+        ]
+        
+        # Quick stats
+        if summary["approval_count"] > 0:
+            lines.append(f"✅ {summary['approval_count']} approval(s)")
+        
+        if summary["change_request_count"] > 0:
+            lines.append(f"⚠️ {summary['change_request_count']} change request(s)")
+        
+        if len(status["requested_reviewers"]) + len(status["requested_teams"]) > 0:
+            pending_count = len(status["requested_reviewers"]) + len(status["requested_teams"])
+            lines.append(f"⏳ {pending_count} pending reviewer(s)")
+        
+        if summary["comment_count"] > 0:
+            lines.append(f"💬 {summary['comment_count']} comment-only review(s)")
+        
+        # Overall recommendation
+        lines.append("")
+        if overall == "approved":
+            lines.append("🚀 **Ready to merge** - All reviews approved")
+        elif overall == "changes_requested":
+            lines.append("🔧 **Changes needed** - Address change requests before merging")
+        elif overall == "partially_approved":
+            lines.append("🔄 **Waiting for reviews** - Some approvals received, pending reviewers remain")
+        elif overall == "pending":
+            lines.append("⏳ **Awaiting reviews** - No reviews completed yet")
+        else:
+            lines.append("❓ **Unknown state** - Review status unclear")
+        
+        return "\n".join(lines)
+
+
+    # ── Comprehensive GitHub Review Tools ──────────────────────────────────────
+
+    async def read_issue_comprehensive(self, agent_id: str, params: ReadIssueComprehensiveParams) -> str:
+        """Read comprehensive issue information including all comments, events, and related data."""
+        comprehensive_data = await self.github.get_issue_comprehensive(
+            self.owner, self.repo, params.issue_number
+        )
+        
+        issue = comprehensive_data["issue"]
+        comments = comprehensive_data["comments"]
+        events = comprehensive_data["events"]
+        summary = comprehensive_data["summary"]
+        
+        lines = [
+            f"**Issue #{summary["number"]}:** {summary["title"]}",
+            f"**State:** {summary["state"]} | **Author:** {summary["author"]} | **Created:** {summary["created_at"]}",
+            f"**Assignees:** {", ".join(summary["assignees"]) if summary["assignees"] else "None"}",
+            f"**Labels:** {", ".join(summary["labels"]) if summary["labels"] else "None"}",
+            f"**Comments:** {summary["comment_count"]} | **Last Updated:** {summary["updated_at"]}",
+            "",
+            "**Description:**",
+            issue.get("body", "No description provided."),
+            ""
+        ]
+        
+        if comments:
+            lines.append("**Comments:**")
+            for comment in comments:
+                user = comment["user"]["login"]
+                created = comment["created_at"][:19].replace("T", " ")
+                body = comment["body"]
+                lines.append(f"**{user}** ({created}):\n{body}\n")
+        
+        if events:
+            lines.append("**Timeline Events:**")
+            for event in events[:10]:  # Limit to recent events
+                event_type = event.get("event", "unknown")
+                actor = event.get("actor", {}).get("login", "system")
+                created = event.get("created_at", "")[:19].replace("T", " ")
+                lines.append(f"- **{event_type}** by {actor} at {created}")
+        
+        return "\n".join(lines)
+
+    async def read_pr_comprehensive(self, agent_id: str, params: ReadPRComprehensiveParams) -> str:
+        """Read comprehensive PR information including reviews, comments, files, and status."""
+        comprehensive_data = await self.github.get_pr_comprehensive(
+            self.owner, self.repo, params.pr_number
+        )
+        
+        pr = comprehensive_data["pr"]
+        review_status = comprehensive_data["review_status"]
+        threads = comprehensive_data["review_threads"]
+        files = comprehensive_data["files"]
+        summary = comprehensive_data["summary"]
+        
+        lines = [
+            f"**PR #{summary["number"]}:** {summary["title"]}",
+            f"**State:** {summary["state"]} | **Author:** {summary["author"]} | **Created:** {summary["created_at"]}",
+            f"**Branch:** {summary["head_branch"]} → {summary["base_branch"]}",
+            f"**Mergeable:** {summary["mergeable"]} | **State:** {summary["mergeable_state"]}",
+            f"**Files Changed:** {summary["file_count"]} | **Last Updated:** {summary["updated_at"]}",
+            "",
+            "**Description:**",
+            pr.get("body", "No description provided."),
+            ""
+        ]
+        
+        # Review Status Summary
+        rs = review_status["review_summary"]
+        lines.extend([
+            "**Review Status:**",
+            f"- Overall: **{review_status["overall_status"]}**",
+            f"- Approvals: {rs["approval_count"]} | Changes Requested: {rs["change_request_count"]} | Comments: {rs["comment_count"]}",
+            f"- Total Reviews: {rs["total_reviews"]} from {rs["unique_reviewers"]} reviewers",
+            ""
+        ])
+        
+        # Detailed Review Status
+        if review_status["approvals"]:
+            lines.append("**✓ Approvals:**")
+            for approval in review_status["approvals"]:
+                lines.append(f"- **{approval["user"]}** at {approval["submitted_at"][:19].replace("T", " ")}")
+                if approval["body"]:
+                    lines.append(f"  {approval["body"]}")
+        
+        if review_status["change_requests"]:
+            lines.append("**⚠ Change Requests:**")
+            for change in review_status["change_requests"]:
+                lines.append(f"- **{change["user"]}** at {change["submitted_at"][:19].replace("T", " ")}")
+                if change["body"]:
+                    lines.append(f"  {change["body"]}")
+        
+        if review_status["requested_reviewers"] or review_status["requested_teams"]:
+            lines.append("**⏳ Pending Reviewers:**")
+            for reviewer in review_status["requested_reviewers"]:
+                lines.append(f"- {reviewer} (user)")
+            for team in review_status["requested_teams"]:
+                lines.append(f"- {team} (team)")
+        
+        # Review Threads Summary
+        if threads:
+            lines.append("")
+            lines.append(f"**Discussion Threads:** {len(threads)}")
+            for thread in threads[:5]:  # Show first 5 threads
+                if thread["type"] == "review_thread":
+                    lines.append(f"- Code review thread at {thread["location"]} ({len(thread["comments"])} comments)")
+                else:
+                    lines.append(f"- General discussion ({len(thread["comments"])} comments)")
+        
+        return "\n".join(lines)
+
     # ── Tool Selection ───────────────────────────────────────────────────
 
     def get_tools(
@@ -1483,6 +2015,67 @@ class SquadronTools:
             tools.get_repo_info,
         )
 
+        _register(
+            "read_issue_comprehensive",
+            "Read comprehensive issue information including all comments, events, and related data.",
+            ReadIssueComprehensiveParams,
+            tools.read_issue_comprehensive,
+        )
+        _register(
+            "read_pr_comprehensive", 
+            "Read comprehensive PR information including reviews, comments, files, and status.",
+            ReadPRComprehensiveParams,
+            tools.read_pr_comprehensive,
+        )
+        _register(
+            "list_pr_reviews",
+            "List all reviews on a pull request with detailed information.",
+            ListPRReviewsParams,
+            tools.list_pr_reviews,
+        )
+        _register(
+            "read_review_details",
+            "Get detailed information about a specific review including inline comments.",
+            ReadReviewDetailsParams,
+            tools.read_review_details,
+        )
+        _register(
+            "get_inline_comments",
+            "Get all inline code review comments for a pull request grouped by file.",
+            GetInlineCommentsParams,
+            tools.get_inline_comments,
+        )
+        _register(
+            "get_review_threads",
+            "Get threaded review discussions on a pull request.",
+            GetReviewThreadsParams,
+            tools.get_review_threads,
+        )
+        _register(
+            "get_pr_review_status",
+            "Get comprehensive review status for a pull request including approvals and change requests.",
+            GetPRReviewStatusParams,
+            tools.get_pr_review_status,
+        )
+        _register(
+            "list_requested_reviewers",
+            "List currently requested reviewers for a pull request.",
+            ListRequestedReviewersParams,
+            tools.list_requested_reviewers,
+        )
+        _register(
+            "get_pr_change_requests",
+            "Get detailed change request information from PR reviews.",
+            GetPRChangeRequestsParams,
+            tools.get_pr_change_requests,
+        )
+        _register(
+            "get_review_summary",
+            "Get consolidated review state summary for a pull request.",
+            GetReviewSummaryParams,
+            tools.get_review_summary,
+        )
+
         # Build and return only the requested tools
         result = []
         for name in names:
@@ -1491,3 +2084,46 @@ class SquadronTools:
                 result.append(builder())
 
         return result
+
+# ── Comprehensive GitHub Review Parameters ──────────────────────────────
+
+class ReadIssueComprehensiveParams(BaseModel):
+    issue_number: int = Field(description="The GitHub issue number")
+
+
+class ReadPRComprehensiveParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+
+
+class ListPRReviewsParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+
+
+class ReadReviewDetailsParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+    review_id: int = Field(description="The review ID")
+
+
+class GetInlineCommentsParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+
+
+class GetReviewThreadsParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+
+
+class GetPRReviewStatusParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+
+
+class ListRequestedReviewersParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+
+
+class GetPRChangeRequestsParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+
+
+class GetReviewSummaryParams(BaseModel):
+    pr_number: int = Field(description="The pull request number")
+

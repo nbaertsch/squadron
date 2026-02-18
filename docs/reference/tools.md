@@ -143,3 +143,110 @@ All tools are implemented in `src/squadron/tools/squadron_tools.py` using the Co
 - Proper error handling and logging
 - GitHub API integration through the squadron GitHub client
 
+
+## Comprehensive GitHub Review Tools
+
+Advanced tools for reading detailed PR review information, inline comments, and comprehensive discussion context. These tools provide agents with complete visibility into code review processes and change request details.
+
+### Issue & PR Comprehensive Reading
+
+- **`read_issue_comprehensive`** - Read complete issue information including all comments, timeline events, and metadata
+- **`read_pr_comprehensive`** - Read complete PR information including reviews, comments, files, CI status, and discussion threads
+
+### PR Review Analysis
+
+- **`list_pr_reviews`** - List all reviews on a pull request with detailed reviewer information and states
+- **`get_pr_review_status`** - Get comprehensive review status including approvals, change requests, and pending reviewers
+- **`get_review_summary`** - Get consolidated review state summary with merge readiness assessment
+
+### Review Detail Inspection
+
+- **`read_review_details`** - Get detailed information about a specific review including all inline comments
+- **`get_inline_comments`** - Get all inline code review comments organized by file and line
+- **`get_review_threads`** - Get threaded review discussions combining inline and general comments
+- **`get_pr_change_requests`** - Get detailed change request information with specific actionable feedback
+
+### Review Status & Coordination
+
+- **`list_requested_reviewers`** - List currently pending reviewer requests (users and teams)
+
+## Tool Usage Examples
+
+### For PM Agents: Complete Project Oversight
+
+```markdown
+# Check comprehensive PR status
+get_pr_review_status: pr_number: 42
+
+# Get detailed change requests to understand blockers
+get_pr_change_requests: pr_number: 42
+
+# Review complete discussion context
+read_pr_comprehensive: pr_number: 42
+```
+
+### For PR Review Agents: Informed Code Review
+
+```markdown
+# Read existing review feedback before adding comments
+list_pr_reviews: pr_number: 42
+
+# Check specific inline comments on code
+get_inline_comments: pr_number: 42
+
+# Understand previous change requests to avoid duplication
+get_pr_change_requests: pr_number: 42
+
+# Review threaded discussions for context
+get_review_threads: pr_number: 42
+```
+
+### For Development Agents: Understanding Requirements
+
+```markdown
+# Get comprehensive issue context including full discussion
+read_issue_comprehensive: issue_number: 123
+
+# Understand specific change requirements from reviews
+read_review_details: pr_number: 42, review_id: 567
+
+# Check review summary to understand merge readiness
+get_review_summary: pr_number: 42
+```
+
+## Tool Output Formats
+
+### Review Status Information
+
+Tools return structured information about:
+- **Overall Status**: approved, changes_requested, partially_approved, pending, no_reviews
+- **Approval Details**: Reviewer names, timestamps, approval messages
+- **Change Requests**: Specific feedback, inline comments, actionable items
+- **Pending Reviews**: Outstanding reviewer requests, team assignments
+- **Discussion Threads**: File-specific and general PR discussions
+
+### Change Request Details
+
+Change request tools provide:
+- **Review Context**: Who requested changes and when
+- **Inline Comments**: Specific file/line feedback with diff context
+- **General Feedback**: Overall review comments and suggestions
+- **Thread Organization**: Related comments grouped by topic/location
+
+### Comprehensive Data
+
+Comprehensive reading tools include:
+- **Full Metadata**: All issue/PR fields, labels, assignees, timestamps
+- **Complete Discussion**: All comments in chronological order
+- **Review History**: Complete review timeline and state changes
+- **File Context**: Changed files with diff statistics
+- **CI Integration**: Status check and build information
+
+## Integration with Existing Workflows
+
+These tools extend the existing GitHub integration:
+- Use with `comment_on_pr` and `comment_on_issue` for informed responses
+- Combine with `submit_pr_review` for comprehensive code review
+- Support `escalate_to_human` decisions with complete context
+- Enable `create_blocker_issue` with detailed problem descriptions
+
