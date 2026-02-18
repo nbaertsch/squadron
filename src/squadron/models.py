@@ -210,18 +210,24 @@ def parse_command(text: str) -> ParsedCommand | None:
     if match:
         agent_name = match.group(1).lower()
         message = match.group(2).strip()
-        
+
         # Define known agent names (from .squadron/config.yaml)
         known_agents = {
-            'pm', 'bug-fix', 'feat-dev', 'docs-dev', 'infra-dev', 
-            'security-review', 'test-coverage', 'pr-review'
+            "pm",
+            "bug-fix",
+            "feat-dev",
+            "docs-dev",
+            "infra-dev",
+            "security-review",
+            "test-coverage",
+            "pr-review",
         }
-        
+
         # If there's a colon in the match, it's definitely a command
         # If no colon, validate that it's a known agent name
-        match_text = text[match.start():match.end()]
-        has_colon = ':' in match_text
-        
+        match_text = text[match.start() : match.end()]
+        has_colon = ":" in match_text
+
         if has_colon or agent_name in known_agents:
             return ParsedCommand(agent_name=agent_name, message=message)
 

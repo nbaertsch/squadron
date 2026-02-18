@@ -134,7 +134,7 @@ class TestParseCommand:
         """Random text with @squadron-dev should not match."""
         result = parse_command("The @squadron-dev organization is great")
         assert result is None
-    
+
     def test_issue_56_scenario(self):
         """The exact scenario from issue #56 should now work."""
         result = parse_command("@squadron-dev pm Issue #56 can be marked as resolved")
