@@ -80,7 +80,7 @@ def _example_config() -> SquadronConfig:
                     AgentTrigger(
                         event="pull_request.closed",
                         condition={"merged": True},
-                        action="complete",
+                        action="wake",
                     ),
                 ],
             ),
@@ -390,7 +390,7 @@ class TestHappyPathFlow:
             assert updated_dev.status == AgentStatus.ACTIVE
 
     async def test_pr_merged_completes_agents(self, registry):
-        """Step 5: PR merged → feat-dev completes, pr-review completes."""
+        """Step 5: PR merged → feat-dev woken for cleanup, pr-review completes."""
         config = _example_config()
         github = _mock_github()
         event_queue = asyncio.Queue()
@@ -447,9 +447,9 @@ class TestHappyPathFlow:
             )
             await router._route_event(event)
 
-            # Dev should be completed (trigger action: complete, condition: merged=true)
+            # Dev should be woken up for cleanup (trigger action: wake, condition: merged=true)
             updated_dev = await registry.get_agent("feat-dev-issue-42")
-            assert updated_dev.status == AgentStatus.COMPLETED
+            assert updated_dev.status == AgentStatus.ACTIVE
 
             # Reviewer should be completed (trigger action: complete on PR closed)
             updated_review = await registry.get_agent("pr-review-issue-10")

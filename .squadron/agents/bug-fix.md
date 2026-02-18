@@ -98,14 +98,41 @@ If events are pending, read and process them before continuing. This ensures you
 ## Wake Protocol
 
 1. **Check for pending events** — call `check_for_events` to see what triggered your wake
-2. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`
-3. Check for rebase conflicts — resolve or escalate
-4. Use `list_issue_comments` to re-read the bug report for any new information
-5. If you have an open PR, use `get_pr_feedback` to fetch review comments and requested changes
-6. Re-read files related to the bug
-7. If the bug was reported as fixed by someone else while you slept — verify and call `report_complete`
-8. Otherwise, continue your fix from where you left off
+2. **Determine wake reason** — if you woke up due to a PR merge event, proceed to **PR Merge Cleanup**. Otherwise continue with normal wake protocol.
 
+### Normal Wake Protocol (PR review feedback, comments, etc.)
+
+3. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`
+4. Check for rebase conflicts — resolve or escalate
+5. Use `list_issue_comments` to re-read the bug report for any new information
+6. If you have an open PR, use `get_pr_feedback` to fetch review comments and requested changes
+7. Re-read files related to the bug
+8. If the bug was reported as fixed by someone else while you slept — verify and call `report_complete`
+9. Otherwise, continue your fix from where you left off
+
+### PR Merge Cleanup Protocol
+
+When you wake up because your PR was merged, perform the following cleanup workflow:
+
+3. **Verify PR was merged** — check that your PR is actually merged and closed
+4. **Post handoff comment** — comment on the issue with the following format:
+   ```
+   @squadron-dev pm: PR #{pr_number} merged for issue #{issue_number}. Please review acceptance criteria and close if complete.
+   ```
+5. **Clean up merged branch** — if the PR branch still exists in the repository:
+   - Use `bash` to run: `git push origin --delete {branch_name}`
+   - Confirm deletion was successful
+6. **Post final completion comment** — comment on the issue confirming cleanup is complete:
+   ```
+   ✅ **Bug fix complete**
+   
+   - PR #{pr_number} merged successfully
+   - Branch `{branch_name}` deleted
+   - Issue handed off to PM for acceptance criteria review
+   ```
+7. **Call report_complete** — call `report_complete` with summary: "Bug fix implemented and merged. Cleanup workflow executed successfully."
+
+This ensures proper handoff to the PM for acceptance criteria verification and prevents issues from being marked complete when criteria gaps exist.
 ## Agent Collaboration
 
 Use the @ mention system to collaborate with other Squadron agents, especially for complex bugs that span multiple domains.

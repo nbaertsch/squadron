@@ -119,14 +119,41 @@ If events are pending, read and process them before continuing. This ensures you
 When you are resumed from a sleeping state:
 
 1. **Check for pending events** — call `check_for_events` to see what triggered your wake
-2. **Pull latest changes** — `git fetch origin && git rebase origin/{base_branch}`
-3. **Check for rebase conflicts** — if conflicts exist, attempt to resolve them. If you cannot resolve after 2 attempts, call `report_blocked` describing the conflict.
-4. **Re-read relevant files** — the codebase may have changed while you were sleeping. Re-read files related to your issue.
-5. **Check issue comments** — use `list_issue_comments` for any new instructions, clarifications, or feedback.
-6. **Check PR feedback** — if you have an open PR, use `get_pr_feedback` to fetch review comments, inline suggestions, and requested changes.
-7. **Assess state** — what has changed? Does your plan need adjustment?
-8. **Continue implementation** — pick up where you left off, adjusted for any changes.
+2. **Determine wake reason** — if you woke up due to a PR merge event, proceed to **PR Merge Cleanup**. Otherwise continue with normal wake protocol.
 
+### Normal Wake Protocol (PR review feedback, comments, etc.)
+
+3. **Pull latest changes** — `git fetch origin && git rebase origin/{base_branch}`
+4. **Check for rebase conflicts** — if conflicts exist, attempt to resolve them. If you cannot resolve after 2 attempts, call `report_blocked` describing the conflict.
+5. **Re-read relevant files** — the codebase may have changed while you were sleeping. Re-read files related to your issue.
+6. **Check issue comments** — use `list_issue_comments` for any new instructions, clarifications, or feedback.
+7. **Check PR feedback** — if you have an open PR, use `get_pr_feedback` to fetch review comments, inline suggestions, and requested changes.
+8. **Assess state** — what has changed? Does your plan need adjustment?
+9. **Continue implementation** — pick up where you left off, adjusted for any changes.
+
+### PR Merge Cleanup Protocol
+
+When you wake up because your PR was merged, perform the following cleanup workflow:
+
+3. **Verify PR was merged** — check that your PR is actually merged and closed
+4. **Post handoff comment** — comment on the issue with the following format:
+   ```
+   @squadron-dev pm: PR #{pr_number} merged for issue #{issue_number}. Please review acceptance criteria and close if complete.
+   ```
+5. **Clean up merged branch** — if the PR branch still exists in the repository:
+   - Use `bash` to run: `git push origin --delete {branch_name}`
+   - Confirm deletion was successful
+6. **Post final completion comment** — comment on the issue confirming cleanup is complete:
+   ```
+   ✅ **Implementation complete**
+   
+   - PR #{pr_number} merged successfully
+   - Branch `{branch_name}` deleted
+   - Issue handed off to PM for acceptance criteria review
+   ```
+7. **Call report_complete** — call `report_complete` with summary: "Feature implementation complete and merged. Cleanup workflow executed successfully."
+
+This ensures proper handoff to the PM for acceptance criteria verification and prevents issues from being marked complete when criteria gaps exist.
 ## Agent Collaboration
 
 You can collaborate with other Squadron agents using the @ mention system. This is essential for complex issues that span multiple domains.
