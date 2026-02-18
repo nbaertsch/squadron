@@ -94,10 +94,53 @@ class TestParseCommand:
         assert result is not None
         assert result.agent_name == "pm"
 
-    def test_mention_without_colon_not_matched(self):
-        """@squadron-dev agent without colon should not match."""
+    def test_mention_without_colon_matches_known_agent(self):
+        """@squadron-dev known-agent without colon should match (regression test for issue #59)."""
         result = parse_command("@squadron-dev pm please help")
+        assert result is not None
+        assert result.is_help is False
+        assert result.agent_name == "pm"
+        assert result.message == "please help"
+
+    def test_mention_without_colon_at_end_of_line(self):
+        """@squadron-dev known-agent without colon at end should match."""
+        result = parse_command("@squadron-dev pm")
+        assert result is not None
+        assert result.is_help is False
+        assert result.agent_name == "pm"
+        assert result.message == ""
+
+    def test_backward_compatibility_colon_still_works(self):
+        """Existing colon-based mentions continue to work."""
+        result = parse_command("@squadron-dev pm: please help")
+        assert result is not None
+        assert result.is_help is False
+        assert result.agent_name == "pm"
+        assert result.message == "please help"
+
+    def test_mention_with_hyphen_without_colon(self):
+        """Agent names with hyphens work without colon."""
+        result = parse_command("@squadron-dev feat-dev implement this")
+        assert result is not None
+        assert result.agent_name == "feat-dev"
+        assert result.message == "implement this"
+
+    def test_unknown_agent_without_colon_not_matched(self):
+        """@squadron-dev unknown-agent without colon should not match."""
+        result = parse_command("@squadron-dev unknownagent please help")
         assert result is None
+
+    def test_organization_mention_not_matched(self):
+        """Random text with @squadron-dev should not match."""
+        result = parse_command("The @squadron-dev organization is great")
+        assert result is None
+    
+    def test_issue_56_scenario(self):
+        """The exact scenario from issue #56 should now work."""
+        result = parse_command("@squadron-dev pm Issue #56 can be marked as resolved")
+        assert result is not None
+        assert result.agent_name == "pm"
+        assert result.message == "Issue #56 can be marked as resolved"
 
     def test_help_with_trailing_text(self):
         """@squadron-dev help followed by other text still matches."""

@@ -167,10 +167,10 @@ class SquadronEvent(BaseModel):
 # The GitHub org 'squadron-dev' is owned by the project.
 BOT_MENTION = "squadron-dev"
 
-# Matches @squadron-dev <agent>: <message> syntax
+# Matches @squadron-dev <agent>: <message> or @squadron-dev <agent> <message> syntax
 # Groups: (1) agent name, (2) message
 _COMMAND_RE = re.compile(
-    rf"@{BOT_MENTION}\s+([\w][\w-]*):\s*(.*)",
+    rf"@{BOT_MENTION}\s+([\w][\w-]*):?\s*(.*)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -210,6 +210,19 @@ def parse_command(text: str) -> ParsedCommand | None:
     if match:
         agent_name = match.group(1).lower()
         message = match.group(2).strip()
-        return ParsedCommand(agent_name=agent_name, message=message)
+        
+        # Define known agent names (from .squadron/config.yaml)
+        known_agents = {
+            'pm', 'bug-fix', 'feat-dev', 'docs-dev', 'infra-dev', 
+            'security-review', 'test-coverage', 'pr-review'
+        }
+        
+        # If there's a colon in the match, it's definitely a command
+        # If no colon, validate that it's a known agent name
+        match_text = text[match.start():match.end()]
+        has_colon = ':' in match_text
+        
+        if has_colon or agent_name in known_agents:
+            return ParsedCommand(agent_name=agent_name, message=message)
 
     return None
