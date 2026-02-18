@@ -85,7 +85,7 @@ class AgentManager:
 
         # Per-agent duration watchdog tasks (D-10: background timer enforcement)
         self._watchdog_tasks: dict[str, asyncio.Task] = {}
-        
+
         # Track watchdog success/failure for monitoring (fix for issue #51)
         self._watchdog_enforced: set[str] = set()
 
@@ -1446,15 +1446,6 @@ class AgentManager:
         )
         # Mark that watchdog caught this timeout (not reconciliation)
         self._watchdog_enforced.add(agent_id)
-
-        # Log watchdog activation for monitoring  
-
-        logger.info(
-            "Watchdog timeout enforcement: agent_id=%s, role=%s, max_seconds=%d",
-            agent_id,
-            "unknown",  # TODO: pass role to watchdog
-            max_seconds,
-        )
 
         # Cancel the agent task and WAIT for it to actually stop (fix race condition)
         agent_task = self._agent_tasks.get(agent_id)
