@@ -53,26 +53,27 @@ class CopilotAgent:
 
     async def start(self) -> None:
         """Start the underlying CopilotClient (spawns CLI subprocess).
-        
+
         Includes retry logic for transient ping verification timeouts
         during startup (Issue #38).
         """
         max_retries = 3
         retry_delay = 2.0  # seconds
-        
+
         for attempt in range(max_retries + 1):
             try:
                 self._client = CopilotClient({"cwd": self.working_directory})
                 await self._client.start()
                 logger.info("CopilotClient started (cwd=%s)", self.working_directory)
                 return
-            except asyncio.TimeoutError as e:
+            except asyncio.TimeoutError:
                 if attempt < max_retries:
-                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                    wait_time = retry_delay * (2**attempt)  # Exponential backoff
                     logger.warning(
                         "CopilotClient startup attempt %d failed with timeout, "
                         "retrying in %.1fs (resource contention)",
-                        attempt + 1, wait_time
+                        attempt + 1,
+                        wait_time,
                     )
                     await asyncio.sleep(wait_time)
                     # Clean up failed client
@@ -86,7 +87,7 @@ class CopilotAgent:
                     logger.error(
                         "CopilotClient startup failed after %d attempts, "
                         "likely due to resource contention or CLI server issues",
-                        max_retries + 1
+                        max_retries + 1,
                     )
                     raise
 

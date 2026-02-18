@@ -798,7 +798,7 @@ class AgentManager:
         if agent_id not in self.agent_inboxes:
             self.agent_inboxes[agent_id] = asyncio.Queue()
 
-# Ensure CopilotAgent instance exists (may need restart after server restart)
+        # Ensure CopilotAgent instance exists (may need restart after server restart)
         if agent_id not in self._copilot_agents:
             # Check if agent has a worktree path and if it exists
             working_directory = self.repo_root
@@ -807,9 +807,7 @@ class AgentManager:
                 if not worktree_path.exists():
                     # Worktree is missing - recreate it
                     logger.warning(
-                        "Worktree missing for agent %s at %s - recreating",
-                        agent_id,
-                        worktree_path
+                        "Worktree missing for agent %s at %s - recreating", agent_id, worktree_path
                     )
                     try:
                         # Recreate the worktree using existing infrastructure
@@ -818,20 +816,18 @@ class AgentManager:
                         await self.registry.update_agent(agent)
                         working_directory = new_worktree_path
                         logger.info(
-                            "Recreated worktree for agent %s: %s",
-                            agent_id,
-                            new_worktree_path
+                            "Recreated worktree for agent %s: %s", agent_id, new_worktree_path
                         )
                     except Exception as e:
                         logger.error(
                             "Failed to recreate worktree for agent %s: %s - using repo root",
                             agent_id,
-                            e
+                            e,
                         )
                         working_directory = self.repo_root
                 else:
                     working_directory = worktree_path
-            
+
             copilot = CopilotAgent(
                 runtime_config=self.config.runtime,
                 working_directory=str(working_directory),

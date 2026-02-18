@@ -6,23 +6,21 @@ recreating them instead of failing with FileNotFoundError.
 """
 
 import pytest
-import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
-from tempfile import TemporaryDirectory
 
 # Note: This test requires the pytest environment to be properly configured
 # For now, it serves as documentation of the test case that should be run
 # when the full test suite is available.
 
+
 @pytest.mark.asyncio
 async def test_wake_agent_recreates_missing_worktree():
     """
     Regression test for issue #39.
-    
+
     Verify that wake_agent() handles missing worktree directories gracefully
     by detecting the missing directory and recreating it using _create_worktree().
-    
+
     This test demonstrates the bug fix for the scenario where:
     1. An agent record exists with a worktree_path
     2. The worktree directory has been deleted (cleanup, restart, etc.)
@@ -35,30 +33,29 @@ async def test_wake_agent_recreates_missing_worktree():
     # 3. Agent record is updated with new worktree path
     # 4. CopilotAgent is started with valid working directory
     # 5. Error handling fallback to repo_root works correctly
-    
+
     pass  # Implementation requires full test environment
 
 
 def test_worktree_path_validation():
     """Test the core logic for worktree path validation and handling."""
     # Simple validation test that can run without full environment
-    from pathlib import Path
     import tempfile
-    
+
     with tempfile.TemporaryDirectory() as tmpdir:
         # Test case 1: Missing worktree should be detected
         missing_path = Path(tmpdir) / "missing"
         assert not missing_path.exists()
-        
+
         # Test case 2: Existing worktree should be used
         existing_path = Path(tmpdir) / "existing"
         existing_path.mkdir()
         assert existing_path.exists()
-        
+
         # Test case 3: Fallback logic
         repo_root = Path(tmpdir) / "repo"
         repo_root.mkdir()
-        
+
         # Simulate the logic from our fix
         def get_working_directory(worktree_path_str, repo_root_path):
             if worktree_path_str:
@@ -70,14 +67,14 @@ def test_worktree_path_validation():
                     return repo_root_path
             else:
                 return repo_root_path
-        
+
         # Verify the logic works correctly
         result1 = get_working_directory(str(missing_path), repo_root)
         assert result1 == repo_root
-        
+
         result2 = get_working_directory(str(existing_path), repo_root)
         assert result2 == existing_path
-        
+
         result3 = get_working_directory(None, repo_root)
         assert result3 == repo_root
 

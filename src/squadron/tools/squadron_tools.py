@@ -125,10 +125,10 @@ class CommentOnIssueParams(BaseModel):
     body: str = Field(description="Comment body (markdown supported)")
 
 
-
 class CommentOnPRParams(BaseModel):
     pr_number: int = Field(description="The pull request number to comment on")
     body: str = Field(description="Comment body (markdown supported)")
+
 
 class SubmitPRReviewParams(BaseModel):
     pr_number: int = Field(description="The pull request number to review")
@@ -662,18 +662,18 @@ class SquadronTools:
         """Read a GitHub issue's full details including all comments with usernames."""
         # Fetch issue details
         issue = await self.github.get_issue(self.owner, self.repo, params.issue_number)
-        
+
         # Fetch all comments
         comments = await self.github.list_issue_comments(
             self.owner, self.repo, params.issue_number, per_page=100
         )
-        
+
         # Format basic issue details
         labels = ", ".join(lbl.get("name", "") for lbl in issue.get("labels", []))
         assignees = ", ".join(a.get("login", "") for a in issue.get("assignees", []))
         issue_creator = issue.get("user", {}).get("login", "unknown")
         created_at = issue.get("created_at", "")[:16] if issue.get("created_at") else "unknown"
-        
+
         # Start with issue details
         result_parts = [
             f"**#{issue['number']}:** {issue.get('title', 'N/A')}",
@@ -681,24 +681,25 @@ class SquadronTools:
             f"**Created by:** {issue_creator} ({created_at})",
             f"**Labels:** {labels or 'none'}",
             f"**Assignees:** {assignees or 'none'}",
-            f"**Body:**\n{issue.get('body', '') or '(empty)'}"
+            f"**Body:**\n{issue.get('body', '') or '(empty)'}",
         ]
-        
+
         # Add comments section if any exist
         if comments:
             result_parts.append(f"\n**Comments ({len(comments)}):**")
             for comment in comments:
                 comment_user = comment.get("user", {}).get("login", "unknown")
-                comment_created = comment.get("created_at", "")[:16] if comment.get("created_at") else "unknown"
+                comment_created = (
+                    comment.get("created_at", "")[:16] if comment.get("created_at") else "unknown"
+                )
                 comment_body = comment.get("body", "").strip()
-                
+
                 result_parts.append(f"\n**{comment_user}** ({comment_created}):")
                 result_parts.append(comment_body if comment_body else "(empty comment)")
         else:
             result_parts.append("\n**Comments:** None")
-        
-        return "\n".join(result_parts)
 
+        return "\n".join(result_parts)
 
     async def check_registry(self, agent_id: str, params: CheckRegistryParams) -> str:
         """Query the agent registry for active agents and their status."""
@@ -1209,12 +1210,12 @@ class SquadronTools:
             "Post a comment on a GitHub issue. Use to communicate progress, ask clarifying questions, or post status updates.",
             CommentOnIssueParams,
             tools.comment_on_issue,
+        )
         _register(
             "comment_on_pr",
             "Post a comment on a GitHub pull request. Use to communicate progress, ask clarifying questions, or post status updates on PRs.",
             CommentOnPRParams,
             tools.comment_on_pr,
-        )
         )
         _register(
             "submit_pr_review",

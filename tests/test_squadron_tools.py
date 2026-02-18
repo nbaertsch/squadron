@@ -63,7 +63,7 @@ async def tools(registry):
             "labels": [{"name": "feature"}],
             "assignees": [{"login": "user1"}],
             "user": {"login": "issue-creator"},
-            "created_at": "2024-01-15T10:30:00Z"
+            "created_at": "2024-01-15T10:30:00Z",
         }
     )
     github.list_issue_comments = AsyncMock(
@@ -71,13 +71,13 @@ async def tools(registry):
             {
                 "user": {"login": "commenter1"},
                 "created_at": "2024-01-15T11:00:00Z",
-                "body": "This is a comment"
+                "body": "This is a comment",
             },
             {
-                "user": {"login": "commenter2"}, 
+                "user": {"login": "commenter2"},
                 "created_at": "2024-01-15T12:00:00Z",
-                "body": "Another comment"
-            }
+                "body": "Another comment",
+            },
         ]
     )
     github.submit_pr_review = AsyncMock(return_value={"id": 100})
@@ -313,13 +313,13 @@ class TestReadIssue:
         tools.github.list_issue_comments.assert_called_once_with(
             "testowner", "testrepo", 42, per_page=100
         )
-        
+
         # Check that issue details are present
         assert "Test Issue" in result
         assert "feature" in result
         assert "issue-creator" in result
         assert "2024-01-15T10:30" in result
-        
+
         # Check that comments are included
         assert "Comments (2)" in result
         assert "commenter1" in result
@@ -330,13 +330,13 @@ class TestReadIssue:
     async def test_reads_issue_with_no_comments(self, tools, agent):
         # Mock no comments scenario
         tools.github.list_issue_comments.return_value = []
-        
+
         params = ReadIssueParams(issue_number=42)
         result = await tools.read_issue("test-agent-1", params)
 
         tools.github.get_issue.assert_called()
         tools.github.list_issue_comments.assert_called()
-        
+
         assert "Test Issue" in result
         assert "issue-creator" in result
         assert "**Comments:** None" in result
@@ -445,7 +445,7 @@ class TestPreSleepHook:
 
 class TestConstants:
     def test_all_tool_names_count(self):
-        assert len(ALL_TOOL_NAMES) == 28
+        assert len(ALL_TOOL_NAMES) == 29  # Updated: added comment_on_pr tool
 
     def test_git_push_in_all_tools(self):
         """git_push should be available for explicit selection."""
