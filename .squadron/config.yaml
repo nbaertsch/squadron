@@ -161,6 +161,10 @@ circuit_breakers:
       max_active_duration: 1800
       max_tool_calls: 100
       max_turns: 20
+    infra-dev:
+      max_active_duration: 10800  # 3 hours - infrastructure work can be complex
+      max_tool_calls: 200
+      max_turns: 50
 commands:
   help:
     enabled: true
