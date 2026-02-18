@@ -1047,6 +1047,20 @@ class AgentManager:
             action,
             workflow_run_id,
         )
+
+        # Log activity event (same as create_agent does)
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_spawned",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            content=f"Workflow agent spawned: role={role}, stage={stage_name}, run={workflow_run_id}",
+            role=role,
+            lifecycle="workflow",
+            stage=stage_name,
+            workflow_run_id=workflow_run_id,
+        )
+
         return agent_id
 
     async def _run_agent(
