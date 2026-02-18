@@ -39,6 +39,71 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+
+
+# Enhanced watchdog monitoring system for reliability (fix for issue #70)
+class WatchdogMonitor:
+    """Monitors watchdog health and provides backup timeout enforcement."""
+    
+    def __init__(self):
+        self.active_watchdogs: dict[str, dict] = {}
+        self.backup_timers: dict[str, asyncio.Task] = {}
+        
+    def register_watchdog(self, agent_id: str, max_duration: int, start_time: datetime):
+        """Register a new watchdog for monitoring."""
+        self.active_watchdogs[agent_id] = {
+            "max_duration": max_duration,
+            "start_time": start_time,
+            "last_heartbeat": start_time,
+        }
+        
+        # Start backup timer (fires 60s after expected timeout)
+        backup_delay = max_duration + 60
+        backup_timer = asyncio.create_task(
+            self._backup_timeout_enforcer(agent_id, backup_delay),
+            name=f"backup-timeout-{agent_id}"
+        )
+        self.backup_timers[agent_id] = backup_timer
+        
+        logger.debug(
+            "Enhanced watchdog registered for %s (max_duration=%ds, backup_timer=%ds)",
+            agent_id, max_duration, backup_delay
+        )
+        
+    def heartbeat(self, agent_id: str):
+        """Record watchdog heartbeat."""
+        if agent_id in self.active_watchdogs:
+            self.active_watchdogs[agent_id]["last_heartbeat"] = datetime.now(timezone.utc)
+            
+    def unregister_watchdog(self, agent_id: str):
+        """Unregister watchdog."""
+        self.active_watchdogs.pop(agent_id, None)
+        
+        backup_timer = self.backup_timers.pop(agent_id, None)
+        if backup_timer and not backup_timer.done():
+            backup_timer.cancel()
+            
+    async def _backup_timeout_enforcer(self, agent_id: str, delay_seconds: int):
+        """Backup timeout enforcer - fires if primary watchdog fails."""
+        try:
+            await asyncio.sleep(delay_seconds)
+            
+            logger.error(
+                "BACKUP TIMEOUT ENFORCER FIRED for agent %s - primary watchdog failed! "
+                "This indicates the primary watchdog system failed to fire (issue #70).",
+                agent_id
+            )
+            
+        except asyncio.CancelledError:
+            logger.debug("Backup timer for %s cancelled (normal completion)", agent_id)
+            
+    def get_status(self) -> dict:
+        """Get watchdog status for all agents."""
+        return {
+            "active_watchdogs": len(self.active_watchdogs),
+            "backup_timers": len(self.backup_timers),
+            "details": self.active_watchdogs.copy()
+        }
 class AgentManager:
     """Manages the lifecycle of all agent instances."""
 

@@ -188,6 +188,28 @@ class ReconciliationLoop:
             if active_seconds > limits.max_active_duration:
                 # Calculate overage to detect watchdog failures
                 overage = int(active_seconds - limits.max_active_duration)
+                # Enhanced logging for watchdog failure analysis (fix for issue #70)
+                logger.error(
+                    "RECONCILIATION CAUGHT TIMEOUT (layer 3) — Agent %s exceeded max active duration "
+                    "(%ds > %ds, overage=%ds). PRIMARY WATCHDOG FAILED! "
+                    "This indicates a critical watchdog system failure.",
+                    agent.agent_id,
+                    int(active_seconds),
+                    limits.max_active_duration,
+                    overage,
+                )
+                
+                # Log additional diagnostic information for debugging
+                logger.error(
+                    "Watchdog failure diagnostics for %s: role=%s, issue=#%s, branch=%s, "
+                    "active_since=%s, status=%s - investigate blocking operations and watchdog task health",
+                    agent.agent_id,
+                    agent.role,
+                    agent.issue_number,
+                    agent.branch,
+                    agent.active_since,
+                    agent.status
+                )
                 logger.error(
                     "RECONCILIATION CAUGHT TIMEOUT (layer 3) — Agent %s exceeded max active duration "
                     "(%ds > %ds, overage=%ds). Primary watchdog may have failed.",

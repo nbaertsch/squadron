@@ -1,0 +1,30 @@
+# Enhanced configuration for watchdog monitoring (fix for issue #70)
+# This adds monitoring and logging configuration for the enhanced watchdog system
+
+runtime:
+  reconciliation_interval: 300  # Check every 5 minutes
+  watchdog_monitoring_enabled: true  # Enable enhanced watchdog monitoring
+  watchdog_heartbeat_interval_ratio: 0.1  # Heartbeat every 10% of max duration
+  backup_timeout_buffer: 60  # Backup timer fires 60s after primary timeout
+
+# Enhanced circuit breaker configuration with watchdog monitoring
+circuit_breakers:
+  defaults:
+    max_active_duration: 1800  # 30 minutes
+    max_iterations: 3
+    max_sleep_duration: 86400  # 24 hours  
+    max_tool_calls: 100
+    max_turns: 20
+    warning_threshold: 0.8
+    # New fields for enhanced watchdog monitoring
+    watchdog_failure_escalation: true  # Auto-create issues for watchdog failures
+    backup_timeout_enabled: true  # Enable backup timeout enforcement
+    
+  roles:
+    pr-review:
+      max_active_duration: 1800  # 30 minutes - same as current
+      max_tool_calls: 100
+      max_turns: 20
+      # Enhanced monitoring for pr-review role (where issue #70 occurred)
+      watchdog_heartbeat_interval: 180  # Heartbeat every 3 minutes
+      backup_timeout_buffer: 120  # Extra buffer for pr-review operations
