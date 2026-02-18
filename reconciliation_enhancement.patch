@@ -1,0 +1,45 @@
+--- a/src/squadron/reconciliation.py
++++ b/src/squadron/reconciliation.py
+@@ -186,8 +186,24 @@ class ReconciliationLoop:
+ 
+             # Hard limit
+             if active_seconds > limits.max_active_duration:
+-                # Calculate overage to detect watchdog failures
++                # Calculate overage and determine if this indicates watchdog failure
+                 overage = int(active_seconds - limits.max_active_duration)
++                
++                # Classify the timeout failure for better monitoring
++                watchdog_failure_indicators = []
++                if overage > 60:  # Significant overage suggests primary watchdog failed
++                    watchdog_failure_indicators.append("high-overage")
++                if overage > 300:  # Very high overage indicates serious watchdog failure  
++                    watchdog_failure_indicators.append("critical-overage")
++                
++                # Role-specific failure analysis
++                if agent.role == "pr-review" and overage > 180:
++                    watchdog_failure_indicators.append("pr-review-stuck")
++                
++                failure_context = ""
++                if watchdog_failure_indicators:
++                    failure_context = f" (failure indicators: {', '.join(watchdog_failure_indicators)})"
++                
+                 logger.error(
+                     "RECONCILIATION CAUGHT TIMEOUT (layer 3) — Agent %s exceeded max active duration "
+                     "(%ds > %ds, overage=%ds). Primary watchdog may have failed.",
+@@ -218,7 +234,15 @@ class ReconciliationLoop:
+                                 "Please investigate and take manual action.\n\n"
+                                 "_Timeout enforced by: reconciliation loop (layer 3)_"
+                             ),
+-                            labels=["needs-human", "escalation", "watchdog-failure"],
++                            labels=[
++                                "needs-human", 
++                                "infrastructure", 
++                                "critical",
++                                "escalation", 
++                                "watchdog-failure"
++                            ] + (["critical-watchdog-failure"] if overage > 300 else [])
++                              + (["pr-review-timeout"] if agent.role == "pr-review" else [])
++                              + (["infra-dev-timeout"] if agent.role == "infra-dev" else []),
+                         )
+                     except Exception:
+                         logger.exception(

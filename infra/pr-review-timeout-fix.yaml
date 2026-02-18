@@ -1,0 +1,86 @@
+# Configuration enhancement for pr-review agent timeout reliability
+# Addresses issue #53: pr-review-issue-51 exceeded max active duration
+
+# Enhanced circuit breaker configuration with improved pr-review settings
+circuit_breakers:
+  defaults:
+    max_active_duration: 7200
+    max_iterations: 5  
+    max_sleep_duration: 86400
+    max_tool_calls: 200
+    max_turns: 50
+    warning_threshold: 0.8
+    
+  roles:
+    pm:
+      max_active_duration: 600
+      max_tool_calls: 50
+      max_turns: 10
+      
+    # Enhanced pr-review configuration to reduce timeout failures
+    pr-review:
+      max_active_duration: 2400  # Increased from 1800 (30m) to 2400 (40m)  
+      max_tool_calls: 120        # Increased from 100 to handle complex reviews
+      max_turns: 25              # Increased from 20 for thorough review discussions
+      warning_threshold: 0.75    # Earlier warning at 75% (30m mark)
+      cleanup_timeout: 60        # Extended cleanup for Git operations
+      
+    security-review:
+      max_active_duration: 2100  # Slightly increased for security analysis
+      max_tool_calls: 120
+      max_turns: 25
+      warning_threshold: 0.75
+      cleanup_timeout: 60
+      
+    test-coverage:
+      max_active_duration: 2400  # Increased for complex test analysis  
+      max_tool_calls: 120
+      max_turns: 25
+      warning_threshold: 0.75
+      cleanup_timeout: 45
+      
+    infra-dev:
+      max_active_duration: 10800  # Keep existing 3-hour limit
+      max_tool_calls: 200
+      max_turns: 50
+      cleanup_timeout: 90         # Extended for infrastructure operations
+
+# Enhanced reconciliation monitoring  
+runtime:
+  reconciliation_interval: 300  # Keep 5-minute interval
+  
+  # New monitoring configuration
+  watchdog_monitoring:
+    enabled: true
+    failure_threshold: 3          # Alert after 3 failures per role
+    overage_alert_threshold: 120  # Alert if overage > 2 minutes
+    cleanup_timeout_alert: true   # Alert on cleanup timeouts
+    
+  # Enhanced timeout logging
+  timeout_logging:
+    include_failure_classification: true
+    log_watchdog_health: true
+    track_role_patterns: true
+
+# Alert configuration for watchdog failures  
+escalation:
+  default_notify: maintainers
+  escalation_labels:
+    - needs-human
+    - escalation
+    
+  # Enhanced labels for timeout issues
+  timeout_labels:
+    watchdog_failure: 
+      - watchdog-failure
+      - infrastructure
+      - critical
+    pr_review_timeout:
+      - pr-review-timeout  
+      - needs-review-process-fix
+    critical_overage:
+      - critical-watchdog-failure
+      - immediate-attention
+      
+  max_issue_depth: 3
+
