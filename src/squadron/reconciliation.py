@@ -188,13 +188,19 @@ class ReconciliationLoop:
             if active_seconds > limits.max_active_duration:
                 # Calculate overage to detect watchdog failures
                 overage = int(active_seconds - limits.max_active_duration)
+                
+                # Detect if this is a watchdog failure (>60s overage suggests watchdog didn't fire)
+                watchdog_failed = overage > 60
+                failure_type = "PRIMARY WATCHDOG FAILED" if watchdog_failed else "Normal reconciliation catch"
+                
                 logger.error(
                     "RECONCILIATION CAUGHT TIMEOUT (layer 3) — Agent %s exceeded max active duration "
-                    "(%ds > %ds, overage=%ds). Primary watchdog may have failed.",
+                    "(%ds > %ds, overage=%ds). %s",
                     agent.agent_id,
                     int(active_seconds),
                     limits.max_active_duration,
                     overage,
+                    failure_type,
                 )
                 agent.status = AgentStatus.ESCALATED
                 await self.registry.update_agent(agent)
@@ -212,13 +218,12 @@ class ReconciliationLoop:
                                 f"limit of {limits.max_active_duration}s.\n\n"
                                 f"**Issue:** #{agent.issue_number}\n"
                                 f"**Branch:** {agent.branch}\n\n"
-                                f"**Overage:** {overage}s (timeout detected by reconciliation, "
-                                f"not primary watchdog — investigate watchdog failure)\n\n"
+                                f"**Overage:** {overage}s ({'PRIMARY WATCHDOG FAILED' if watchdog_failed else 'normal reconciliation timeout'})\n\n"
                                 "The agent has been escalated and stopped. "
                                 "Please investigate and take manual action.\n\n"
                                 "_Timeout enforced by: reconciliation loop (layer 3)_"
                             ),
-                            labels=["needs-human", "escalation", "watchdog-failure"],
+                            labels=["needs-human", "escalation"] + (["watchdog-failure", "critical"] if watchdog_failed else ["timeout"]),
                         )
                     except Exception:
                         logger.exception(
