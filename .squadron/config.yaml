@@ -20,7 +20,7 @@ agent_roles:
       condition:
         merged: false
       event: pull_request.closed
-    - action: complete
+    - action: wake
       condition:
         merged: true
       event: pull_request.closed
@@ -36,7 +36,7 @@ agent_roles:
       condition:
         review_state: changes_requested
       event: pull_request_review.submitted
-    - action: complete
+    - action: wake
       condition:
         merged: true
       event: pull_request.closed
@@ -64,7 +64,7 @@ agent_roles:
       condition:
         merged: false
       event: pull_request.closed
-    - action: complete
+    - action: wake
       condition:
         merged: true
       event: pull_request.closed
@@ -80,7 +80,7 @@ agent_roles:
       condition:
         review_state: changes_requested
       event: pull_request_review.submitted
-    - action: complete
+    - action: wake
       condition:
         merged: true
       event: pull_request.closed
