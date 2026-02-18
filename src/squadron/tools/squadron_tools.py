@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 if TYPE_CHECKING:
     import asyncio
 
+    from squadron.activity import ActivityLogger
     from squadron.config import AgentDefinition, SquadronConfig
     from squadron.github_client import GitHubClient
     from squadron.models import AgentRecord
@@ -306,6 +307,7 @@ class SquadronTools:
         git_push_callback: Callable[[AgentRecord, bool], Awaitable[tuple[int, str, str]]]
         | None = None,
         auto_merge_callback: Callable[[int], Awaitable[None]] | None = None,
+        activity_logger: ActivityLogger | None = None,
     ):
         self.registry = registry
         self.github = github
@@ -317,6 +319,7 @@ class SquadronTools:
         self._pre_sleep_hook = pre_sleep_hook
         self._git_push_callback = git_push_callback
         self._auto_merge_callback = auto_merge_callback
+        self.activity_logger = activity_logger
 
     def _agent_signature(self, role: str) -> str:
         """Build the agent signature prefix: emoji + display_name on its own line.
@@ -332,6 +335,35 @@ class SquadronTools:
             emoji = "🤖"
             display_name = role
         return f"{emoji} **{display_name}**\n\n"
+
+    async def _log_activity(
+        self,
+        agent_id: str,
+        event_type: str,
+        issue_number: int | None = None,
+        pr_number: int | None = None,
+        content: str | None = None,
+        tool_name: str | None = None,
+        **metadata,
+    ) -> None:
+        """Log an activity event if activity logger is configured."""
+        if self.activity_logger is None:
+            return
+        try:
+            from squadron.activity import ActivityEvent, ActivityEventType
+
+            event = ActivityEvent(
+                agent_id=agent_id,
+                event_type=ActivityEventType(event_type),
+                issue_number=issue_number,
+                pr_number=pr_number,
+                content=content,
+                tool_name=tool_name,
+                metadata=metadata,
+            )
+            await self.activity_logger.log(event)
+        except Exception:
+            logger.debug("Failed to log activity event", exc_info=True)
 
     # ── Framework Tools (agent lifecycle) ────────────────────────────────
 
@@ -384,6 +416,17 @@ class SquadronTools:
         agent.active_since = None
         await self.registry.update_agent(agent)
 
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_sleeping",
+            issue_number=agent.issue_number,
+            pr_number=agent.pr_number,
+            content=f"Blocked by #{params.blocker_issue}: {params.reason}",
+            tool_name="report_blocked",
+            blocker_issue=params.blocker_issue,
+        )
+
         # Post comment on the agent's issue
         if agent.issue_number:
             await self.github.comment_on_issue(
@@ -410,6 +453,16 @@ class SquadronTools:
         agent.status = AgentStatus.COMPLETED
         agent.active_since = None
         await self.registry.update_agent(agent)
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_completed",
+            issue_number=agent.issue_number,
+            pr_number=agent.pr_number,
+            content=f"Task complete: {params.summary}",
+            tool_name="report_complete",
+        )
 
         # Post completion comment
         if agent.issue_number:
@@ -467,6 +520,27 @@ class SquadronTools:
         agent.active_since = None
         await self.registry.update_agent(agent)
 
+        # Log activity - issue created
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="github_issue_created",
+            issue_number=agent.issue_number,
+            content=f"Created blocker issue #{new_issue_number}: {params.title}",
+            tool_name="create_blocker_issue",
+            new_issue_number=new_issue_number,
+        )
+
+        # Log activity - going to sleep
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_sleeping",
+            issue_number=agent.issue_number,
+            pr_number=agent.pr_number,
+            content=f"Blocked by #{new_issue_number}: {params.title}",
+            tool_name="create_blocker_issue",
+            blocker_issue=new_issue_number,
+        )
+
         # Comment on original issue
         if agent.issue_number:
             await self.github.comment_on_issue(
@@ -492,6 +566,18 @@ class SquadronTools:
         agent.status = AgentStatus.ESCALATED
         agent.active_since = None
         await self.registry.update_agent(agent)
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_escalated",
+            issue_number=agent.issue_number,
+            pr_number=agent.pr_number,
+            content=f"Escalated: {params.reason}",
+            tool_name="escalate_to_human",
+            category=params.category,
+            reason=params.reason,
+        )
 
         if agent.issue_number:
             try:
@@ -573,6 +659,19 @@ class SquadronTools:
                 elif not is_ready:
                     merge_status = f" Merge blocked: {', '.join(missing)}"
 
+        # Log activity
+        agent = await self.registry.get_agent(agent_id)
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="github_review",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=params.pr_number,
+            content=f"Submitted {params.event} review on PR #{params.pr_number}",
+            tool_name="submit_pr_review",
+            review_event=params.event,
+            review_id=review_id,
+        )
+
         return f"Submitted {params.event} review (id={review_id}) on PR #{params.pr_number}.{merge_status}"
 
     async def open_pr(self, agent_id: str, params: OpenPRParams) -> str:
@@ -592,6 +691,18 @@ class SquadronTools:
         if agent and isinstance(pr_number, int):
             agent.pr_number = pr_number
             await self.registry.update_agent(agent)
+
+            # Log activity
+            await self._log_activity(
+                agent_id=agent_id,
+                event_type="github_pr_opened",
+                issue_number=agent.issue_number,
+                pr_number=pr_number,
+                content=f"Opened PR #{pr_number}: {params.title}",
+                tool_name="open_pr",
+                head=params.head,
+                base=params.base,
+            )
 
         return f"Opened PR #{pr_number}: {params.title}"
 
@@ -1111,6 +1222,17 @@ class SquadronTools:
             params.issue_number,
             f"{prefix}{params.body}",
         )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="github_comment",
+            issue_number=params.issue_number,
+            pr_number=agent.pr_number if agent else None,
+            content=f"Commented on issue #{params.issue_number}",
+            tool_name="comment_on_issue",
+        )
+
         return f"Posted comment on #{params.issue_number}"
 
     async def comment_on_pr(self, agent_id: str, params: CommentOnPRParams) -> str:
@@ -1124,6 +1246,17 @@ class SquadronTools:
             params.pr_number,
             f"{prefix}{params.body}",
         )
+
+        # Log activity
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="github_comment",
+            issue_number=agent.issue_number if agent else None,
+            pr_number=params.pr_number,
+            content=f"Commented on PR #{params.pr_number}",
+            tool_name="comment_on_pr",
+        )
+
         return f"Posted comment on PR #{params.pr_number}"
 
     # ── Tool Selection ───────────────────────────────────────────────────

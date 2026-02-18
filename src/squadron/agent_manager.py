@@ -24,6 +24,7 @@ from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEve
 from squadron.tools.squadron_tools import SquadronTools
 
 if TYPE_CHECKING:
+    from squadron.activity import ActivityLogger
     from squadron.config import (
         AgentDefinition,
         CircuitBreakerDefaults,
@@ -49,6 +50,7 @@ class AgentManager:
         router: EventRouter,
         agent_definitions: dict[str, AgentDefinition],
         repo_root: Path,
+        activity_logger: ActivityLogger | None = None,
     ):
         self.config = config
         self.registry = registry
@@ -56,6 +58,7 @@ class AgentManager:
         self.router = router
         self.agent_definitions = agent_definitions
         self.repo_root = repo_root
+        self.activity_logger = activity_logger
 
         # Per-agent inboxes for event delivery
         self.agent_inboxes: dict[str, asyncio.Queue[SquadronEvent]] = {}
@@ -103,6 +106,34 @@ class AgentManager:
     def set_workflow_engine(self, engine: WorkflowEngine) -> None:
         """Attach the workflow engine for event-driven pipeline triggers."""
         self._workflow_engine = engine
+
+    async def _log_activity(
+        self,
+        agent_id: str,
+        event_type: str,
+        issue_number: int | None = None,
+        pr_number: int | None = None,
+        content: str | None = None,
+        **metadata: Any,
+    ) -> None:
+        """Log an activity event if activity logger is configured."""
+        if self.activity_logger is None:
+            return
+        try:
+            from squadron.activity import ActivityEvent, ActivityEventType
+
+            event = ActivityEvent(
+                agent_id=agent_id,
+                event_type=ActivityEventType(event_type),
+                issue_number=issue_number,
+                pr_number=pr_number,
+                content=content,
+                metadata=metadata,
+            )
+            await self.activity_logger.log(event)
+        except Exception:
+            # Activity logging should never break agent execution
+            logger.debug("Failed to log activity event", exc_info=True)
 
     async def start(self) -> None:
         """Start the agent manager — register config-driven event handlers."""
@@ -769,6 +800,19 @@ class AgentManager:
             role_config.lifecycle if role_config else "persistent",
             branch,
         )
+
+        # Log activity event
+        self.last_spawn_time = datetime.now(timezone.utc).isoformat()
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_spawned",
+            issue_number=issue_number,
+            content=f"Agent spawned: role={role}, branch={branch}",
+            role=role,
+            lifecycle=role_config.lifecycle if role_config else "persistent",
+            branch=branch,
+        )
+
         return record
 
     async def wake_agent(self, agent_id: str, trigger_event: SquadronEvent) -> None:
@@ -847,6 +891,17 @@ class AgentManager:
 
         logger.info("Woke agent %s (trigger: %s)", agent_id, trigger_event.event_type)
 
+        # Log activity event
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_woke",
+            issue_number=agent.issue_number,
+            pr_number=agent.pr_number,
+            content=f"Agent woke from sleep (trigger: {trigger_event.event_type.value})",
+            trigger=trigger_event.event_type.value,
+            iteration=agent.iteration_count,
+        )
+
     async def complete_agent(self, agent_id: str) -> None:
         """Mark an agent as COMPLETED and clean up its resources.
 
@@ -878,6 +933,15 @@ class AgentManager:
         # Update registry
         agent.status = AgentStatus.COMPLETED
         await self.registry.update_agent(agent)
+
+        # Log activity event
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_completed",
+            issue_number=agent.issue_number,
+            pr_number=agent.pr_number,
+            content="Agent completed (reconciliation cleanup)",
+        )
 
         # Clean up resources (but preserve branch for human use)
         await self._cleanup_agent(agent_id, destroy_session=True)
@@ -1415,6 +1479,18 @@ class AgentManager:
             except asyncio.TimeoutError:
                 logger.error("Timed out updating agent %s status to ESCALATED", agent_id)
 
+            # Log activity event
+            await self._log_activity(
+                agent_id=agent_id,
+                event_type="agent_escalated",
+                issue_number=agent.issue_number,
+                pr_number=agent.pr_number,
+                content=f"Agent escalated: exceeded max_active_duration ({max_seconds}s)",
+                reason="timeout",
+                max_seconds=max_seconds,
+                enforcement_layer="watchdog",
+            )
+
             # Post escalation comment on the issue (with bounded timeout)
             try:
                 await asyncio.wait_for(
@@ -1534,16 +1610,21 @@ class AgentManager:
         record: AgentRecord,
         cb_limits: "CircuitBreakerDefaults",
     ) -> dict[str, Any]:
-        """Build SDK hooks dict for circuit breaker Layer 1.
+        """Build SDK hooks dict for circuit breaker Layer 1 and activity logging.
 
         The on_pre_tool_use hook increments tool_call_count on the
         AgentRecord and denies tool use if the limit is exceeded.
+        Both hooks log activity events for real-time observability.
 
         Hook signature matches SDK PreToolUseHandler:
           (PreToolUseHookInput, dict[str, str]) -> PreToolUseHookOutput | None
         """
         registry = self.registry
         max_tool_calls = cb_limits.max_tool_calls
+        activity_logger = self.activity_logger
+
+        # Track tool start times for duration calculation
+        tool_start_times: dict[str, float] = {}
 
         async def on_pre_tool_use(
             hook_input: dict[str, Any], context: dict[str, str]
@@ -1554,8 +1635,41 @@ class AgentManager:
                 hook_input: PreToolUseHookInput with toolName, toolArgs, timestamp, cwd.
                 context: Session context metadata (key-value pairs).
             """
+            import time
+
             tool_name = hook_input.get("toolName", "unknown")
+            tool_args = hook_input.get("toolArgs", {})
+            tool_id = hook_input.get("toolUseId", str(time.time()))
             record.tool_call_count += 1
+
+            # Track start time for duration calculation
+            tool_start_times[tool_id] = time.time()
+
+            # Log tool call start activity
+            if activity_logger:
+                try:
+                    from squadron.activity import ActivityEvent, ActivityEventType
+
+                    # Truncate large tool args for logging
+                    logged_args = tool_args
+                    if isinstance(tool_args, dict):
+                        logged_args = {
+                            k: (v[:500] + "..." if isinstance(v, str) and len(v) > 500 else v)
+                            for k, v in tool_args.items()
+                        }
+
+                    event = ActivityEvent(
+                        agent_id=record.agent_id,
+                        event_type=ActivityEventType.TOOL_CALL_START,
+                        tool_name=tool_name,
+                        tool_args=logged_args,
+                        issue_number=record.issue_number,
+                        pr_number=record.pr_number,
+                        metadata={"tool_call_count": record.tool_call_count},
+                    )
+                    await activity_logger.log(event)
+                except Exception:
+                    logger.debug("Failed to log tool_call_start activity", exc_info=True)
 
             if record.tool_call_count > max_tool_calls:
                 logger.warning(
@@ -1567,6 +1681,23 @@ class AgentManager:
                 )
                 record.status = AgentStatus.ESCALATED
                 await registry.update_agent(record)
+
+                # Log circuit breaker triggered
+                if activity_logger:
+                    try:
+                        from squadron.activity import ActivityEvent, ActivityEventType
+
+                        event = ActivityEvent(
+                            agent_id=record.agent_id,
+                            event_type=ActivityEventType.CIRCUIT_BREAKER_TRIGGERED,
+                            content=f"Tool call limit exceeded ({record.tool_call_count}/{max_tool_calls})",
+                            issue_number=record.issue_number,
+                            metadata={"trigger": "max_tool_calls", "tool_name": tool_name},
+                        )
+                        await activity_logger.log(event)
+                    except Exception:
+                        pass
+
                 return {
                     "permissionDecision": "deny",
                     "permissionDecisionReason": f"Tool call limit exceeded ({max_tool_calls})",
@@ -1587,9 +1718,66 @@ class AgentManager:
                     max_tool_calls,
                 )
 
+                # Log circuit breaker warning
+                if activity_logger:
+                    try:
+                        from squadron.activity import ActivityEvent, ActivityEventType
+
+                        event = ActivityEvent(
+                            agent_id=record.agent_id,
+                            event_type=ActivityEventType.CIRCUIT_BREAKER_WARNING,
+                            content=f"Approaching tool call limit ({record.tool_call_count}/{max_tool_calls})",
+                            issue_number=record.issue_number,
+                            metadata={"threshold_percent": cb_limits.warning_threshold * 100},
+                        )
+                        await activity_logger.log(event)
+                    except Exception:
+                        pass
+
             return {"permissionDecision": "allow"}
 
-        return {"on_pre_tool_use": on_pre_tool_use}
+        async def on_post_tool_use(hook_input: dict[str, Any], context: dict[str, str]) -> None:
+            """Called after each tool invocation — logs completion with duration."""
+            import time
+
+            tool_name = hook_input.get("toolName", "unknown")
+            tool_result = hook_input.get("result", "")
+            tool_error = hook_input.get("error")
+            tool_id = hook_input.get("toolUseId", "")
+
+            # Calculate duration
+            start_time = tool_start_times.pop(tool_id, None)
+            duration_ms = int((time.time() - start_time) * 1000) if start_time else None
+
+            # Log tool call end activity
+            if activity_logger:
+                try:
+                    from squadron.activity import ActivityEvent, ActivityEventType
+
+                    # Truncate large results for logging
+                    logged_result = tool_result
+                    if isinstance(tool_result, str) and len(tool_result) > 1000:
+                        logged_result = tool_result[:1000] + "... (truncated)"
+
+                    event = ActivityEvent(
+                        agent_id=record.agent_id,
+                        event_type=ActivityEventType.TOOL_CALL_END,
+                        tool_name=tool_name,
+                        tool_result=logged_result,
+                        tool_success=tool_error is None,
+                        tool_duration_ms=duration_ms,
+                        issue_number=record.issue_number,
+                        pr_number=record.pr_number,
+                        metadata={"error": str(tool_error)} if tool_error else {},
+                    )
+                    await activity_logger.log(event)
+                except Exception:
+                    logger.debug("Failed to log tool_call_end activity", exc_info=True)
+
+        return {
+            "on_pre_tool_use": on_pre_tool_use,
+            "on_post_tool_use": on_post_tool_use,
+        }
 
     def _build_agent_prompt(
         self,

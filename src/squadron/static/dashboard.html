@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Squadron Dashboard</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #484f58;
+            --border: #30363d;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-red: #f85149;
+            --accent-yellow: #d29922;
+            --accent-purple: #a371f7;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--accent-red);
+        }
+
+        .status-dot.connected {
+            background: var(--accent-green);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 20px;
+        }
+
+        .panel {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-content {
+            padding: 16px;
+        }
+
+        .agent-list {
+            list-style: none;
+        }
+
+        .agent-item {
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .agent-item:last-child {
+            border-bottom: none;
+        }
+
+        .agent-item:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .agent-item.selected {
+            background: var(--bg-tertiary);
+            border-left: 3px solid var(--accent-blue);
+        }
+
+        .agent-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+
+        .agent-id {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-size: 13px;
+            color: var(--accent-blue);
+        }
+
+        .agent-status {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            text-transform: uppercase;
+            font-weight: 500;
+        }
+
+        .status-active { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
+        .status-sleeping { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
+        .status-completed { background: rgba(88, 166, 255, 0.2); color: var(--accent-blue); }
+        .status-escalated { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
+
+        .agent-meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .activity-feed {
+            height: 600px;
+            overflow-y: auto;
+        }
+
+        .activity-item {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+        }
+
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+
+        .activity-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .activity-type {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .activity-type-icon {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+        }
+
+        .icon-tool { background: var(--accent-purple); }
+        .icon-lifecycle { background: var(--accent-blue); }
+        .icon-github { background: #333; }
+        .icon-circuit { background: var(--accent-yellow); }
+        .icon-error { background: var(--accent-red); }
+
+        .activity-time {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .activity-content {
+            color: var(--text-secondary);
+            word-break: break-word;
+        }
+
+        .activity-content code {
+            background: var(--bg-tertiary);
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            font-size: 12px;
+        }
+
+        .activity-meta {
+            margin-top: 6px;
+            display: flex;
+            gap: 12px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .btn {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .btn:hover {
+            background: var(--border);
+        }
+
+        .btn-primary {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+
+        .btn-primary:hover {
+            background: #4c8ed9;
+        }
+
+        .auth-section {
+            margin-bottom: 20px;
+            padding: 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+
+        .auth-section input {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            width: 300px;
+            margin-right: 10px;
+        }
+
+        .auth-section input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-secondary);
+        }
+
+        @media (max-width: 900px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Squadron Dashboard</h1>
+            <div class="status-indicator">
+                <span class="status-dot" id="connectionStatus"></span>
+                <span id="connectionText">Disconnected</span>
+            </div>
+        </header>
+
+        <div class="auth-section">
+            <input type="password" id="apiKey" placeholder="API Key (if required)">
+            <button class="btn btn-primary" onclick="connect()">Connect</button>
+            <button class="btn" onclick="disconnect()">Disconnect</button>
+        </div>
+
+        <div class="grid">
+            <div class="panel">
+                <div class="panel-header">
+                    Agents
+                    <button class="btn" onclick="refreshAgents()">Refresh</button>
+                </div>
+                <div class="panel-content" style="padding: 0;">
+                    <ul class="agent-list" id="agentList">
+                        <li class="empty-state">Connect to view agents</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    Activity Feed
+                    <button class="btn" onclick="clearFeed()">Clear</button>
+                </div>
+                <div class="activity-feed" id="activityFeed">
+                    <div class="empty-state">Activity events will appear here</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let selectedAgent = null;
+
+        function getApiKey() {
+            return document.getElementById('apiKey').value || null;
+        }
+
+        function getBaseUrl() {
+            // Use current origin for the API
+            return window.location.origin;
+        }
+
+        function connect() {
+            disconnect();
+
+            const apiKey = getApiKey();
+            const baseUrl = getBaseUrl();
+            let url = `${baseUrl}/dashboard/stream`;
+
+            if (selectedAgent) {
+                url = `${baseUrl}/dashboard/agents/${selectedAgent}/stream`;
+            }
+
+            if (apiKey) {
+                url += `?token=${encodeURIComponent(apiKey)}`;
+            }
+
+            eventSource = new EventSource(url);
+
+            eventSource.addEventListener('connected', (e) => {
+                updateConnectionStatus(true);
+                refreshAgents();
+            });
+
+            eventSource.addEventListener('activity', (e) => {
+                const event = JSON.parse(e.data);
+                addActivityItem(event);
+            });
+
+            eventSource.addEventListener('heartbeat', () => {
+                // Keep connection status green
+                updateConnectionStatus(true);
+            });
+
+            eventSource.onerror = () => {
+                updateConnectionStatus(false);
+            };
+        }
+
+        function disconnect() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            updateConnectionStatus(false);
+        }
+
+        function updateConnectionStatus(connected) {
+            const dot = document.getElementById('connectionStatus');
+            const text = document.getElementById('connectionText');
+
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        async function refreshAgents() {
+            const apiKey = getApiKey();
+            const baseUrl = getBaseUrl();
+
+            try {
+                const headers = {};
+                if (apiKey) {
+                    headers['Authorization'] = `Bearer ${apiKey}`;
+                }
+
+                const response = await fetch(`${baseUrl}/dashboard/agents`, { headers });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                renderAgentList(data.active_agents);
+            } catch (error) {
+                console.error('Failed to fetch agents:', error);
+                document.getElementById('agentList').innerHTML =
+                    '<li class="empty-state">Failed to load agents</li>';
+            }
+        }
+
+        function renderAgentList(agents) {
+            const list = document.getElementById('agentList');
+
+            if (!agents || agents.length === 0) {
+                list.innerHTML = '<li class="empty-state">No active agents</li>';
+                return;
+            }
+
+            list.innerHTML = agents.map(agent => `
+                <li class="agent-item ${selectedAgent === agent.agent_id ? 'selected' : ''}"
+                    onclick="selectAgent('${agent.agent_id}')">
+                    <div class="agent-header">
+                        <span class="agent-id">${agent.agent_id}</span>
+                        <span class="agent-status status-${agent.status}">${agent.status}</span>
+                    </div>
+                    <div class="agent-meta">
+                        ${agent.role} | Issue #${agent.issue_number || 'N/A'}
+                        ${agent.tool_call_count ? ` | ${agent.tool_call_count} tool calls` : ''}
+                    </div>
+                </li>
+            `).join('');
+        }
+
+        function selectAgent(agentId) {
+            if (selectedAgent === agentId) {
+                selectedAgent = null;
+            } else {
+                selectedAgent = agentId;
+            }
+
+            // Re-render to update selection
+            refreshAgents();
+
+            // Reconnect to stream for selected agent
+            if (eventSource) {
+                connect();
+            }
+        }
+
+        function addActivityItem(event) {
+            const feed = document.getElementById('activityFeed');
+
+            // Remove empty state if present
+            const emptyState = feed.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            const item = document.createElement('div');
+            item.className = 'activity-item';
+
+            const iconClass = getIconClass(event.event_type);
+            const time = new Date(event.timestamp).toLocaleTimeString();
+
+            let content = '';
+            if (event.tool_name) {
+                content = `<code>${event.tool_name}</code>`;
+                if (event.tool_duration_ms) {
+                    content += ` (${event.tool_duration_ms}ms)`;
+                }
+                if (event.tool_success === false) {
+                    content += ' <span style="color: var(--accent-red);">FAILED</span>';
+                }
+            } else if (event.content) {
+                content = escapeHtml(event.content.substring(0, 200));
+                if (event.content.length > 200) content += '...';
+            }
+
+            item.innerHTML = `
+                <div class="activity-header">
+                    <span class="activity-type">
+                        <span class="activity-type-icon ${iconClass}">${getIcon(event.event_type)}</span>
+                        ${formatEventType(event.event_type)}
+                    </span>
+                    <span class="activity-time">${time}</span>
+                </div>
+                <div class="activity-content">${content}</div>
+                <div class="activity-meta">
+                    <span>Agent: ${event.agent_id}</span>
+                    ${event.issue_number ? `<span>Issue: #${event.issue_number}</span>` : ''}
+                    ${event.pr_number ? `<span>PR: #${event.pr_number}</span>` : ''}
+                </div>
+            `;
+
+            feed.insertBefore(item, feed.firstChild);
+
+            // Keep only last 500 items
+            while (feed.children.length > 500) {
+                feed.removeChild(feed.lastChild);
+            }
+        }
+
+        function getIconClass(eventType) {
+            if (eventType.includes('tool_call')) return 'icon-tool';
+            if (eventType.includes('agent_')) return 'icon-lifecycle';
+            if (eventType.includes('github_')) return 'icon-github';
+            if (eventType.includes('circuit_breaker')) return 'icon-circuit';
+            if (eventType === 'error') return 'icon-error';
+            return 'icon-lifecycle';
+        }
+
+        function getIcon(eventType) {
+            if (eventType.includes('tool_call')) return 'T';
+            if (eventType.includes('agent_')) return 'A';
+            if (eventType.includes('github_')) return 'G';
+            if (eventType.includes('circuit_breaker')) return '!';
+            if (eventType === 'error') return 'E';
+            return '*';
+        }
+
+        function formatEventType(type) {
+            return type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function clearFeed() {
+            const feed = document.getElementById('activityFeed');
+            feed.innerHTML = '<div class="empty-state">Activity events will appear here</div>';
+        }
+
+        // Auto-connect if no API key is required
+        window.addEventListener('load', () => {
+            // Try to connect without key first
+            fetch(`${getBaseUrl()}/dashboard/status`)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.security?.authentication_required) {
+                        connect();
+                    }
+                })
+                .catch(() => {});
+        });
+    </script>
+</body>
+</html>

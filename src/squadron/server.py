@@ -29,12 +29,15 @@ from fastapi import FastAPI
 
 import aiosqlite
 
+from squadron.activity import ActivityLogger
 from squadron.agent_manager import AgentManager
 from squadron.config import (
     SquadronConfig,
     load_agent_definitions,
     load_config,
 )
+from squadron.dashboard import configure as configure_dashboard
+from squadron.dashboard import router as dashboard_router
 from squadron.event_router import EventRouter
 from squadron.github_client import GitHubClient
 from squadron.models import AgentStatus, GitHubEvent, SquadronEvent, SquadronEventType
@@ -69,6 +72,7 @@ class SquadronServer:
         self.workflow_engine: WorkflowEngine | None = None
         self.workflow_db: aiosqlite.Connection | None = None
         self.workflow_registry: WorkflowRegistryV2 | None = None
+        self.activity_logger: ActivityLogger | None = None
 
     async def start(self) -> None:
         """Initialize all components and start background loops."""
@@ -105,6 +109,12 @@ class SquadronServer:
         self.registry = AgentRegistry(db_path)
         await self.registry.initialize()
 
+        # 2b. Initialize activity logger (same data dir as registry)
+        activity_db_path = str(data_dir / "activity.db")
+        self.activity_logger = ActivityLogger(activity_db_path)
+        await self.activity_logger.initialize()
+        logger.info("Activity logger initialized: %s", activity_db_path)
+
         # 3. Recover stale agents + reconstruct from GitHub
         await self._recover_agents()
 
@@ -138,6 +148,7 @@ class SquadronServer:
             router=self.router,
             agent_definitions=agent_definitions,
             repo_root=self.repo_root,
+            activity_logger=self.activity_logger,
         )
 
         # 7. Create reconciliation loop
@@ -162,6 +173,9 @@ class SquadronServer:
             expected_installation_id=os.environ.get("GITHUB_INSTALLATION_ID"),
             expected_repo_full_name=repo_full_name,
         )
+
+        # 8a. Configure dashboard endpoints (activity logging + SSE)
+        configure_dashboard(self.activity_logger, self.registry)
 
         # 8b. Create workflow engine (if workflows are defined)
         if self.config.workflows:
@@ -215,6 +229,8 @@ class SquadronServer:
             await self.github.close()
         if self.registry:
             await self.registry.close()
+        if self.activity_logger:
+            await self.activity_logger.close()
         if self.workflow_db:
             await self.workflow_db.close()
 
@@ -501,6 +517,7 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
 
     # Mount routes
     app.include_router(webhook_router)
+    app.include_router(dashboard_router)
 
     @app.get("/health")
     async def health():
