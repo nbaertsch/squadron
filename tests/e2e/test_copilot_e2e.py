@@ -142,7 +142,7 @@ class TestCopilotSessions:
             session = await client.create_session(
                 {
                     "session_id": f"e2e-test-{uid}",
-                    "model": "claude-sonnet-4",
+                    "model": "claude-sonnet-4.6",
                     "system_message": {
                         "mode": "replace",
                         "content": "You are a test agent. Reply with exactly: PONG",

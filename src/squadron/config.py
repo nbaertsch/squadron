@@ -140,7 +140,7 @@ class ModelOverride(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    default_model: str = "claude-sonnet-4"
+    default_model: str = "claude-sonnet-4.6"
     default_reasoning_effort: str | None = None
     models: dict[str, ModelOverride] = Field(default_factory=dict)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)

@@ -140,25 +140,25 @@ circuit_breakers:
 # ─────────────────────────────────────────────
 runtime:
   # Default model for all agents (can be overridden per-role)
-  default_model: "claude-sonnet-4"
+  default_model: "claude-sonnet-4.6"
   default_reasoning_effort: "medium"     # low | medium | high | xhigh
 
   # Per-role model overrides
   models:
     pm:
-      model: "claude-sonnet-4"           # Fast triage
+      model: "claude-sonnet-4.6"           # Fast triage
       reasoning_effort: "low"
     feat-dev:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
       reasoning_effort: "high"           # Complex implementation
     bug-fix:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
       reasoning_effort: "high"
     pr-review:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
       reasoning_effort: "medium"
     security-review:
-      model: "claude-sonnet-4"
+      model: "claude-sonnet-4.6"
       reasoning_effort: "high"           # Security needs careful reasoning
 
   # BYOK provider configuration
