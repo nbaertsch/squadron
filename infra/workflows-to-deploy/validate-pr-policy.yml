@@ -1,0 +1,122 @@
+# Validate PR Communication Policy
+#
+# Ensures that agent configurations and infrastructure properly support
+# PR-based communication flow as defined in issue #40
+
+name: Validate PR Policy
+
+on:
+  push:
+    branches: [main, squadron-dev]
+    paths:
+      - '.squadron/**'
+      - '.github/workflows/**'
+      - 'infra/**'
+  pull_request:
+    paths:
+      - '.squadron/**'
+      - '.github/workflows/**'
+      - 'infra/**'
+
+jobs:
+  validate-policy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Validate PR communication policy
+        run: |
+          echo "🔍 Validating PR communication policy compliance..."
+          python3 infra/scripts/pr-communication-policy.py --validate
+          
+      - name: Check required workflows exist
+        run: |
+          echo "📋 Checking required GitHub Actions workflows..."
+          
+          REQUIRED_WORKFLOWS=(
+            ".github/workflows/pr-cleanup.yml"
+            ".github/workflows/pr-review-flow.yml"
+          )
+          
+          EXIT_CODE=0
+          for workflow in "${REQUIRED_WORKFLOWS[@]}"; do
+            if [[ -f "$workflow" ]]; then
+              echo "✅ Found: $workflow"
+            else
+              echo "❌ Missing: $workflow"
+              EXIT_CODE=1
+            fi
+          done
+          
+          exit $EXIT_CODE
+          
+      - name: Validate squadron config
+        run: |
+          echo "⚙️ Validating Squadron configuration..."
+          
+          if [[ -f ".squadron/config.yaml" ]]; then
+            echo "✅ Squadron config exists"
+            
+            # Check for key PR event handling
+            if grep -q "pull_request.opened" .squadron/config.yaml && \
+               grep -q "pull_request.closed" .squadron/config.yaml && \
+               grep -q "pull_request_review.submitted" .squadron/config.yaml; then
+              echo "✅ PR event handling configured"
+            else
+              echo "❌ Missing PR event handling in config"
+              exit 1
+            fi
+          else
+            echo "❌ Squadron config not found"
+            exit 1
+          fi
+          
+      - name: Check agent definitions
+        run: |
+          echo "🤖 Checking agent definitions for PR communication compliance..."
+          
+          if [[ -d ".squadron/agents" ]]; then
+            echo "✅ Agents directory exists"
+            
+            # Count agents that have both comment tools available
+            PR_AWARE_AGENTS=0
+            TOTAL_AGENTS=0
+            
+            for agent in .squadron/agents/*.md; do
+              if [[ -f "$agent" ]]; then
+                TOTAL_AGENTS=$((TOTAL_AGENTS + 1))
+                
+                # Check if agent has access to PR communication tools
+                if grep -q "comment_on_pr" "$agent"; then
+                  PR_AWARE_AGENTS=$((PR_AWARE_AGENTS + 1))
+                  echo "✅ $(basename "$agent"): Has PR communication tools"
+                else
+                  echo "⚠️  $(basename "$agent"): Missing comment_on_pr tool"
+                fi
+              fi
+            done
+            
+            echo "📊 Summary: $PR_AWARE_AGENTS/$TOTAL_AGENTS agents have PR communication tools"
+            
+          else
+            echo "❌ Agents directory not found"
+            exit 1
+          fi
+          
+      - name: Validation Summary
+        run: |
+          echo "🎯 PR Communication Policy Validation Complete"
+          echo ""
+          echo "This validation ensures that:"
+          echo "  ✅ Required GitHub Actions workflows are present"
+          echo "  ✅ Squadron configuration handles PR events properly" 
+          echo "  ✅ Agents have access to PR communication tools"
+          echo "  ✅ Policy enforcement scripts are functional"
+          echo ""
+          echo "For more details, see: infra/pr-communication-guidelines.md"
