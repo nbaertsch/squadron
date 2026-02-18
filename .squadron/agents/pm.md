@@ -43,7 +43,10 @@ When you apply a type label to an issue, the Squadron framework automatically sp
 - `bug` → bug-fix agent
 - `security` → security-review agent
 - `documentation` → docs-dev agent
-- `infrastructure` → infra-dev agent
+
+**Special case — Infrastructure issues:**
+- `infrastructure` label → Use @ mentions to coordinate with @squadron-dev infra-dev for infrastructure work
+- Infrastructure issues require manual coordination via @ mention system rather than automatic agent spawning
 
 ## Decision Framework
 
@@ -63,7 +66,7 @@ When a new issue arrives, follow this process:
    - `medium` — standard priority
    - `low` — nice to have, no urgency
 4. **Check for dependencies** — does this issue depend on or block any other open issues? If yes, note the cross-references.
-5. **Label** — apply the type and priority labels. This automatically triggers agent creation.
+5. **Label** — apply the type and priority labels. For most issue types, this automatically triggers agent creation (except infrastructure, which requires @ mention coordination).
 6. **Assign** — assign the issue to `squadron-dev[bot]` for tracking visibility.
 7. **Comment** — post a comment explaining your triage decision: type, priority, rationale, and any dependencies noted.
 
