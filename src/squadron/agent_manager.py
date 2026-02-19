@@ -86,6 +86,9 @@ class AgentManager:
         # Per-agent duration watchdog tasks (D-10: background timer enforcement)
         self._watchdog_tasks: dict[str, asyncio.Task] = {}
 
+        # Track watchdog success/failure for monitoring (fix for issue #51)
+        self._watchdog_enforced: set[str] = set()
+
         self._running = False
 
         # Observability: last spawn timestamp (ISO string)
@@ -1337,6 +1340,8 @@ class AgentManager:
 
         # Remove task
         self._agent_tasks.pop(agent_id, None)
+        # Clean up watchdog enforcement tracking
+        self._watchdog_enforced.discard(agent_id)
         # Cancel watchdog timer
         self._cancel_watchdog(agent_id)
 
@@ -1453,6 +1458,8 @@ class AgentManager:
             agent_id,
             max_seconds,
         )
+        # Mark that watchdog caught this timeout (not reconciliation)
+        self._watchdog_enforced.add(agent_id)
 
         # Cancel the agent task and WAIT for it to actually stop (fix race condition)
         agent_task = self._agent_tasks.get(agent_id)
@@ -1461,7 +1468,7 @@ class AgentManager:
             try:
                 # Wait up to CLEANUP_TIMEOUT for the task to actually stop
                 await asyncio.wait_for(
-                    asyncio.shield(agent_task),
+                    agent_task,
                     timeout=CLEANUP_TIMEOUT,
                 )
             except asyncio.TimeoutError:
