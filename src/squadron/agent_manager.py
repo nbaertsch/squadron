@@ -377,15 +377,21 @@ class AgentManager:
                 return
 
         # Duplicate guard (ephemeral agents skip)
-        # Use get_all_agents_for_issue to include completed/failed agents and prevent
-        # UNIQUE constraint violations (issue #13)
+        # Only block if a non-terminal (CREATED/ACTIVE/SLEEPING) agent exists for this role.
+        # Terminal agents (COMPLETED/ESCALATED/FAILED) do NOT block re-spawning — this
+        # allows re-review cycles after a pr-review agent completes (issue #88).
         if not role_config.is_ephemeral:
             existing = await self.registry.get_all_agents_for_issue(issue_number)
-            if any(a.role == role_name for a in existing):
+            non_terminal_statuses = {AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING}
+            if any(a.role == role_name and a.status in non_terminal_statuses for a in existing):
                 logger.info(
-                    "Agent %s already exists for issue #%d — skipping",
+                    "Agent %s already exists for issue #%d (status=%s) — skipping",
                     role_name,
                     issue_number,
+                    next(
+                        a.status for a in existing
+                        if a.role == role_name and a.status in non_terminal_statuses
+                    ),
                 )
                 return
 

@@ -670,16 +670,57 @@ class SquadronTools:
         Records the review in the approval tracking system and triggers
         auto-merge if all requirements are satisfied.
         """
+        import httpx
+
+        # Normalise event to uppercase (guard against LLM case variation)
+        event_upper = params.event.upper()
+        if event_upper not in ("APPROVE", "REQUEST_CHANGES", "COMMENT"):
+            return (
+                f"Invalid review event '{params.event}'. "
+                "Must be one of: APPROVE, REQUEST_CHANGES, COMMENT."
+            )
+
         # Submit review to GitHub
-        result = await self.github.submit_pr_review(
-            self.owner,
-            self.repo,
-            params.pr_number,
-            body=params.body,
-            event=params.event,
-            comments=params.comments if params.comments else None,
-        )
+        try:
+            result = await self.github.submit_pr_review(
+                self.owner,
+                self.repo,
+                params.pr_number,
+                body=params.body,
+                event=event_upper,
+                comments=params.comments if params.comments else None,
+            )
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            error_body = exc.response.text[:500]
+            logger.error(
+                "GitHub API rejected submit_pr_review for PR #%d: HTTP %d — %s",
+                params.pr_number,
+                status_code,
+                error_body,
+            )
+            # Surface the error clearly to the agent so it can adapt
+            if status_code == 403:
+                return (
+                    f"GitHub API error (403 Forbidden) submitting {event_upper} review on "
+                    f"PR #{params.pr_number}. The GitHub App may lack 'pull-requests: write' "
+                    f"permission, or the reviewer cannot review this PR (e.g. PR author cannot "
+                    f"review their own PR). Use comment_on_pr to post feedback instead. "
+                    f"Error: {error_body}"
+                )
+            elif status_code == 422:
+                return (
+                    f"GitHub API error (422 Unprocessable Entity) submitting {event_upper} review "
+                    f"on PR #{params.pr_number}. Possible causes: empty review body, invalid "
+                    f"commit SHA, or review already submitted. Error: {error_body}"
+                )
+            return (
+                f"GitHub API error (HTTP {status_code}) submitting {event_upper} review on "
+                f"PR #{params.pr_number}. Error: {error_body}"
+            )
         review_id = result.get("id", "unknown")
+        # Overwrite with normalised value so state_map lookup works
+        params = params.model_copy(update={"event": event_upper})
 
         # Map GitHub event to our approval state
         state_map = {
