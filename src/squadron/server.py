@@ -542,6 +542,7 @@ def create_app(repo_root: Path | None = None) -> FastAPI:
                 "disk_percent": snap.disk_percent,
                 "disk_free_mb": snap.disk_free_mb,
                 "active_agent_count": snap.active_agent_count,
+                "process_count": snap.process_count,
             }
 
         # Queue and event metrics
