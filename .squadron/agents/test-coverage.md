@@ -17,7 +17,12 @@ tools:
   - get_pr_details
   - get_pr_feedback
   - get_ci_status
-  # Actions
+  # PR review context (for coordinating with other reviewers)
+  - list_pr_reviews
+  - get_pr_review_status
+  # Review actions
+  - add_pr_line_comment
+  - comment_on_pr
   - comment_on_issue
   - submit_pr_review
   # Lifecycle
