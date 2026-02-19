@@ -172,14 +172,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'http'
         allowInsecure: false
       }
-      secrets: [
+      secrets: concat([
         { name: 'github-app-id', value: githubAppId }
         { name: 'github-private-key', value: githubPrivateKey }
         { name: 'github-installation-id', value: githubInstallationId }
         { name: 'github-webhook-secret', value: githubWebhookSecret }
         { name: 'copilot-github-token', value: copilotGithubToken }
+      ], empty(dashboardApiKey) ? [] : [
         { name: 'dashboard-api-key', value: dashboardApiKey }
-      ]
+      ])
     }
     template: {
       containers: [
@@ -190,13 +191,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(cpuCores)
             memory: memorySize
           }
-          env: [
+          env: concat([
             { name: 'GITHUB_APP_ID', secretRef: 'github-app-id' }
             { name: 'GITHUB_PRIVATE_KEY', secretRef: 'github-private-key' }
             { name: 'GITHUB_INSTALLATION_ID', secretRef: 'github-installation-id' }
             { name: 'GITHUB_WEBHOOK_SECRET', secretRef: 'github-webhook-secret' }
             { name: 'COPILOT_GITHUB_TOKEN', secretRef: 'copilot-github-token' }
-            { name: 'SQUADRON_DASHBOARD_API_KEY', secretRef: 'dashboard-api-key' }
             { name: 'SQUADRON_REPO_URL', value: repoUrl }
             { name: 'SQUADRON_DEFAULT_BRANCH', value: defaultBranch }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
@@ -204,7 +204,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'SQUADRON_DATA_DIR', value: '/tmp/squadron-data' }
             // Config dir on persistent mount (synced by GitHub Actions)
             { name: 'SQUADRON_CONFIG_DIR', value: '/mnt/squadron-data/.squadron' }
-          ]
+          ], empty(dashboardApiKey) ? [] : [
+            { name: 'SQUADRON_DASHBOARD_API_KEY', secretRef: 'dashboard-api-key' }
+          ])
           command: ['squadron', 'serve']
           args: ['--repo-root', '/tmp/squadron-repo', '--host', '0.0.0.0', '--port', '8000']
           volumeMounts: [
