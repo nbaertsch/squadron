@@ -754,7 +754,24 @@ class AgentManager:
             )
 
         # Determine branch name (ephemeral agents don't need branches)
-        branch = "" if is_ephemeral else self._branch_name(role, issue_number)
+        # For non-ephemeral agents, check if an existing open PR already targets
+        # this issue — if so, reuse its branch to avoid opening a duplicate PR.
+        existing_pr_number: int | None = None
+        if is_ephemeral:
+            branch = ""
+        else:
+            existing_pr = await self._find_existing_pr_for_issue(issue_number)
+            if existing_pr:
+                branch = existing_pr["head"]["ref"]
+                existing_pr_number = existing_pr["number"]
+                logger.info(
+                    "Found existing PR #%d for issue #%d — reusing branch %s",
+                    existing_pr_number,
+                    issue_number,
+                    branch,
+                )
+            else:
+                branch = self._branch_name(role, issue_number)
 
         # Create inbox BEFORE registering agent (prevents race condition where
         # events arrive before inbox exists — issue #30 agent responsiveness fix)
@@ -768,6 +785,7 @@ class AgentManager:
             session_id=f"squadron-{agent_id}",
             status=AgentStatus.CREATED,
             branch=branch,
+            pr_number=existing_pr_number,
         )
         await self.registry.create_agent(record)
 
@@ -1832,6 +1850,12 @@ class AgentManager:
 
         lines.append(f"\n**Your role:** {record.role}")
         lines.append(f"**Branch:** {record.branch}")
+        if record.pr_number:
+            lines.append(
+                f"**Existing PR:** #{record.pr_number} — "
+                "an open pull request already exists for this issue. "
+                "Commit your changes to the current branch; do NOT open a new PR."
+            )
 
         return "\n".join(lines)
 
@@ -2490,6 +2514,67 @@ class AgentManager:
         template = templates.get(role, f"{role}/issue-{{issue_number}}")
         return template.format(issue_number=issue_number)
 
+    async def _find_existing_pr_for_issue(self, issue_number: int) -> dict | None:
+        """Search open PRs for one linked to the given issue number.
+
+        Checks (in priority order):
+        1. PR body contains GitHub closing keywords: "Closes #N", "Fixes #N", etc.
+        2. PR head branch name matches common patterns: fix/issue-N, feat/issue-N, etc.
+
+        Returns the first matching PR dict, or None if none found.
+        """
+        try:
+            prs = await self.github.list_pull_requests(
+                self.owner, self.repo, state="open"
+            )
+        except Exception:
+            logger.debug(
+                "Could not list PRs when checking for existing PR for issue #%d",
+                issue_number,
+            )
+            return None
+
+        import re
+
+        closing_pattern = re.compile(
+            r"(?:closes|fixes|resolves|close|fix|resolve)\s*:?\s*#"
+            + str(issue_number)
+            + r"\b",
+            re.IGNORECASE,
+        )
+        branch_pattern = re.compile(
+            r"(?:feat|fix|bug|issue|hotfix)[/-](?:issue[/-])?"
+            + str(issue_number)
+            + r"(?:[^0-9]|$)",
+            re.IGNORECASE,
+        )
+
+        for pr in prs:
+            body = pr.get("body", "") or ""
+            head_ref = pr.get("head", {}).get("ref", "") or ""
+
+            # Priority 1: closing keyword in body
+            if closing_pattern.search(body):
+                logger.debug(
+                    "Found existing PR #%d for issue #%d via body keyword (branch=%s)",
+                    pr["number"],
+                    issue_number,
+                    head_ref,
+                )
+                return pr
+
+            # Priority 2: branch name pattern
+            if branch_pattern.search(head_ref):
+                logger.debug(
+                    "Found existing PR #%d for issue #%d via branch pattern (branch=%s)",
+                    pr["number"],
+                    issue_number,
+                    head_ref,
+                )
+                return pr
+
+        return None
+
     async def _run_git(self, *args: str, timeout: int = 60) -> tuple[int, str, str]:
         """Run a git command asynchronously without blocking the event loop.
 
@@ -2537,13 +2622,34 @@ class AgentManager:
             return worktree_dir
 
         try:
-            # Create branch from default branch
+            # Create or track the branch:
+            # - If this branch already exists on the remote (e.g. an existing PR's
+            #   head branch), track it so we start from the existing work.
+            # - Otherwise, create a fresh branch from the default branch.
             default_branch = self.config.project.default_branch
-            await self._run_git(
-                "branch",
-                record.branch,
-                f"origin/{default_branch}",
+            remote_ref_rc, _, _ = await self._run_git(
+                "ls-remote", "--exit-code", "--heads", "origin", record.branch
             )
+            if remote_ref_rc == 0:
+                # Branch exists on remote — track it
+                await self._run_git(
+                    "branch",
+                    "--track",
+                    record.branch,
+                    f"origin/{record.branch}",
+                )
+                logger.info(
+                    "Tracking existing remote branch %s for issue #%d",
+                    record.branch,
+                    record.issue_number,
+                )
+            else:
+                # Fresh branch from default
+                await self._run_git(
+                    "branch",
+                    record.branch,
+                    f"origin/{default_branch}",
+                )
 
             if self.config.runtime.sparse_checkout:
                 # Sparse worktree: --no-checkout first, then set up sparse-checkout cone
