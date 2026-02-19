@@ -20,9 +20,27 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install git (needed for worktree operations)
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# Install system dependencies:
+#   git            — worktree operations
+#   util-linux     — provides `unshare` for Linux namespace isolation (sandbox)
+#   fuse-overlayfs — rootless overlayfs for ephemeral sandbox worktrees
+#   libseccomp2    — seccomp-bpf runtime support (sandbox syscall filter)
+#   libfuse3-3     — FUSE 3 runtime required by fuse-overlayfs
+#
+# Sandbox namespace isolation (unshare -p -n -m -i -u -f) requires the
+# container to run with CAP_SYS_ADMIN.  When sandbox.enabled is false
+# (the default) none of these extra capabilities are exercised.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        util-linux \
+        fuse-overlayfs \
+        libseccomp2 \
+        libfuse3-3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Ensure the FUSE device is usable by the container user.
+# This no-ops gracefully when the device is absent (non-sandbox deployments).
+RUN chmod 666 /dev/fuse 2>/dev/null || true
 
 # Copy venv from builder
 COPY --from=builder /app/.venv /app/.venv

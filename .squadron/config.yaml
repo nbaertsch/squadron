@@ -346,3 +346,20 @@ workflows:
       conditions:
         label: feature-pipeline
       event: issues.labeled
+
+# ── Sandbox configuration (issue #85 / #97) ─────────────────────────────────
+# Controls the sandboxed agent execution model and host-side auth broker.
+# Disabled by default for safe rollout; enable after sandbox module is merged.
+sandbox:
+  # Master switch — set to true once sandbox code is in production
+  enabled: false
+  # Maximum tool calls allowed per agent session (rate limit)
+  max_tool_calls_per_session: 500
+  # Minimum response delay (ms) on sensitive operations (timing normalisation)
+  timing_min_delay_ms: 50
+  # Filesystem path where forensic worktree snapshots are retained.
+  # Must match the sandboxRetentionPath parameter in infra/main.bicep and the
+  # /mnt/squadron-data/forensics Azure File Share mount.
+  retention_path: /mnt/squadron-data/forensics
+  # How long (days) to keep forensic snapshots before automatic deletion
+  forensic_retention_days: 1
