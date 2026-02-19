@@ -25,7 +25,12 @@ tools:
   - get_pr_details
   - get_pr_feedback
   - list_pr_files
+  # PR review reading (for understanding feedback)
+  - list_pr_reviews
+  - get_review_details
+  - get_pr_review_status
   # Communication
+  - reply_to_review_comment
   - comment_on_pr
   - comment_on_issue
   # Lifecycle

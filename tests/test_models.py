@@ -146,6 +146,7 @@ class TestSquadronEvent:
             SquadronEventType.PR_OPENED,
             SquadronEventType.PR_CLOSED,
             SquadronEventType.PR_REVIEW_SUBMITTED,
+            SquadronEventType.PR_REVIEW_COMMENT,
             SquadronEventType.PR_SYNCHRONIZED,
             SquadronEventType.PUSH,
         }

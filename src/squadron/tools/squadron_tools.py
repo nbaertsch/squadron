@@ -68,6 +68,14 @@ ALL_TOOL_NAMES = [
     "get_pr_details",
     "get_pr_feedback",
     "merge_pr",
+    # PR reviews (reading)
+    "list_pr_reviews",
+    "get_review_details",
+    "get_pr_review_status",
+    "list_requested_reviewers",
+    # PR reviews (writing)
+    "add_pr_line_comment",
+    "reply_to_review_comment",
     # Repository context
     "get_ci_status",
     "get_repo_info",
@@ -280,6 +288,54 @@ class GetRepoInfoParams(BaseModel):
     """Get repository information."""
 
     pass
+
+
+# ── PR Review Tool Parameters ────────────────────────────────────────────────
+
+
+class ListPRReviewsParams(BaseModel):
+    """List all reviews on a pull request."""
+
+    pr_number: int = Field(description="The pull request number")
+
+
+class GetReviewDetailsParams(BaseModel):
+    """Get details of a specific review."""
+
+    pr_number: int = Field(description="The pull request number")
+    review_id: int = Field(description="The review ID")
+
+
+class GetPRReviewStatusParams(BaseModel):
+    """Get comprehensive review status for a PR."""
+
+    pr_number: int = Field(description="The pull request number")
+
+
+class ListRequestedReviewersParams(BaseModel):
+    """List pending reviewer requests."""
+
+    pr_number: int = Field(description="The pull request number")
+
+
+class AddPRLineCommentParams(BaseModel):
+    """Add an inline comment to a specific line in a PR."""
+
+    pr_number: int = Field(description="The pull request number")
+    path: str = Field(description="File path relative to repository root")
+    line: int = Field(description="Line number to comment on")
+    body: str = Field(description="Comment body (markdown)")
+    commit_id: str | None = Field(
+        default=None, description="Commit SHA (defaults to PR head if not provided)"
+    )
+
+
+class ReplyToReviewCommentParams(BaseModel):
+    """Reply to an existing PR review comment."""
+
+    pr_number: int = Field(description="The pull request number")
+    comment_id: int = Field(description="The comment ID to reply to")
+    body: str = Field(description="Reply body (markdown)")
 
 
 # ── Unified Tool Implementations ─────────────────────────────────────────────
@@ -1209,6 +1265,181 @@ class SquadronTools:
 
         return "\n".join(lines)
 
+    # ── PR Review Tools ──────────────────────────────────────────────────
+
+    async def list_pr_reviews(self, agent_id: str, params: ListPRReviewsParams) -> str:
+        """List all reviews on a pull request."""
+        reviews = await self.github.get_pr_reviews(self.owner, self.repo, params.pr_number)
+
+        if not reviews:
+            return f"No reviews on PR #{params.pr_number}"
+
+        lines = [f"**Reviews on PR #{params.pr_number}:**\n"]
+        for r in reviews:
+            user = r.get("user", {}).get("login", "unknown")
+            state = r.get("state", "PENDING")
+            review_id = r.get("id", "?")
+            submitted = r.get("submitted_at", "")[:16] if r.get("submitted_at") else "pending"
+            body = r.get("body", "") or ""
+
+            icon = {
+                "APPROVED": "✅",
+                "CHANGES_REQUESTED": "🔴",
+                "COMMENTED": "💬",
+                "PENDING": "⏳",
+                "DISMISSED": "❌",
+            }.get(state, "❓")
+
+            lines.append(f"- {icon} **{user}** ({state}) [id={review_id}] — {submitted}")
+            if body:
+                lines.append(f"  {body[:200]}{'...' if len(body) > 200 else ''}")
+
+        return "\n".join(lines)
+
+    async def get_review_details(self, agent_id: str, params: GetReviewDetailsParams) -> str:
+        """Get details of a specific review including its comments."""
+        review = await self.github.get_review_details(
+            self.owner, self.repo, params.pr_number, params.review_id
+        )
+        comments = await self.github.get_review_comments(
+            self.owner, self.repo, params.pr_number, params.review_id
+        )
+
+        user = review.get("user", {}).get("login", "unknown")
+        state = review.get("state", "?")
+        body = review.get("body", "") or "(no body)"
+        submitted = review.get("submitted_at", "")
+
+        lines = [
+            f"**Review #{params.review_id} on PR #{params.pr_number}**",
+            f"**Reviewer:** {user}",
+            f"**State:** {state}",
+            f"**Submitted:** {submitted}",
+            "",
+            "**Summary:**",
+            body,
+        ]
+
+        if comments:
+            lines.append(f"\n**Inline Comments ({len(comments)}):**")
+            for c in comments:
+                path = c.get("path", "?")
+                line_num = c.get("line") or c.get("original_line", "?")
+                comment_body = c.get("body", "")
+                lines.append(f"\n- **{path}:{line_num}**")
+                lines.append(f"  {comment_body}")
+
+        return "\n".join(lines)
+
+    async def get_pr_review_status(self, agent_id: str, params: GetPRReviewStatusParams) -> str:
+        """Get comprehensive review status for a PR (approvals, changes requested, pending)."""
+        reviews = await self.github.get_pr_reviews(self.owner, self.repo, params.pr_number)
+        requested = await self.github.list_requested_reviewers(
+            self.owner, self.repo, params.pr_number
+        )
+
+        # Track latest review state per reviewer
+        reviewer_states: dict[str, str] = {}
+        for r in reviews:
+            user = r.get("user", {}).get("login", "")
+            state = r.get("state", "")
+            if user and state:
+                reviewer_states[user] = state
+
+        approved = [u for u, s in reviewer_states.items() if s == "APPROVED"]
+        changes_requested = [u for u, s in reviewer_states.items() if s == "CHANGES_REQUESTED"]
+        commented = [u for u, s in reviewer_states.items() if s == "COMMENTED"]
+
+        pending_users = [u.get("login", "?") for u in requested.get("users", [])]
+        pending_teams = [t.get("slug", "?") for t in requested.get("teams", [])]
+
+        # Determine overall status
+        if changes_requested:
+            overall = "CHANGES_REQUESTED"
+        elif approved and not pending_users and not pending_teams:
+            overall = "APPROVED"
+        elif pending_users or pending_teams:
+            overall = "PENDING"
+        else:
+            overall = "NO_REVIEWS"
+
+        lines = [
+            f"**PR #{params.pr_number} Review Status: {overall}**",
+            "",
+            f"**Approved ({len(approved)}):** {', '.join(approved) or 'none'}",
+            f"**Changes Requested ({len(changes_requested)}):** {', '.join(changes_requested) or 'none'}",
+            f"**Commented ({len(commented)}):** {', '.join(commented) or 'none'}",
+            f"**Pending Reviewers:** {', '.join(pending_users) or 'none'}",
+            f"**Pending Teams:** {', '.join(pending_teams) or 'none'}",
+        ]
+
+        return "\n".join(lines)
+
+    async def list_requested_reviewers(
+        self, agent_id: str, params: ListRequestedReviewersParams
+    ) -> str:
+        """List pending reviewer requests for a PR."""
+        requested = await self.github.list_requested_reviewers(
+            self.owner, self.repo, params.pr_number
+        )
+
+        users = [u.get("login", "?") for u in requested.get("users", [])]
+        teams = [t.get("slug", "?") for t in requested.get("teams", [])]
+
+        if not users and not teams:
+            return f"No pending reviewer requests for PR #{params.pr_number}"
+
+        lines = [f"**Pending Reviewers for PR #{params.pr_number}:**"]
+        if users:
+            lines.append(f"**Users:** {', '.join(users)}")
+        if teams:
+            lines.append(f"**Teams:** {', '.join(teams)}")
+
+        return "\n".join(lines)
+
+    async def add_pr_line_comment(self, agent_id: str, params: AddPRLineCommentParams) -> str:
+        """Add an inline comment to a specific line in a PR."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        # Get commit SHA if not provided
+        commit_id = params.commit_id
+        if not commit_id:
+            pr = await self.github.get_pull_request(self.owner, self.repo, params.pr_number)
+            commit_id = pr.get("head", {}).get("sha", "")
+
+        if not commit_id:
+            return "Error: Could not determine commit SHA for PR"
+
+        await self.github.create_pr_review_comment(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            f"{prefix}{params.body}",
+            commit_id,
+            params.path,
+            params.line,
+        )
+
+        return f"Added inline comment on {params.path}:{params.line} in PR #{params.pr_number}"
+
+    async def reply_to_review_comment(
+        self, agent_id: str, params: ReplyToReviewCommentParams
+    ) -> str:
+        """Reply to an existing PR review comment."""
+        agent = await self.registry.get_agent(agent_id)
+        prefix = self._agent_signature(agent.role) if agent else ""
+
+        await self.github.reply_to_pr_review_comment(
+            self.owner,
+            self.repo,
+            params.pr_number,
+            params.comment_id,
+            f"{prefix}{params.body}",
+        )
+
+        return f"Replied to comment #{params.comment_id} on PR #{params.pr_number}"
+
     # ── Shared Tools ─────────────────────────────────────────────────────
 
     async def comment_on_issue(self, agent_id: str, params: CommentOnIssueParams) -> str:
@@ -1481,6 +1712,46 @@ class SquadronTools:
             "Get repository information including default branch, visibility, and stats.",
             GetRepoInfoParams,
             tools.get_repo_info,
+        )
+
+        # PR Review tools (reading)
+        _register(
+            "list_pr_reviews",
+            "List all reviews on a pull request with reviewer info and state (APPROVED, CHANGES_REQUESTED, etc).",
+            ListPRReviewsParams,
+            tools.list_pr_reviews,
+        )
+        _register(
+            "get_review_details",
+            "Get details of a specific review including its inline comments.",
+            GetReviewDetailsParams,
+            tools.get_review_details,
+        )
+        _register(
+            "get_pr_review_status",
+            "Get comprehensive review status for a PR — shows approvals, changes requested, and pending reviewers.",
+            GetPRReviewStatusParams,
+            tools.get_pr_review_status,
+        )
+        _register(
+            "list_requested_reviewers",
+            "List pending reviewer requests (users and teams) for a PR.",
+            ListRequestedReviewersParams,
+            tools.list_requested_reviewers,
+        )
+
+        # PR Review tools (writing)
+        _register(
+            "add_pr_line_comment",
+            "Add an inline comment on a specific line in a PR. Useful for code review feedback.",
+            AddPRLineCommentParams,
+            tools.add_pr_line_comment,
+        )
+        _register(
+            "reply_to_review_comment",
+            "Reply to an existing PR review comment. Use to respond to reviewer feedback.",
+            ReplyToReviewCommentParams,
+            tools.reply_to_review_comment,
         )
 
         # Build and return only the requested tools

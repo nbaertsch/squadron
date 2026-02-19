@@ -374,6 +374,144 @@ class TestCommentOnIssue:
         assert "#42" in result
 
 
+# ── PR Review Tools ─────────────────────────────────────────────────────────
+
+
+class TestListPRReviews:
+    async def test_lists_reviews(self, tools, agent):
+        from squadron.tools.squadron_tools import ListPRReviewsParams
+
+        tools.github.get_pr_reviews = AsyncMock(
+            return_value=[
+                {
+                    "id": 123,
+                    "user": {"login": "reviewer1"},
+                    "state": "APPROVED",
+                    "body": "LGTM!",
+                    "submitted_at": "2024-01-15T10:00:00Z",
+                },
+                {
+                    "id": 124,
+                    "user": {"login": "reviewer2"},
+                    "state": "CHANGES_REQUESTED",
+                    "body": "Please fix the tests",
+                    "submitted_at": "2024-01-15T11:00:00Z",
+                },
+            ]
+        )
+
+        params = ListPRReviewsParams(pr_number=50)
+        result = await tools.list_pr_reviews("test-agent-1", params)
+
+        tools.github.get_pr_reviews.assert_called_once()
+        assert "reviewer1" in result
+        assert "APPROVED" in result
+        assert "reviewer2" in result
+        assert "CHANGES_REQUESTED" in result
+
+
+class TestGetReviewDetails:
+    async def test_gets_review_with_comments(self, tools, agent):
+        from squadron.tools.squadron_tools import GetReviewDetailsParams
+
+        tools.github.get_review_details = AsyncMock(
+            return_value={
+                "id": 123,
+                "user": {"login": "reviewer1"},
+                "state": "CHANGES_REQUESTED",
+                "body": "Please address these issues",
+                "submitted_at": "2024-01-15T10:00:00Z",
+            }
+        )
+        tools.github.get_review_comments = AsyncMock(
+            return_value=[
+                {
+                    "id": 456,
+                    "path": "src/main.py",
+                    "line": 42,
+                    "body": "This should handle null",
+                },
+            ]
+        )
+
+        params = GetReviewDetailsParams(pr_number=50, review_id=123)
+        result = await tools.get_review_details("test-agent-1", params)
+
+        tools.github.get_review_details.assert_called_once()
+        tools.github.get_review_comments.assert_called_once()
+        assert "reviewer1" in result
+        assert "CHANGES_REQUESTED" in result
+        assert "src/main.py:42" in result
+        assert "handle null" in result
+
+
+class TestGetPRReviewStatus:
+    async def test_gets_comprehensive_status(self, tools, agent):
+        from squadron.tools.squadron_tools import GetPRReviewStatusParams
+
+        tools.github.get_pr_reviews = AsyncMock(
+            return_value=[
+                {"user": {"login": "approver"}, "state": "APPROVED"},
+                {"user": {"login": "requester"}, "state": "CHANGES_REQUESTED"},
+            ]
+        )
+        tools.github.list_requested_reviewers = AsyncMock(
+            return_value={
+                "users": [{"login": "pending_user"}],
+                "teams": [{"slug": "core-team"}],
+            }
+        )
+
+        params = GetPRReviewStatusParams(pr_number=50)
+        result = await tools.get_pr_review_status("test-agent-1", params)
+
+        assert "approver" in result
+        assert "requester" in result
+        assert "pending_user" in result
+        assert "core-team" in result
+        assert "CHANGES_REQUESTED" in result  # Overall status
+
+
+class TestAddPRLineComment:
+    async def test_adds_inline_comment(self, tools, agent):
+        from squadron.tools.squadron_tools import AddPRLineCommentParams
+
+        tools.github.get_pull_request = AsyncMock(return_value={"head": {"sha": "abc123"}})
+        tools.github.create_pr_review_comment = AsyncMock(return_value={"id": 789})
+
+        params = AddPRLineCommentParams(
+            pr_number=50, path="src/main.py", line=42, body="Consider using a guard clause"
+        )
+        result = await tools.add_pr_line_comment("test-agent-1", params)
+
+        tools.github.create_pr_review_comment.assert_called_once()
+        call_args = tools.github.create_pr_review_comment.call_args
+        assert call_args[0][2] == 50  # pr_number
+        assert "guard clause" in call_args[0][3]  # body includes original message
+        assert call_args[0][5] == "src/main.py"  # path
+        assert call_args[0][6] == 42  # line
+        assert "src/main.py:42" in result
+
+
+class TestReplyToReviewComment:
+    async def test_replies_to_comment(self, tools, agent):
+        from squadron.tools.squadron_tools import ReplyToReviewCommentParams
+
+        tools.github.reply_to_pr_review_comment = AsyncMock(return_value={"id": 790})
+
+        params = ReplyToReviewCommentParams(
+            pr_number=50, comment_id=789, body="Fixed in the latest commit"
+        )
+        result = await tools.reply_to_review_comment("test-agent-1", params)
+
+        tools.github.reply_to_pr_review_comment.assert_called_once()
+        call_args = tools.github.reply_to_pr_review_comment.call_args
+        assert call_args[0][2] == 50  # pr_number
+        assert call_args[0][3] == 789  # comment_id
+        assert "Fixed" in call_args[0][4]  # body
+        assert "#789" in result
+
+
 # ── Pre-sleep hook ───────────────────────────────────────────────────────────
 
 
@@ -445,7 +583,7 @@ class TestPreSleepHook:
 
 class TestConstants:
     def test_all_tool_names_count(self):
-        assert len(ALL_TOOL_NAMES) == 29  # Updated: added comment_on_pr tool
+        assert len(ALL_TOOL_NAMES) == 35  # Updated: added PR review tools (#67, #68)
 
     def test_git_push_in_all_tools(self):
         """git_push should be available for explicit selection."""

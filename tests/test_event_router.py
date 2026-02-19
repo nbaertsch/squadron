@@ -45,6 +45,7 @@ class TestEventMapping:
             "pull_request.closed",
             "pull_request.synchronize",
             "pull_request_review.submitted",
+            "pull_request_review_comment.created",
             "push",
         }
         assert set(EVENT_MAP.keys()) == expected

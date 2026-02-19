@@ -17,7 +17,14 @@ tools:
   - get_pr_details
   - get_pr_feedback
   - get_ci_status
-  # Actions
+  # PR review inspection
+  - list_pr_reviews
+  - get_review_details
+  - get_pr_review_status
+  - list_requested_reviewers
+  # Review actions (inline comments)
+  - add_pr_line_comment
+  - reply_to_review_comment
   - comment_on_pr
   - comment_on_issue
   - submit_pr_review

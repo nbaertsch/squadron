@@ -408,6 +408,120 @@ class GitHubClient:
         )
         return resp.json()
 
+    async def get_review_details(
+        self, owner: str, repo: str, pr_number: int, review_id: int
+    ) -> dict:
+        """Get details of a specific review including its comments.
+
+        Returns review dict with 'id', 'user', 'state', 'body', 'submitted_at'.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}",
+        )
+        return resp.json()
+
+    async def get_review_comments(
+        self, owner: str, repo: str, pr_number: int, review_id: int
+    ) -> list[dict]:
+        """Get inline comments for a specific review.
+
+        Returns list of comment dicts with 'path', 'line', 'body', etc.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/comments",
+        )
+        return resp.json()
+
+    async def list_requested_reviewers(self, owner: str, repo: str, pr_number: int) -> dict:
+        """List requested reviewers for a pull request.
+
+        Returns dict with 'users' and 'teams' lists.
+        """
+        resp = await self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+        )
+        return resp.json()
+
+    async def create_pr_review_comment(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        body: str,
+        commit_id: str,
+        path: str,
+        line: int,
+        *,
+        side: str = "RIGHT",
+    ) -> dict:
+        """Create a review comment on a specific line of a PR.
+
+        Args:
+            body: Comment text (markdown).
+            commit_id: SHA of the commit to comment on.
+            path: Relative path of the file to comment on.
+            line: Line number in the diff to comment on.
+            side: 'LEFT' for deletions, 'RIGHT' for additions (default).
+        """
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+            json={
+                "body": body,
+                "commit_id": commit_id,
+                "path": path,
+                "line": line,
+                "side": side,
+            },
+        )
+        return resp.json()
+
+    async def reply_to_pr_review_comment(
+        self, owner: str, repo: str, pr_number: int, comment_id: int, body: str
+    ) -> dict:
+        """Reply to an existing PR review comment.
+
+        Args:
+            comment_id: The ID of the comment to reply to.
+            body: Reply text (markdown).
+        """
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies",
+            json={"body": body},
+        )
+        return resp.json()
+
+    async def update_pr_review_comment(
+        self, owner: str, repo: str, comment_id: int, body: str
+    ) -> dict:
+        """Update an existing PR review comment.
+
+        Args:
+            comment_id: The ID of the comment to update.
+            body: New comment text (markdown).
+        """
+        resp = await self._request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+            json={"body": body},
+        )
+        return resp.json()
+
+    async def delete_pr_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
+        """Delete a PR review comment.
+
+        Args:
+            comment_id: The ID of the comment to delete.
+        """
+        await self._request(
+            "DELETE",
+            f"/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+        )
+
     # ── Repository Operations ────────────────────────────────────────────
 
     async def get_repo(self, owner: str, repo: str) -> dict:

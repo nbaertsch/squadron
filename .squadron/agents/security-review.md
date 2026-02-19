@@ -17,12 +17,20 @@ tools:
   - get_pr_details
   - get_pr_feedback
   - get_ci_status
+  # PR review inspection
+  - list_pr_reviews
+  - get_review_details
+  - get_pr_review_status
+  - list_requested_reviewers
+  # Review actions
+  - add_pr_line_comment
+  - reply_to_review_comment
+  - comment_on_pr
+  - comment_on_issue
+  - submit_pr_review
   # Issue context (for security analysis)
   - read_issue
   - list_issue_comments
-  # Actions
-  - comment_on_issue
-  - submit_pr_review
   # Lifecycle
   - check_for_events
   - report_complete

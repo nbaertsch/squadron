@@ -54,6 +54,7 @@ EVENT_MAP: dict[str, SquadronEventType] = {
     "pull_request.closed": SquadronEventType.PR_CLOSED,
     "pull_request.synchronize": SquadronEventType.PR_SYNCHRONIZED,
     "pull_request_review.submitted": SquadronEventType.PR_REVIEW_SUBMITTED,
+    "pull_request_review_comment.created": SquadronEventType.PR_REVIEW_COMMENT,
     "push": SquadronEventType.PUSH,
 }
 
@@ -178,18 +179,43 @@ class EventRouter:
             comment_body = (event.comment or {}).get("body", "")
             command = parse_command(comment_body)
 
+        # Build event data
+        data = {
+            "action": event.action,
+            "sender": event.sender,
+            "payload": event.payload,
+            "issue_creator": event.issue_creator,
+        }
+
+        # Include review data for PR review events
+        if event_type == SquadronEventType.PR_REVIEW_SUBMITTED:
+            review = event.review or {}
+            data["review"] = {
+                "id": review.get("id"),
+                "state": review.get("state"),  # APPROVED, CHANGES_REQUESTED, COMMENTED
+                "body": review.get("body"),
+                "user": review.get("user", {}).get("login"),
+            }
+
+        # Include comment data for PR review comment events
+        if event_type == SquadronEventType.PR_REVIEW_COMMENT:
+            comment = event.comment or {}
+            data["review_comment"] = {
+                "id": comment.get("id"),
+                "body": comment.get("body"),
+                "path": comment.get("path"),
+                "line": comment.get("line") or comment.get("original_line"),
+                "user": comment.get("user", {}).get("login"),
+                "in_reply_to_id": comment.get("in_reply_to_id"),
+            }
+
         return SquadronEvent(
             event_type=event_type,
             source_delivery_id=event.delivery_id,
             issue_number=issue_number,
             pr_number=pr_number,
             command=command,
-            data={
-                "action": event.action,
-                "sender": event.sender,
-                "payload": event.payload,
-                "issue_creator": event.issue_creator,
-            },
+            data=data,
         )
 
     def _is_command_comment(self, comment_body: str) -> tuple[bool, str | None]:

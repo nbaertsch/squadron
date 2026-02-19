@@ -107,6 +107,11 @@ class GitHubEvent(BaseModel):
         return self.payload.get("comment")
 
     @property
+    def review(self) -> dict | None:
+        """The review object for pull_request_review events."""
+        return self.payload.get("review")
+
+    @property
     def issue_creator(self) -> str | None:
         """GitHub username of the user who created the issue.
 
@@ -134,6 +139,7 @@ class SquadronEventType(str, enum.Enum):
     PR_OPENED = "pr.opened"
     PR_CLOSED = "pr.closed"
     PR_REVIEW_SUBMITTED = "pr.review_submitted"
+    PR_REVIEW_COMMENT = "pr.review_comment"  # Inline comment on PR diff
     PR_SYNCHRONIZED = "pr.synchronized"
     PUSH = "push"
 
