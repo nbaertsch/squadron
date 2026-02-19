@@ -74,8 +74,16 @@ async def dashboard_ui():
 # ── SSE Streaming ─────────────────────────────────────────────────────────────
 
 
+# Number of history events to send on initial connection
+_HYDRATION_LIMIT = 200
+
+
 async def _sse_generator(agent_id: str | None = None):
     """Generate SSE events for activity stream.
+
+    On connect, hydrates the client with recent history before streaming
+    live events so the UI immediately shows context without a separate
+    History fetch.
 
     Args:
         agent_id: If set, only stream events for this agent. If None, stream all events.
@@ -84,13 +92,31 @@ async def _sse_generator(agent_id: str | None = None):
         yield 'event: error\ndata: {"error": "Activity logger not configured"}\n\n'
         return
 
-    # Subscribe to activity events
+    # Subscribe BEFORE fetching history so we don't miss events that arrive
+    # during the history query.
     queue = await _activity_logger.subscribe(agent_id)
 
     try:
-        # Send initial heartbeat
         yield 'event: connected\ndata: {"status": "connected"}\n\n'
 
+        # ── History hydration ────────────────────────────────────────────────
+        # Fetch recent events (newest-first from DB) and send oldest-first so
+        # the client sees them in chronological order.
+        if agent_id:
+            history = await _activity_logger.get_agent_activity(
+                agent_id, limit=_HYDRATION_LIMIT
+            )
+        else:
+            history = await _activity_logger.get_recent_activity(limit=_HYDRATION_LIMIT)
+
+        for event in reversed(history):
+            yield f"event: activity\ndata: {event.to_sse_data()}\n\n"
+
+        # Signal that history hydration is complete; the client can mark all
+        # previously received events as 'historical'.
+        yield 'event: hydrated\ndata: {"status": "hydrated"}\n\n'
+
+        # ── Live stream ──────────────────────────────────────────────────────
         while True:
             try:
                 # Wait for next event with timeout (heartbeat every 30s)
