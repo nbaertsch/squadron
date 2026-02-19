@@ -73,6 +73,10 @@ param githubWebhookSecret string
 @description('Copilot token for headless auth (optional)')
 param copilotGithubToken string = ''
 
+@secure()
+@description('Dashboard API key for authentication (optional, leave empty to disable auth)')
+param dashboardApiKey string = ''
+
 @description('GitHub repo URL to clone at startup (e.g. https://github.com/owner/repo)')
 param repoUrl string = ''
 
@@ -174,6 +178,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'github-installation-id', value: githubInstallationId }
         { name: 'github-webhook-secret', value: githubWebhookSecret }
         { name: 'copilot-github-token', value: copilotGithubToken }
+        { name: 'dashboard-api-key', value: dashboardApiKey }
       ]
     }
     template: {
@@ -191,6 +196,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'GITHUB_INSTALLATION_ID', secretRef: 'github-installation-id' }
             { name: 'GITHUB_WEBHOOK_SECRET', secretRef: 'github-webhook-secret' }
             { name: 'COPILOT_GITHUB_TOKEN', secretRef: 'copilot-github-token' }
+            { name: 'SQUADRON_DASHBOARD_API_KEY', secretRef: 'dashboard-api-key' }
             { name: 'SQUADRON_REPO_URL', value: repoUrl }
             { name: 'SQUADRON_DEFAULT_BRANCH', value: defaultBranch }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
