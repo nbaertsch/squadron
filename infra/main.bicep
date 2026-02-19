@@ -194,9 +194,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'SQUADRON_REPO_URL', value: repoUrl }
             { name: 'SQUADRON_DEFAULT_BRANCH', value: defaultBranch }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
-            // Data dir now on persistent Azure Files mount
-            { name: 'SQUADRON_DATA_DIR', value: '/mnt/squadron-data' }
-            // Config dir also on persistent mount (synced by GitHub Actions)
+            // Data dir stays ephemeral (SQLite WAL doesn't work on SMB/Azure Files)
+            { name: 'SQUADRON_DATA_DIR', value: '/tmp/squadron-data' }
+            // Config dir on persistent mount (synced by GitHub Actions)
             { name: 'SQUADRON_CONFIG_DIR', value: '/mnt/squadron-data/.squadron' }
           ]
           command: ['squadron', 'serve']
