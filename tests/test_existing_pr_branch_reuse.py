@@ -288,6 +288,9 @@ class TestCreateAgentExistingPrBranch:
                 mgr = _make_manager(config, registry, github)
                 mgr.owner = "testowner"
                 mgr.repo = "testrepo"
+                # Mock sandbox to avoid unix socket creation in WSL
+                mgr._sandbox = MagicMock()
+                mgr._sandbox.create_session = AsyncMock()
 
                 record = await mgr.create_agent("bug-fix", 86)
 
@@ -323,6 +326,9 @@ class TestCreateAgentExistingPrBranch:
                 mgr = _make_manager(config, registry, github)
                 mgr.owner = "testowner"
                 mgr.repo = "testrepo"
+                # Mock sandbox to avoid unix socket creation in WSL
+                mgr._sandbox = MagicMock()
+                mgr._sandbox.create_session = AsyncMock()
 
                 record = await mgr.create_agent("bug-fix", 86)
 

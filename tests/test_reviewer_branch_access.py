@@ -155,6 +155,9 @@ class TestCreateAgentOverrideBranch:
                 AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path
             ):
                 mgr = _make_manager(config, registry, github, tmp_path)
+                # Mock sandbox to avoid unix socket creation in WSL
+                mgr._sandbox = MagicMock()
+                mgr._sandbox.create_session = AsyncMock()
 
                 record = await mgr.create_agent(
                     "pr-review",
@@ -187,6 +190,9 @@ class TestCreateAgentOverrideBranch:
                     new_callable=AsyncMock,
                 ) as mock_find:
                     mgr = _make_manager(config, registry, github, tmp_path)
+                    # Mock sandbox to avoid unix socket creation in WSL
+                    mgr._sandbox = MagicMock()
+                    mgr._sandbox.create_session = AsyncMock()
 
                     await mgr.create_agent(
                         "security-review",
@@ -213,6 +219,9 @@ class TestCreateAgentOverrideBranch:
                 AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path
             ):
                 mgr = _make_manager(config, registry, github, tmp_path)
+                # Mock sandbox to avoid unix socket creation in WSL
+                mgr._sandbox = MagicMock()
+                mgr._sandbox.create_session = AsyncMock()
 
                 record = await mgr.create_agent("pr-review", 85)
 
@@ -256,6 +265,10 @@ class TestTriggerSpawnPassesPrHeadBranch:
 
         with patch.object(AgentManager, "create_agent", capturing_create):
             mgr = _make_manager(config, registry, github, tmp_path)
+            # Mock sandbox to avoid unix socket creation in WSL
+            mgr._sandbox = MagicMock()
+            mgr._sandbox.start = AsyncMock()
+            mgr._sandbox.create_session = AsyncMock()
             await mgr.start()
 
             # Simulate a config trigger with spawn action
@@ -310,6 +323,10 @@ class TestTriggerSpawnPassesPrHeadBranch:
                 AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path
             ):
                 mgr = _make_manager(config, registry, github, tmp_path)
+                # Mock sandbox to avoid unix socket creation in WSL
+                mgr._sandbox = MagicMock()
+                mgr._sandbox.start = AsyncMock()
+                mgr._sandbox.create_session = AsyncMock()
                 await mgr.start()
 
                 from squadron.models import SquadronEvent, SquadronEventType
@@ -380,6 +397,10 @@ class TestTriggerSpawnPassesPrHeadBranch:
 
         with patch.object(AgentManager, "create_agent", capturing_create):
             mgr = _make_manager(config, registry, github, tmp_path)
+            # Mock sandbox to avoid unix socket creation in WSL
+            mgr._sandbox = MagicMock()
+            mgr._sandbox.start = AsyncMock()
+            mgr._sandbox.create_session = AsyncMock()
             await mgr.start()
 
             from squadron.models import SquadronEvent, SquadronEventType
