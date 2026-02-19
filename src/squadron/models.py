@@ -180,6 +180,28 @@ _HELP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches fenced code blocks (``` or ~~~), including optional language specifier
+_FENCED_CODE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
+
+# Matches inline code spans (single backtick, no newlines)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def _strip_code_spans(text: str) -> str:
+    """Remove fenced code blocks and inline code spans from text.
+
+    Mentions inside backtick-wrapped code are treated as literal text —
+    they should not trigger agent invocation.  This mirrors GitHub's own
+    behaviour where backtick-wrapped ``@mentions`` render as plain text
+    rather than sending notifications.
+
+    Fenced blocks are stripped before inline spans so that a fenced block
+    containing a backtick inside it is handled correctly.
+    """
+    text = _FENCED_CODE_RE.sub("", text)
+    text = _INLINE_CODE_RE.sub("", text)
+    return text
+
 
 class ParsedCommand(BaseModel):
     """Result of parsing a comment for squadron commands."""
@@ -196,17 +218,25 @@ def parse_command(text: str) -> ParsedCommand | None:
     - ``@squadron-dev help`` — returns ParsedCommand(is_help=True)
     - ``@squadron-dev <agent>: <message>`` — returns ParsedCommand with agent_name and message
 
+    Mentions that appear inside backtick-wrapped inline code or fenced code
+    blocks are **ignored** — they are treated as literal text, not commands.
+    This mirrors GitHub's own behaviour (backtick @mentions don't notify).
+
     Returns None if the comment doesn't match any command syntax.
     """
     if not text:
         return None
 
+    # Strip code spans so that backtick-wrapped mentions are not matched.
+    # We operate on the stripped copy for all pattern searches.
+    searchable = _strip_code_spans(text)
+
     # Check for help command first
-    if _HELP_RE.search(text):
+    if _HELP_RE.search(searchable):
         return ParsedCommand(is_help=True)
 
     # Check for agent command
-    match = _COMMAND_RE.search(text)
+    match = _COMMAND_RE.search(searchable)
     if match:
         agent_name = match.group(1).lower()
         message = match.group(2).strip()
@@ -225,7 +255,7 @@ def parse_command(text: str) -> ParsedCommand | None:
 
         # If there's a colon in the match, it's definitely a command
         # If no colon, validate that it's a known agent name
-        match_text = text[match.start() : match.end()]
+        match_text = searchable[match.start() : match.end()]
         has_colon = ":" in match_text
 
         if has_colon or agent_name in known_agents:
