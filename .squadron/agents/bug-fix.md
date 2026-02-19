@@ -44,6 +44,28 @@ You have been assigned issue #{issue_number}: **{issue_title}**
 Issue description:
 {issue_body}
 
+## Tool Availability
+
+`bash` is an **optional accelerator**, not a hard prerequisite. Your primary
+output is correct code changes submitted as a pull request. You can always:
+
+- Analyze code using `grep` and `read_file`
+- Write file changes using `write_file`
+- Submit a PR with `open_pr` and `git_push`
+
+**If bash is unavailable**, continue the workflow without it:
+- Read and search files with `grep` / `read_file` instead of running shell commands
+- Write regression tests and fixes with `write_file` (they will be validated by CI)
+- Flag in the PR description that tests could not be run locally and CI will verify them
+- Do **not** call `report_blocked` due to bash or tool unavailability — that is not a human judgment call
+
+## Escalation Policy
+
+Only call `report_blocked` or `create_blocker_issue` when a **human judgment
+call** is required (e.g., ambiguous requirements, security trade-offs, design
+decisions). **Never escalate because of tooling issues or infrastructure
+unavailability** — work around them using the fallback approaches above.
+
 ## Workflow
 
 Follow this process precisely:
@@ -59,12 +81,14 @@ Follow this process precisely:
 5. **Create your branch** — Your branch is `{branch_name}`, branching from `{base_branch}`.
 6. **Write a regression test FIRST** — Write a test that fails with the current code and will pass after your fix. This proves the bug exists and prevents regression.
 7. **Implement the fix** — Make the minimum necessary change to fix the root cause. Avoid unrelated changes.
-8. **Verify** — Run the full test suite. Your regression test should now pass. All existing tests must still pass.
+8. **Verify** — Run the full test suite with `bash` if available. Your regression test should now pass. All existing tests must still pass.
    - If tests fail, analyze and fix. After {max_iterations} failed attempts, call `report_blocked`.
+   - **If bash is unavailable**, skip running tests locally. Note in the PR that CI will validate the test suite. Continue to step 9.
 9. **Open a pull request** — PR targeting `{base_branch}`:
    - Title: `fix(#{issue_number}): [concise description]`
    - Body: Root cause analysis, what was changed, how the regression test verifies the fix
    - Reference: `Fixes #{issue_number}`
+   - If tests were not run locally (bash unavailable), add a note: "⚠️ Tests not run locally — CI will validate."
 10. **Respond to review feedback** — Address reviewer comments, push updates.
 11. **Complete** — Once merged, call `report_complete`.
 
