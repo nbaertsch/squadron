@@ -12,9 +12,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import pytest
 import pytest_asyncio
 
 from squadron.config import (
@@ -112,6 +111,7 @@ def _mock_github():
 
 def _mock_agent_defs():
     from squadron.config import AgentDefinition
+
     return {
         "bug-fix": AgentDefinition(
             role="bug-fix",
@@ -187,9 +187,7 @@ class TestTriggerSpawnDuplicateGuard:
         """_trigger_spawn should NOT spawn if an ACTIVE agent already exists."""
         config = _config_with_pr_review_rereview()
         github = _mock_github()
-        router = EventRouter(
-            event_queue=asyncio.Queue(), registry=registry, config=config
-        )
+        router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
             mock_copilot = AsyncMock()
@@ -230,9 +228,7 @@ class TestTriggerSpawnDuplicateGuard:
         """_trigger_spawn should NOT spawn if a SLEEPING agent already exists."""
         config = _config_with_pr_review_rereview()
         github = _mock_github()
-        router = EventRouter(
-            event_queue=asyncio.Queue(), registry=registry, config=config
-        )
+        router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
             mock_copilot = AsyncMock()
@@ -280,9 +276,7 @@ class TestTriggerSpawnDuplicateGuard:
         """
         config = _config_with_pr_review_rereview()
         github = _mock_github()
-        router = EventRouter(
-            event_queue=asyncio.Queue(), registry=registry, config=config
-        )
+        router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
             mock_copilot = AsyncMock()
@@ -318,7 +312,8 @@ class TestTriggerSpawnDuplicateGuard:
             # (the old completed one was deleted and a new one created)
             agents = await registry.get_all_agents_for_issue(86)
             active_pr_review = [
-                a for a in agents
+                a
+                for a in agents
                 if a.role == "pr-review"
                 and a.status in (AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING)
             ]
@@ -343,9 +338,7 @@ class TestAuthoringAgentWakeOnChangesRequested:
         """
         config = _config_with_pr_review_rereview()
         github = _mock_github()
-        router = EventRouter(
-            event_queue=asyncio.Queue(), registry=registry, config=config
-        )
+        router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
             mock_copilot = AsyncMock()
@@ -392,9 +385,7 @@ class TestAuthoringAgentWakeOnChangesRequested:
         """An APPROVED review does NOT trigger the wake-on-changes-requested condition."""
         config = _config_with_pr_review_rereview()
         github = _mock_github()
-        router = EventRouter(
-            event_queue=asyncio.Queue(), registry=registry, config=config
-        )
+        router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
             mock_copilot = AsyncMock()
@@ -452,9 +443,7 @@ class TestReReviewCycle:
         """
         config = _config_with_pr_review_rereview()
         github = _mock_github()
-        router = EventRouter(
-            event_queue=asyncio.Queue(), registry=registry, config=config
-        )
+        router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
 
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
             mock_copilot = AsyncMock()
@@ -501,7 +490,8 @@ class TestReReviewCycle:
             all_agents = await registry.get_all_agents_for_issue(86)
             pr_review_agents = [a for a in all_agents if a.role == "pr-review"]
             active_reviewers = [
-                a for a in pr_review_agents
+                a
+                for a in pr_review_agents
                 if a.status in (AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING)
             ]
             assert len(active_reviewers) >= 1, (
@@ -521,9 +511,7 @@ class TestTriggerSpawnDirectly:
             config = _config_with_pr_review_rereview()
         if github is None:
             github = _mock_github()
-        router = EventRouter(
-            event_queue=asyncio.Queue(), registry=registry, config=config
-        )
+        router = EventRouter(event_queue=asyncio.Queue(), registry=registry, config=config)
         mgr = AgentManager(
             config=config,
             registry=registry,
@@ -582,7 +570,8 @@ class TestTriggerSpawnDirectly:
             # A new pr-review agent should have been spawned (old COMPLETED one cleaned up)
             all_agents = await registry.get_all_agents_for_issue(86)
             active_reviewers = [
-                a for a in all_agents
+                a
+                for a in all_agents
                 if a.role == "pr-review"
                 and a.status in (AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING)
             ]

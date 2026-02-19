@@ -389,7 +389,8 @@ class AgentManager:
                     role_name,
                     issue_number,
                     next(
-                        a.status for a in existing
+                        a.status
+                        for a in existing
                         if a.role == role_name and a.status in non_terminal_statuses
                     ),
                 )
@@ -2524,9 +2525,7 @@ class AgentManager:
         Returns the first matching PR dict, or None if none found.
         """
         try:
-            prs = await self.github.list_pull_requests(
-                self.owner, self.repo, state="open"
-            )
+            prs = await self.github.list_pull_requests(self.owner, self.repo, state="open")
         except Exception:
             logger.debug(
                 "Could not list PRs when checking for existing PR for issue #%d",
@@ -2537,9 +2536,7 @@ class AgentManager:
         import re
 
         closing_pattern = re.compile(
-            r"(?:closes|fixes|resolves|close|fix|resolve)\s*:?\s*#"
-            + str(issue_number)
-            + r"\b",
+            r"(?:closes|fixes|resolves|close|fix|resolve)\s*:?\s*#" + str(issue_number) + r"\b",
             re.IGNORECASE,
         )
         branch_pattern = re.compile(

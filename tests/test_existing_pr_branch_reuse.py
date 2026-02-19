@@ -15,7 +15,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import pytest_asyncio
 
 from squadron.agent_manager import AgentManager
@@ -359,8 +358,7 @@ class TestBuildAgentPromptWithExistingPr:
         assert "99" in prompt, "Prompt should include the existing PR number"
         # Should warn about the existing PR
         assert any(
-            phrase in prompt
-            for phrase in ["Existing PR", "existing PR", "existing pull request"]
+            phrase in prompt for phrase in ["Existing PR", "existing PR", "existing pull request"]
         ), "Prompt should mention the existing PR"
         # Should instruct not to open a new PR
         assert any(
