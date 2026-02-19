@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 MEMORY_WARNING_PERCENT = 85  # warn when system memory usage exceeds this %
 DISK_WARNING_PERCENT = 90  # warn when disk usage exceeds this %
 WORKTREE_SIZE_WARNING_MB = 500  # warn per worktree exceeding this size
+PROCESS_WARNING_THRESHOLD = 800  # warn when total process count approaches OS nproc limits
 
 
 @dataclass
@@ -40,6 +41,9 @@ class ResourceSnapshot:
 
     # Per-agent worktree sizes (agent_id → MB)
     worktree_sizes: dict[str, float] = field(default_factory=dict)
+
+    # Process count (tracks OS process pool exhaustion — root cause of bash spawn failures)
+    process_count: int = 0
 
     # Aggregate
     total_worktree_mb: float = 0
@@ -69,6 +73,22 @@ def _read_system_memory() -> tuple[float, float, float]:
     except (FileNotFoundError, OSError):
         # Non-Linux or container without /proc — return zeros
         return 0, 0, 0
+
+
+def _read_process_count() -> int:
+    """Read the total number of running processes.
+
+    Reads /proc entries on Linux (each numeric directory = one process).
+    Falls back to 0 on non-Linux systems or when /proc is unavailable.
+
+    A high process count approaching the nproc ulimit is the root cause
+    of 'Failed to start bash process' errors in Copilot agent sessions
+    (Issue #86).
+    """
+    try:
+        return sum(1 for entry in os.listdir("/proc") if entry.isdigit())
+    except OSError:
+        return 0
 
 
 def _get_dir_size_mb(path: Path) -> float:
@@ -184,6 +204,9 @@ class ResourceMonitor:
         snap.total_worktree_mb = sum(snap.worktree_sizes.values())
         snap.active_agent_count = len(snap.worktree_sizes)
 
+        # Process count — detect OS process pool exhaustion before bash spawning fails
+        snap.process_count = _read_process_count()
+
         return snap
 
     async def _monitor_loop(self) -> None:
@@ -226,11 +249,22 @@ class ResourceMonitor:
                     WORKTREE_SIZE_WARNING_MB,
                 )
 
+        if snap.process_count > PROCESS_WARNING_THRESHOLD:
+            logger.warning(
+                "RESOURCE WARNING — process count at %d (threshold: %d). "
+                "High process counts can cause 'Failed to start bash process' errors "
+                "in agent tool calls.",
+                snap.process_count,
+                PROCESS_WARNING_THRESHOLD,
+            )
+
         if snap.active_agent_count > 0:
             logger.info(
-                "Resource snapshot — mem: %.0f%%, disk: %.0f%%, worktrees: %d (%.0f MB total)",
+                "Resource snapshot — mem: %.0f%%, disk: %.0f%%, worktrees: %d (%.0f MB total), "
+                "processes: %d",
                 snap.memory_percent,
                 snap.disk_percent,
                 snap.active_agent_count,
                 snap.total_worktree_mb,
+                snap.process_count,
             )
