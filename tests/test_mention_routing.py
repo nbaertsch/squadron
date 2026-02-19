@@ -149,6 +149,7 @@ class TestParseCommand:
         assert result.is_help is True
 
 
+
 # ── Self-loop guard unit tests ───────────────────────────────────────────────
 
 
@@ -849,3 +850,193 @@ class TestEventRouterCommandParsing:
         internal_event = router._to_squadron_event(event, SquadronEventType.ISSUE_COMMENT)
 
         assert internal_event.command is None
+
+
+# ── Backtick exemption tests (issue #79) ─────────────────────────────────────
+
+
+class TestParseCommandBacktickExemption:
+    """Tests that backtick-wrapped mentions do not trigger agent invocation.
+
+    Mirrors GitHub behaviour: inline code and fenced code blocks render
+    ``@mentions`` as literal text without notification.  See issue #79.
+    """
+
+    # ── Inline code spans ────────────────────────────────────────────────
+
+    def test_inline_code_agent_mention_ignored(self):
+        """Inline-backtick @squadron-dev pm must not match."""
+        result = parse_command("`@squadron-dev pm`")
+        assert result is None
+
+    def test_inline_code_help_mention_ignored(self):
+        """Inline-backtick @squadron-dev help must not match."""
+        result = parse_command("`@squadron-dev help`")
+        assert result is None
+
+    def test_inline_code_with_colon_ignored(self):
+        """Inline-backtick mention with colon syntax must not match."""
+        result = parse_command("`@squadron-dev feat-dev: implement the feature`")
+        assert result is None
+
+    def test_inline_code_hyphenated_agent_ignored(self):
+        """Inline-backtick mention with hyphenated agent name must not match."""
+        result = parse_command("`@squadron-dev security-review`")
+        assert result is None
+
+    def test_inline_code_in_sentence_ignored(self):
+        """Backtick mention embedded in prose must not match."""
+        result = parse_command("You can invoke the PM with `@squadron-dev pm`.")
+        assert result is None
+
+    def test_inline_code_mention_with_surrounding_plain_text(self):
+        """Backtick mention surrounded by plain prose must not match."""
+        result = parse_command(
+            "To trigger the PM agent, write `@squadron-dev pm` in a comment."
+        )
+        assert result is None
+
+    # ── Fenced code blocks ───────────────────────────────────────────────
+
+    def test_fenced_code_block_agent_mention_ignored(self):
+        """Mention inside a fenced code block must not match."""
+        body = "```\n@squadron-dev pm do stuff\n```"
+        result = parse_command(body)
+        assert result is None
+
+    def test_fenced_code_block_with_language_specifier_ignored(self):
+        """Mention inside a fenced block with language tag must not match."""
+        body = "```markdown\n@squadron-dev feat-dev: implement\n```"
+        result = parse_command(body)
+        assert result is None
+
+    def test_fenced_code_block_help_ignored(self):
+        """Help mention inside fenced block must not match."""
+        body = "```\n@squadron-dev help\n```"
+        result = parse_command(body)
+        assert result is None
+
+    def test_fenced_code_block_in_larger_comment(self):
+        """Fenced block mention inside a larger comment must not match."""
+        body = (
+            "Here is the mention syntax:\n\n"
+            "```\n"
+            "@squadron-dev pm: please triage\n"
+            "```\n\n"
+            "Use it sparingly."
+        )
+        result = parse_command(body)
+        assert result is None
+
+    def test_tilde_fenced_block_ignored(self):
+        """Mention inside a tilde-fenced block must not match."""
+        body = "~~~\n@squadron-dev pm do stuff\n~~~"
+        result = parse_command(body)
+        assert result is None
+
+    # ── Plain text still works ───────────────────────────────────────────
+
+    def test_plain_agent_mention_still_works(self):
+        """Plain-text @squadron-dev pm must still trigger invocation."""
+        result = parse_command("@squadron-dev pm")
+        assert result is not None
+        assert result.agent_name == "pm"
+
+    def test_plain_help_mention_still_works(self):
+        """Plain-text @squadron-dev help must still trigger invocation."""
+        result = parse_command("@squadron-dev help")
+        assert result is not None
+        assert result.is_help is True
+
+    def test_plain_mention_with_colon_still_works(self):
+        """Plain-text mention with colon must still trigger invocation."""
+        result = parse_command("@squadron-dev feat-dev: implement the feature")
+        assert result is not None
+        assert result.agent_name == "feat-dev"
+        assert result.message == "implement the feature"
+
+    # ── Mixed content: code span + plain mention ─────────────────────────
+
+    def test_plain_mention_after_inline_code_mention_works(self):
+        """Plain mention following a backtick mention must still fire."""
+        body = (
+            "See `@squadron-dev pm` for reference.\n\n"
+            "@squadron-dev feat-dev: implement this"
+        )
+        result = parse_command(body)
+        assert result is not None
+        assert result.agent_name == "feat-dev"
+
+    def test_plain_mention_before_inline_code_mention_works(self):
+        """Plain mention preceding a backtick mention must fire correctly."""
+        body = "@squadron-dev pm: triage this\n\nExample: `@squadron-dev pm`"
+        result = parse_command(body)
+        assert result is not None
+        assert result.agent_name == "pm"
+
+    def test_inline_code_does_not_suppress_subsequent_plain_help(self):
+        """Inline code span before a plain help command must not suppress it."""
+        body = "Use `@squadron-dev help` or just @squadron-dev help"
+        result = parse_command(body)
+        assert result is not None
+        assert result.is_help is True
+
+
+class TestStripCodeSpans:
+    """Unit tests for the _strip_code_spans() helper (issue #79)."""
+
+    def test_strips_inline_code(self):
+        from squadron.models import _strip_code_spans
+        result = _strip_code_spans("`hello world`")
+        assert "hello world" not in result
+
+    def test_strips_fenced_code_block(self):
+        from squadron.models import _strip_code_spans
+        result = _strip_code_spans("```\nsome code\n```")
+        assert "some code" not in result
+
+    def test_strips_fenced_code_with_language(self):
+        from squadron.models import _strip_code_spans
+        result = _strip_code_spans("```python\nprint('hi')\n```")
+        assert "print" not in result
+
+    def test_strips_tilde_fenced_block(self):
+        from squadron.models import _strip_code_spans
+        result = _strip_code_spans("~~~\nsome code\n~~~")
+        assert "some code" not in result
+
+    def test_leaves_plain_text_intact(self):
+        from squadron.models import _strip_code_spans
+        original = "@squadron-dev pm: do work"
+        assert _strip_code_spans(original) == original
+
+    def test_strips_inline_but_leaves_surrounding_text(self):
+        from squadron.models import _strip_code_spans
+        result = _strip_code_spans("before `code` after")
+        assert "before" in result
+        assert "after" in result
+        assert "code" not in result
+
+    def test_empty_string(self):
+        from squadron.models import _strip_code_spans
+        assert _strip_code_spans("") == ""
+
+    def test_no_backticks(self):
+        from squadron.models import _strip_code_spans
+        text = "just plain text with @squadron-dev pm mention"
+        assert _strip_code_spans(text) == text
+
+    def test_strips_multiple_inline_spans(self):
+        from squadron.models import _strip_code_spans
+        result = _strip_code_spans("`one` and `two` and `three`")
+        assert "one" not in result
+        assert "two" not in result
+        assert "three" not in result
+
+    def test_fenced_stripped_before_inline(self):
+        """Fenced blocks are processed before inline spans to avoid partial matches."""
+        from squadron.models import _strip_code_spans
+        # Fenced block containing what looks like an inline span inside it
+        text = "```\nprint(`hello`)\n```"
+        result = _strip_code_spans(text)
+        assert "print" not in result
