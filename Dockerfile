@@ -20,8 +20,12 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install git (needed for worktree operations)
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# Install system dependencies
+# git: needed for worktree operations
+# ripgrep: fast code search used by agents (rg)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy venv from builder
