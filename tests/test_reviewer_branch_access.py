@@ -16,10 +16,8 @@ The fix:
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import pytest_asyncio
 
 from squadron.agent_manager import AgentManager
@@ -34,7 +32,7 @@ from squadron.config import (
     RuntimeConfig,
     SquadronConfig,
 )
-from squadron.models import AgentRecord, AgentStatus, GitHubEvent, SquadronEvent, SquadronEventType
+from squadron.models import GitHubEvent
 from squadron.registry import AgentRegistry
 
 
@@ -101,9 +99,6 @@ def _make_github_mock() -> AsyncMock:
 
 
 def _make_manager(config, registry, github, tmp_path) -> AgentManager:
-    from squadron.event_router import EventRouter
-    import asyncio
-
     router = MagicMock()
     router.subscribe = MagicMock()
     mgr = AgentManager(
@@ -158,7 +153,7 @@ class TestCreateAgentOverrideBranch:
 
             with patch.object(
                 AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path
-            ) as mock_worktree:
+            ):
                 mgr = _make_manager(config, registry, github, tmp_path)
 
                 record = await mgr.create_agent(
@@ -243,25 +238,25 @@ class TestTriggerSpawnPassesPrHeadBranch:
 
         original_create = AgentManager.create_agent
 
-        async def capturing_create(self_mgr, role, issue_number, trigger_event=None, override_branch=None):
+        async def capturing_create(
+            self_mgr, role, issue_number, trigger_event=None, override_branch=None
+        ):
             captured_override["branch"] = override_branch
             # Prevent actual worktree creation
-            with patch.object(AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path):
+            with patch.object(
+                AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path
+            ):
                 with patch("squadron.agent_manager.CopilotAgent") as MockCA:
                     mock_copilot = AsyncMock()
                     mock_copilot.start = AsyncMock()
                     MockCA.return_value = mock_copilot
-                    return await original_create(self_mgr, role, issue_number, trigger_event, override_branch)
+                    return await original_create(
+                        self_mgr, role, issue_number, trigger_event, override_branch
+                    )
 
         with patch.object(AgentManager, "create_agent", capturing_create):
             mgr = _make_manager(config, registry, github, tmp_path)
             await mgr.start()
-
-            event = _pr_opened_event(
-                pr_number=97,
-                head_branch="feat/issue-85",
-                issue_number=85,
-            )
 
             # Simulate a config trigger with spawn action
             from squadron.models import SquadronEvent, SquadronEventType
@@ -368,14 +363,20 @@ class TestTriggerSpawnPassesPrHeadBranch:
 
         original_create = AgentManager.create_agent
 
-        async def capturing_create(self_mgr, role, issue_number, trigger_event=None, override_branch=None):
+        async def capturing_create(
+            self_mgr, role, issue_number, trigger_event=None, override_branch=None
+        ):
             captured_override["branch"] = override_branch
-            with patch.object(AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path):
+            with patch.object(
+                AgentManager, "_create_worktree", new_callable=AsyncMock, return_value=tmp_path
+            ):
                 with patch("squadron.agent_manager.CopilotAgent") as MockCA:
                     mock_copilot = AsyncMock()
                     mock_copilot.start = AsyncMock()
                     MockCA.return_value = mock_copilot
-                    return await original_create(self_mgr, role, issue_number, trigger_event, override_branch)
+                    return await original_create(
+                        self_mgr, role, issue_number, trigger_event, override_branch
+                    )
 
         with patch.object(AgentManager, "create_agent", capturing_create):
             mgr = _make_manager(config, registry, github, tmp_path)
