@@ -72,8 +72,6 @@ agent_roles:
     agent_definition: agents/infra-dev.md
     lifecycle: stateful
     triggers:
-    - event: issues.labeled
-      label: infrastructure
     - action: sleep
       event: pull_request.opened
     - action: wake
