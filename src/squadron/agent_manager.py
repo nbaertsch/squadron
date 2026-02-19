@@ -1282,12 +1282,22 @@ class AgentManager:
                     record.agent_id,
                     updated.blocked_by,
                 )
-                # Remove task reference but keep CopilotAgent alive for resume
+                # Remove task reference
                 self._agent_tasks.pop(record.agent_id, None)
                 # Cancel watchdog — sleeping agents don't have active timers
                 self._cancel_watchdog(record.agent_id)
                 # Release concurrency slot — sleeping agents don't count
                 self._release_semaphore()
+                # Stop CopilotClient process to free system resources (issue #103).
+                # The session state is preserved in the SDK; wake_agent() will
+                # recreate the CopilotAgent and resume the session when needed.
+                agent_copilot = self._copilot_agents.pop(record.agent_id, None)
+                if agent_copilot:
+                    try:
+                        await agent_copilot.stop()
+                        logger.debug("Stopped CopilotClient for sleeping agent %s", record.agent_id)
+                    except Exception:
+                        logger.warning("Failed to stop CopilotClient for %s", record.agent_id)
 
             elif updated.status == AgentStatus.COMPLETED:
                 # Agent called report_complete → full cleanup

@@ -360,8 +360,13 @@ class TestPostTurnStateMachine:
             repo_root=Path("/tmp/test"),
         )
 
-    async def test_sleeping_agent_removes_task_keeps_copilot(self, registry):
-        """When agent transitions to SLEEPING, task is removed but CopilotAgent is kept."""
+    async def test_sleeping_agent_removes_task_and_stops_copilot(self, registry):
+        """When agent transitions to SLEEPING, task is removed and CopilotAgent is stopped.
+
+        Fix for issue #103: Sleeping agents must release their CopilotClient
+        processes to prevent resource exhaustion. The session state is preserved
+        by the SDK; wake_agent() will recreate the CopilotAgent on resume.
+        """
         config, github, router = self._make_manager_deps(registry)
         manager = self._make_manager(config, registry, github, router)
 
@@ -403,8 +408,10 @@ class TestPostTurnStateMachine:
 
         # Task should be removed
         assert agent.agent_id not in manager._agent_tasks
-        # CopilotAgent should still be present (for later resume)
-        assert agent.agent_id in manager._copilot_agents
+        # CopilotAgent should be stopped and removed (issue #103 fix)
+        assert agent.agent_id not in manager._copilot_agents
+        # Verify stop() was called to release the process
+        mock_copilot.stop.assert_called_once()
 
     async def test_completed_agent_gets_full_cleanup(self, registry):
         """When agent transitions to COMPLETED, everything is cleaned up."""
