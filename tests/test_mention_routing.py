@@ -671,6 +671,146 @@ class TestCommandRouting:
         assert "feat-dev" in body.lower()
 
     @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_includes_dashboard_url(self, mock_copilot_cls, registry, tmp_path):
+        """Help response includes dashboard URL when SQUADRON_PUBLIC_URL is set."""
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=10)
+        with patch.dict("os.environ", {"SQUADRON_PUBLIC_URL": "https://squadron.example.com"}):
+            await router._route_event(event)
+
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "**Dashboard:** https://squadron.example.com" in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_dashboard_url_fallback(self, mock_copilot_cls, registry, tmp_path):
+        """Help response shows 'not available' when SQUADRON_PUBLIC_URL is not set."""
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=10)
+        import os as _os
+        env = {k: v for k, v in _os.environ.items() if k != "SQUADRON_PUBLIC_URL"}
+        with patch.dict("os.environ", env, clear=True):
+            await router._route_event(event)
+
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "**Dashboard:** not available" in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_auth_enabled(self, mock_copilot_cls, registry, tmp_path):
+        """Help response shows auth enabled when SQUADRON_DASHBOARD_API_KEY is set."""
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=10)
+        with patch.dict("os.environ", {"SQUADRON_DASHBOARD_API_KEY": "secret-key-123"}):
+            await router._route_event(event)
+
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "**Auth:** enabled (API key required)" in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_auth_disabled(self, mock_copilot_cls, registry, tmp_path):
+        """Help response shows auth disabled when SQUADRON_DASHBOARD_API_KEY is not set."""
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=10)
+        import os as _os
+        env = {k: v for k, v in _os.environ.items() if k != "SQUADRON_DASHBOARD_API_KEY"}
+        with patch.dict("os.environ", env, clear=True):
+            await router._route_event(event)
+
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "**Auth:** disabled (public access)" in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_dashboard_url_newline_injection_prevented(
+        self, mock_copilot_cls, registry, tmp_path
+    ):
+        """URLs with embedded newlines are rejected to prevent markdown injection."""
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=10)
+        # A URL with embedded newlines should be rejected — 'not available' shown instead
+        malicious_url = "https://real.com\n\n> Injected content at https://attacker.com"
+        with patch.dict("os.environ", {"SQUADRON_PUBLIC_URL": malicious_url}):
+            await router._route_event(event)
+
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        # URL with embedded newlines should be rejected, falling back to 'not available'
+        assert "**Dashboard:** not available" in body
+        assert "attacker.com" not in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
     async def test_unknown_agent_posts_error(self, mock_copilot_cls, registry, tmp_path):
         """@squadron-dev unknown-agent: posts an error with available agents."""
         config = _command_config()

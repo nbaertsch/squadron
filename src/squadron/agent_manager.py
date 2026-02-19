@@ -15,12 +15,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from squadron.copilot import CopilotAgent, build_resume_config, build_session_config
-from squadron.models import AgentRecord, AgentStatus, MailMessage, MessageProvenance, MessageProvenanceType, SquadronEvent, SquadronEventType
+from squadron.dashboard_security import DASHBOARD_API_KEY_ENV
+from squadron.models import (
+    AgentRecord,
+    AgentStatus,
+    MailMessage,
+    MessageProvenance,
+    MessageProvenanceType,
+    SquadronEvent,
+    SquadronEventType,
+)
 from squadron.sandbox.manager import SandboxManager
 from squadron.tools.squadron_tools import SquadronTools
 
@@ -2035,9 +2046,9 @@ class AgentManager:
         sender: str = event.data.get("sender") or "unknown"
         payload = event.data.get("payload", {})
         comment_data = payload.get("comment", {})
-        body: str = comment_data.get("body") or (
-            event.command.message if event.command else ""
-        ) or ""
+        body: str = (
+            comment_data.get("body") or (event.command.message if event.command else "") or ""
+        )
         comment_id: int | None = comment_data.get("id")
 
         # Determine provenance type from available context
@@ -2451,6 +2462,31 @@ class AgentManager:
         else:
             await self._command_wake_or_spawn(agent_name, role_config, event)
 
+    def _get_dashboard_url(self) -> str:
+        """Return the public dashboard URL from env, or 'not available' if unset/invalid.
+
+        Validates the URL scheme (must be http or https) and rejects values containing
+        embedded newlines or carriage returns to prevent markdown injection.
+        """
+        raw = os.environ.get("SQUADRON_PUBLIC_URL", "").strip()
+        if not raw:
+            return "not available"
+        # Reject URLs with embedded newlines — treat as invalid to prevent markdown injection
+        if "\n" in raw or "\r" in raw:
+            logger.warning("SQUADRON_PUBLIC_URL contains newline characters — ignoring")
+            return "not available"
+        parsed = urlparse(raw)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning("SQUADRON_PUBLIC_URL has unexpected scheme %r — ignoring", parsed.scheme)
+            return "not available"
+        return parsed.geturl()
+
+    def _get_auth_status(self) -> str:
+        """Return auth status based on whether SQUADRON_DASHBOARD_API_KEY is set."""
+        if os.environ.get(DASHBOARD_API_KEY_ENV):
+            return "enabled (API key required)"
+        return "disabled (public access)"
+
     async def _handle_help_command(self, event: SquadronEvent) -> None:
         """Handle @squadron-dev help — post markdown table of available agents."""
         assert event.issue_number is not None
@@ -2478,6 +2514,9 @@ class AgentManager:
         lines.append("**Usage:** `@squadron-dev <agent>: <your message>`")
         lines.append("")
         lines.append("**Example:** `@squadron-dev pm: triage this issue`")
+        lines.append("")
+        lines.append(f"**Dashboard:** {self._get_dashboard_url()}")
+        lines.append(f"**Auth:** {self._get_auth_status()}")
 
         await self.github.comment_on_issue(
             self.config.project.owner,
