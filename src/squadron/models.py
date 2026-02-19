@@ -58,6 +58,80 @@ class AgentRecord(BaseModel):
     sleeping_since: datetime | None = Field(default=None, description="When agent entered SLEEPING")
 
 
+# ── Mail Messages (Push Delivery) ───────────────────────────────────────────
+
+
+class MessageProvenanceType(str, enum.Enum):
+    """Type identifier for the source of a mail message.
+
+    Only ``issue_comment`` and ``pr_comment`` are implemented now, but the
+    enum is the single place to add new source types (e.g. slack_message,
+    email, direct_invocation) without changing the rest of the schema.
+    """
+
+    ISSUE_COMMENT = "issue_comment"
+    PR_COMMENT = "pr_comment"
+
+
+class MessageProvenance(BaseModel):
+    """Structured origin of a mail message — type + source reference.
+
+    The ``type`` field identifies the source kind; the remaining fields
+    carry the reference coordinates for that type.  Fields irrelevant to
+    the current type are left as ``None``.
+
+    Extensibility: adding a new provenance type requires only:
+      1. A new ``MessageProvenanceType`` variant.
+      2. New optional fields for its reference coordinates (if any).
+      No existing schema changes are required.
+
+    Examples::
+
+        # issue_comment: a comment on a GitHub issue
+        MessageProvenance(
+            type=MessageProvenanceType.ISSUE_COMMENT,
+            issue_number=42,
+            comment_id=987,
+        )
+
+        # pr_comment: a comment on a GitHub pull request
+        MessageProvenance(
+            type=MessageProvenanceType.PR_COMMENT,
+            pr_number=10,
+            comment_id=456,
+        )
+    """
+
+    type: MessageProvenanceType = Field(description="Message source type")
+    issue_number: int | None = Field(
+        default=None, description="GitHub issue number (issue_comment provenance)"
+    )
+    pr_number: int | None = Field(
+        default=None, description="GitHub PR number (pr_comment provenance)"
+    )
+    comment_id: int | None = Field(
+        default=None, description="GitHub comment ID (issue_comment and pr_comment)"
+    )
+
+
+class MailMessage(BaseModel):
+    """An inbound @ mention message to be pushed into an agent's context.
+
+    Created when another user (or agent) @ mentions an active agent in a
+    GitHub comment.  Stored per-agent in ``AgentManager.agent_mail_queues``
+    and injected into the next ``send_and_wait`` prompt before the LLM call.
+    After injection the message is removed — no double-delivery.
+    """
+
+    sender: str = Field(description="GitHub username of the message sender")
+    body: str = Field(description="Full comment body (raw message content)")
+    provenance: MessageProvenance = Field(description="Structured message origin")
+    received_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="UTC timestamp when the message was enqueued",
+    )
+
+
 # ── GitHub Events ────────────────────────────────────────────────────────────
 
 

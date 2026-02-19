@@ -29,3 +29,6 @@ Thumbs.db
 .env
 .env.local
 *.pem
+
+# Test artifacts (MagicMock side effects)
+MagicMock/
