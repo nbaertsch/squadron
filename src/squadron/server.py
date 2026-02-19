@@ -57,7 +57,9 @@ class SquadronServer:
 
     def __init__(self, repo_root: Path | None = None):
         self.repo_root = repo_root or Path.cwd()
-        self.squadron_dir = self.repo_root / ".squadron"
+        # Use SQUADRON_CONFIG_DIR if set (Azure Files mount), else default to repo
+        config_dir = os.environ.get("SQUADRON_CONFIG_DIR", "").strip()
+        self.squadron_dir = Path(config_dir) if config_dir else self.repo_root / ".squadron"
 
         # Components (initialized in start())
         self.config: SquadronConfig | None = None

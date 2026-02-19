@@ -2,12 +2,14 @@
 //
 // Provisions:
 //   1. Log Analytics workspace (required by Container App Environment)
-//   2. Container App Environment
-//   3. Container App (single container, pulls from GHCR)
+//   2. Storage Account + Azure Files share (persistent config + state)
+//   3. Container App Environment (with storage mount)
+//   4. Container App (single container, pulls from GHCR)
 //
-// All state is ephemeral (container-local /tmp). The container clones the
-// repo at startup, stores SQLite DB at /tmp/squadron-data, and creates
-// worktrees at /tmp/squadron-worktrees.
+// Persistent storage:
+//   - .squadron/ config is synced to Azure Files by GitHub Actions
+//   - SQLite DBs (registry, activity) persist across restarts
+//   - Worktrees remain ephemeral (/tmp)
 //
 // Deploy:
 //   az deployment group create \
@@ -90,6 +92,37 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   }
 }
 
+// ── Storage Account + File Share ────────────────────────────────────────────
+
+// Storage account name must be globally unique, lowercase, 3-24 chars
+var storageAccountName = '${replace(appName, '-', '')}stor'
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: storageAccountName
+  location: location
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    supportsHttpsTrafficOnly: true
+  }
+}
+
+resource fileServices 'Microsoft.Storage/storageAccounts/fileServices@2023-01-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
+  parent: fileServices
+  name: 'squadron-data'
+  properties: {
+    shareQuota: 5 // 5 GB — plenty for config + SQLite DBs
+  }
+}
+
 // ── Container App Environment ───────────────────────────────────────────────
 
 resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
@@ -102,6 +135,20 @@ resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
         customerId: logAnalytics.properties.customerId
         sharedKey: logAnalytics.listKeys().primarySharedKey
       }
+    }
+  }
+}
+
+// Link storage to environment
+resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
+  parent: env
+  name: 'squadron-storage'
+  properties: {
+    azureFile: {
+      accountName: storageAccount.name
+      accountKey: storageAccount.listKeys().keys[0].value
+      shareName: fileShare.name
+      accessMode: 'ReadWrite'
     }
   }
 }
@@ -147,10 +194,19 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'SQUADRON_REPO_URL', value: repoUrl }
             { name: 'SQUADRON_DEFAULT_BRANCH', value: defaultBranch }
             { name: 'SQUADRON_WORKTREE_DIR', value: '/tmp/squadron-worktrees' }
-            { name: 'SQUADRON_DATA_DIR', value: '/tmp/squadron-data' }
+            // Data dir now on persistent Azure Files mount
+            { name: 'SQUADRON_DATA_DIR', value: '/mnt/squadron-data' }
+            // Config dir also on persistent mount (synced by GitHub Actions)
+            { name: 'SQUADRON_CONFIG_DIR', value: '/mnt/squadron-data/.squadron' }
           ]
           command: ['squadron', 'serve']
           args: ['--repo-root', '/tmp/squadron-repo', '--host', '0.0.0.0', '--port', '8000']
+          volumeMounts: [
+            {
+              volumeName: 'squadron-data'
+              mountPath: '/mnt/squadron-data'
+            }
+          ]
           probes: [
             {
               type: 'Liveness'
@@ -173,6 +229,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           ]
         }
       ]
+      volumes: [
+        {
+          name: 'squadron-data'
+          storageName: envStorage.name
+          storageType: 'AzureFile'
+        }
+      ]
       revisionSuffix: revisionSuffix
       scale: {
         minReplicas: minReplicas
@@ -188,3 +251,4 @@ output fqdn string = containerApp.properties.configuration.ingress.fqdn
 output webhookUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}/webhook'
 output appName string = containerApp.name
 output resourceGroup string = resourceGroup().name
+output storageAccountName string = storageAccount.name
