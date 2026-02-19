@@ -1,10 +1,12 @@
 """Sandbox configuration model."""
+
 from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
 class SandboxConfig(BaseModel):
     """Configuration for sandboxed agent execution."""
+
     enabled: bool = False
     namespace_mount: bool = True
     namespace_pid: bool = True

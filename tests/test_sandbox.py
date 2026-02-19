@@ -7,9 +7,8 @@ import hashlib
 import json
 import os
 import secrets
-import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -20,10 +19,8 @@ from squadron.sandbox.namespace import (
     SandboxNamespace,
     _bpf_jump,
     _bpf_stmt,
-    is_linux,
-    unshare_available,
 )
-from squadron.sandbox.worktree import EphemeralWorktree, _overlayfs_available
+from squadron.sandbox.worktree import EphemeralWorktree
 
 
 # -- Fixtures ---------------------------------------------------------------
@@ -116,8 +113,12 @@ class TestSandboxAuditLogger:
         await audit.start()
         token = secrets.token_bytes(32)
         await audit.log_tool_call(
-            agent_id="agent", session_token=token,
-            tool="read_issue", params={}, response={}, status="ok",
+            agent_id="agent",
+            session_token=token,
+            tool="read_issue",
+            params={},
+            response={},
+            status="ok",
         )
         log_file = audit._log_file()
         lines = log_file.read_text().strip().splitlines()
@@ -134,8 +135,12 @@ class TestSandboxAuditLogger:
         await audit.start()
         token = secrets.token_bytes(32)
         await audit.log_tool_call(
-            agent_id="agent", session_token=token,
-            tool="read_issue", params={}, response={}, status="ok",
+            agent_id="agent",
+            session_token=token,
+            tool="read_issue",
+            params={},
+            response={},
+            status="ok",
         )
         log_content = audit._log_file().read_text()
         assert token.hex() not in log_content, "Raw token must not appear in audit log"
@@ -157,13 +162,19 @@ class TestSandboxAuditLogger:
         token = secrets.token_bytes(32)
         for i in range(5):
             await audit.log_tool_call(
-                agent_id="agent", session_token=token,
-                tool=f"tool_{i}", params={}, response={}, status="ok",
+                agent_id="agent",
+                session_token=token,
+                tool=f"tool_{i}",
+                params={},
+                response={},
+                status="ok",
             )
         log_file = audit._log_file()
-        seqs = [json.loads(line)["seq"]
-                for line in log_file.read_text().strip().splitlines()
-                if line.strip()]
+        seqs = [
+            json.loads(line)["seq"]
+            for line in log_file.read_text().strip().splitlines()
+            if line.strip()
+        ]
         assert seqs == list(range(1, 6))
 
     @pytest.mark.asyncio
@@ -172,9 +183,12 @@ class TestSandboxAuditLogger:
         await audit.start()
         token = secrets.token_bytes(32)
         await audit.log_tool_call(
-            agent_id="agent", session_token=token,
+            agent_id="agent",
+            session_token=token,
             tool="delete_repo",
-            params={}, response={"blocked_reason": "not in allowlist"}, status="blocked",
+            params={},
+            response={"blocked_reason": "not in allowlist"},
+            status="blocked",
         )
         log_content = audit._log_file().read_text()
         assert "blocked" in log_content
@@ -340,6 +354,7 @@ class TestSandboxNamespace:
         ns = SandboxNamespace(cfg)
         ns._available = False  # force unavailable
         import logging
+
         with caplog.at_level(logging.WARNING):
             result = ns.wrap_command(["python", "agent.py"])
         assert result == ["python", "agent.py"]
@@ -348,8 +363,11 @@ class TestSandboxNamespace:
     def test_wrap_command_includes_namespace_flags(self):
         cfg = SandboxConfig(
             enabled=True,
-            namespace_mount=True, namespace_pid=True, namespace_net=True,
-            namespace_ipc=True, namespace_uts=True,
+            namespace_mount=True,
+            namespace_pid=True,
+            namespace_net=True,
+            namespace_ipc=True,
+            namespace_uts=True,
         )
         ns = SandboxNamespace(cfg)
         ns._available = True
@@ -367,8 +385,11 @@ class TestSandboxNamespace:
     def test_wrap_command_selective_namespaces(self):
         cfg = SandboxConfig(
             enabled=True,
-            namespace_mount=False, namespace_pid=False, namespace_net=True,
-            namespace_ipc=False, namespace_uts=False,
+            namespace_mount=False,
+            namespace_pid=False,
+            namespace_net=True,
+            namespace_ipc=False,
+            namespace_uts=False,
         )
         ns = SandboxNamespace(cfg)
         ns._available = True
@@ -399,7 +420,8 @@ class TestEphemeralWorktree:
     async def test_tmpfs_copy_created(self, tmp_path: Path):
         """When overlayfs is disabled, a tmpfs copy should be created."""
         cfg = SandboxConfig(
-            enabled=True, use_overlayfs=False,
+            enabled=True,
+            use_overlayfs=False,
             retention_path=str(tmp_path / "forensics"),
         )
         wt = EphemeralWorktree(cfg, tmp_path / "sandboxes")
@@ -435,6 +457,7 @@ class TestEphemeralWorktree:
         cfg = SandboxConfig(use_overlayfs=False, retention_path=str(tmp_path))
         wt = EphemeralWorktree(cfg, tmp_path / "sandboxes")
         from squadron.sandbox.worktree import WorktreeInfo
+
         info = WorktreeInfo(
             base_dir=tmp_path / "base",
             lower_dir=tmp_path / "lower",
@@ -462,6 +485,7 @@ class TestEphemeralWorktree:
         )
         wt = EphemeralWorktree(cfg, tmp_path / "sandboxes")
         from squadron.sandbox.worktree import WorktreeInfo
+
         merged_dir = tmp_path / "base" / "merged"
         merged_dir.mkdir(parents=True)
         (merged_dir / "evidence.txt").write_text("suspicious")
@@ -486,6 +510,7 @@ class TestEphemeralWorktree:
     @pytest.mark.asyncio
     async def test_purge_stale_forensics(self, tmp_path: Path):
         import time
+
         cfg = SandboxConfig(retention_path=str(tmp_path / "forensics"), retention_days=0)
         wt = EphemeralWorktree(cfg, tmp_path / "sandboxes")
         retention_dir = Path(cfg.retention_path)
@@ -505,6 +530,7 @@ class TestEphemeralWorktree:
 class TestConfigIntegration:
     def test_get_sandbox_config_from_dict(self):
         from squadron.config import SquadronConfig
+
         config = SquadronConfig(
             project={"name": "test"},
             sandbox={"enabled": True, "retention_days": 7},
@@ -515,6 +541,7 @@ class TestConfigIntegration:
 
     def test_get_sandbox_config_defaults(self):
         from squadron.config import SquadronConfig
+
         config = SquadronConfig(project={"name": "test"}, sandbox={})
         sb = config.get_sandbox_config()
         assert sb.enabled is False
@@ -522,24 +549,32 @@ class TestConfigIntegration:
 
     def test_sandbox_env_override_enabled(self, tmp_path: Path, monkeypatch):
         import yaml
+
         monkeypatch.setenv("SQUADRON_SANDBOX_ENABLED", "true")
         sq = tmp_path / ".squadron"
         sq.mkdir()
-        (sq / "config.yaml").write_text(yaml.dump({
-            "project": {"name": "test"},
-            "sandbox": {"enabled": False},
-        }))
+        (sq / "config.yaml").write_text(
+            yaml.dump(
+                {
+                    "project": {"name": "test"},
+                    "sandbox": {"enabled": False},
+                }
+            )
+        )
         from squadron.config import load_config
+
         config = load_config(sq)
         assert config.get_sandbox_config().enabled is True
 
     def test_sandbox_retention_path_env_override(self, tmp_path: Path, monkeypatch):
         import yaml
+
         monkeypatch.setenv("SQUADRON_SANDBOX_RETENTION_PATH", "/custom/forensics")
         sq = tmp_path / ".squadron"
         sq.mkdir()
         (sq / "config.yaml").write_text(yaml.dump({"project": {"name": "test"}}))
         from squadron.config import load_config
+
         config = load_config(sq)
         assert config.get_sandbox_config().retention_path == "/custom/forensics"
 
@@ -551,6 +586,7 @@ class TestAuthBroker:
     @pytest.mark.asyncio
     async def test_session_registration(self):
         from squadron.sandbox.broker import AuthBroker
+
         mock_github = MagicMock()
         broker = AuthBroker(mock_github)
         token = secrets.token_bytes(32)
@@ -563,6 +599,7 @@ class TestAuthBroker:
     @pytest.mark.asyncio
     async def test_invalid_session_rejected(self):
         from squadron.sandbox.broker import AuthBroker, BrokerRequest
+
         mock_github = MagicMock()
         broker = AuthBroker(mock_github)
         await broker.start()
@@ -570,8 +607,10 @@ class TestAuthBroker:
             token = secrets.token_bytes(32)
             response_q: asyncio.Queue = asyncio.Queue(maxsize=1)
             req = BrokerRequest(
-                agent_id="agent-1", session_token=token,
-                tool="read_issue", params={"issue_number": 42},
+                agent_id="agent-1",
+                session_token=token,
+                tool="read_issue",
+                params={"issue_number": 42},
                 response_queue=response_q,
             )
             resp = await broker.submit(req)
@@ -583,6 +622,7 @@ class TestAuthBroker:
     @pytest.mark.asyncio
     async def test_registered_session_dispatches(self):
         from squadron.sandbox.broker import AuthBroker, BrokerRequest
+
         mock_github = AsyncMock()
         mock_github.get_issue = AsyncMock(return_value={"number": 42, "title": "Test"})
         broker = AuthBroker(mock_github)
@@ -592,7 +632,8 @@ class TestAuthBroker:
             broker.register_session("agent-1", token)
             response_q: asyncio.Queue = asyncio.Queue(maxsize=1)
             req = BrokerRequest(
-                agent_id="agent-1", session_token=token,
+                agent_id="agent-1",
+                session_token=token,
                 params={"issue_number": 42, "_owner": "org", "_repo": "repo"},
                 tool="read_issue",
                 response_queue=response_q,
@@ -612,20 +653,27 @@ class TestToolProxy:
     @pytest.mark.asyncio
     async def test_allowlist_enforcement(self, tmp_path: Path):
         from squadron.sandbox.proxy import ToolProxy
+
         cfg = SandboxConfig(socket_dir=str(tmp_path / "sockets"))
         token = secrets.token_bytes(32)
         mock_audit = AsyncMock()
         mock_oi = MagicMock()
         mock_oi.inspect.return_value = MagicMock(passed=True)
         proxy = ToolProxy(
-            agent_id="agent-1", issue_number=42, session_token=token,
+            agent_id="agent-1",
+            issue_number=42,
+            session_token=token,
             allowed_tools=["read_issue", "comment_on_issue"],
-            broker=MagicMock(), audit=mock_audit, output_inspector=mock_oi,
-            config=cfg, owner="org", repo="repo",
+            broker=MagicMock(),
+            audit=mock_audit,
+            output_inspector=mock_oi,
+            config=cfg,
+            owner="org",
+            repo="repo",
         )
-        result = await proxy._process_request({
-            "token": token.hex(), "tool": "delete_repo", "params": {}
-        })
+        result = await proxy._process_request(
+            {"token": token.hex(), "tool": "delete_repo", "params": {}}
+        )
         assert not result["ok"]
         assert "not-permitted" in result["error"]
         call_kwargs = mock_audit.log_tool_call.call_args[1]
@@ -634,40 +682,56 @@ class TestToolProxy:
     @pytest.mark.asyncio
     async def test_scope_validation(self, tmp_path: Path):
         from squadron.sandbox.proxy import ToolProxy
+
         cfg = SandboxConfig(socket_dir=str(tmp_path / "sockets"))
         token = secrets.token_bytes(32)
         mock_oi = MagicMock()
         mock_oi.inspect.return_value = MagicMock(passed=True)
         proxy = ToolProxy(
-            agent_id="agent-issue-42", issue_number=42, session_token=token,
+            agent_id="agent-issue-42",
+            issue_number=42,
+            session_token=token,
             allowed_tools=["comment_on_issue"],
-            broker=MagicMock(), audit=AsyncMock(), output_inspector=mock_oi,
-            config=cfg, owner="org", repo="repo",
+            broker=MagicMock(),
+            audit=AsyncMock(),
+            output_inspector=mock_oi,
+            config=cfg,
+            owner="org",
+            repo="repo",
         )
         # Attempt to write to a different issue (cross-issue violation)
-        result = await proxy._process_request({
-            "token": token.hex(),
-            "tool": "comment_on_issue",
-            "params": {"issue_number": 99, "body": "Hello"},
-        })
+        result = await proxy._process_request(
+            {
+                "token": token.hex(),
+                "tool": "comment_on_issue",
+                "params": {"issue_number": 99, "body": "Hello"},
+            }
+        )
         assert not result["ok"]
         assert "not-permitted" in result["error"]
 
     @pytest.mark.asyncio
     async def test_invalid_token_rejected(self, tmp_path: Path):
         from squadron.sandbox.proxy import ToolProxy
+
         cfg = SandboxConfig(socket_dir=str(tmp_path / "sockets"))
         token = secrets.token_bytes(32)
         wrong_token = secrets.token_bytes(32)
         proxy = ToolProxy(
-            agent_id="agent-1", issue_number=42, session_token=token,
+            agent_id="agent-1",
+            issue_number=42,
+            session_token=token,
             allowed_tools=["read_issue"],
-            broker=MagicMock(), audit=AsyncMock(), output_inspector=MagicMock(),
-            config=cfg, owner="org", repo="repo",
+            broker=MagicMock(),
+            audit=AsyncMock(),
+            output_inspector=MagicMock(),
+            config=cfg,
+            owner="org",
+            repo="repo",
         )
-        result = await proxy._process_request({
-            "token": wrong_token.hex(), "tool": "read_issue", "params": {}
-        })
+        result = await proxy._process_request(
+            {"token": wrong_token.hex(), "tool": "read_issue", "params": {}}
+        )
         assert not result["ok"]
         assert "session token" in result["error"].lower()
 
@@ -675,6 +739,7 @@ class TestToolProxy:
     async def test_rate_limiting(self, tmp_path: Path):
         from squadron.sandbox.broker import BrokerResponse
         from squadron.sandbox.proxy import ToolProxy
+
         cfg = SandboxConfig(
             socket_dir=str(tmp_path / "sockets"),
             max_tool_calls_per_session=2,
@@ -682,34 +747,45 @@ class TestToolProxy:
         )
         token = secrets.token_bytes(32)
         mock_broker = AsyncMock()
-        mock_broker.submit = AsyncMock(
-            return_value=BrokerResponse(ok=True, data={"ok": True})
-        )
+        mock_broker.submit = AsyncMock(return_value=BrokerResponse(ok=True, data={"ok": True}))
         mock_oi = MagicMock()
         mock_oi.inspect.return_value = MagicMock(passed=True)
         proxy = ToolProxy(
-            agent_id="agent-1", issue_number=42, session_token=token,
+            agent_id="agent-1",
+            issue_number=42,
+            session_token=token,
             allowed_tools=["read_issue"],
-            broker=mock_broker, audit=AsyncMock(), output_inspector=mock_oi,
-            config=cfg, owner="org", repo="repo",
+            broker=mock_broker,
+            audit=AsyncMock(),
+            output_inspector=mock_oi,
+            config=cfg,
+            owner="org",
+            repo="repo",
         )
         for _ in range(2):
-            r = await proxy._process_request({
-                "token": token.hex(), "tool": "read_issue",
-                "params": {"issue_number": 42},
-            })
+            r = await proxy._process_request(
+                {
+                    "token": token.hex(),
+                    "tool": "read_issue",
+                    "params": {"issue_number": 42},
+                }
+            )
             assert r["ok"], f"Expected ok but got {r}"
         # Third call should hit rate limit
-        result = await proxy._process_request({
-            "token": token.hex(), "tool": "read_issue",
-            "params": {"issue_number": 42},
-        })
+        result = await proxy._process_request(
+            {
+                "token": token.hex(),
+                "tool": "read_issue",
+                "params": {"issue_number": 42},
+            }
+        )
         assert not result["ok"]
         assert "rate limit" in result["error"].lower()
 
     @pytest.mark.asyncio
     async def test_output_inspection_blocks(self, tmp_path: Path):
         from squadron.sandbox.proxy import ToolProxy
+
         cfg = SandboxConfig(socket_dir=str(tmp_path / "sockets"), timing_floor_ms=0)
         token = secrets.token_bytes(32)
         mock_oi = MagicMock()
@@ -717,15 +793,23 @@ class TestToolProxy:
             passed=False, reason="sensitive token detected"
         )
         proxy = ToolProxy(
-            agent_id="agent-1", issue_number=42, session_token=token,
+            agent_id="agent-1",
+            issue_number=42,
+            session_token=token,
             allowed_tools=["comment_on_issue"],
-            broker=AsyncMock(), audit=AsyncMock(), output_inspector=mock_oi,
-            config=cfg, owner="org", repo="repo",
+            broker=AsyncMock(),
+            audit=AsyncMock(),
+            output_inspector=mock_oi,
+            config=cfg,
+            owner="org",
+            repo="repo",
         )
-        result = await proxy._process_request({
-            "token": token.hex(),
-            "tool": "comment_on_issue",
-            "params": {"issue_number": 42, "body": "leaking secret"},
-        })
+        result = await proxy._process_request(
+            {
+                "token": token.hex(),
+                "tool": "comment_on_issue",
+                "params": {"issue_number": 42, "body": "leaking secret"},
+            }
+        )
         assert not result["ok"]
         assert "sensitive token detected" in result["error"]

@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from squadron.sandbox.audit import SandboxAuditLogger
-    from squadron.sandbox.broker import AuthBroker, BrokerRequest
+    from squadron.sandbox.broker import AuthBroker
     from squadron.sandbox.config import SandboxConfig
     from squadron.sandbox.inspector import OutputInspector
 
@@ -177,9 +177,7 @@ class ToolProxy:
 
         # 2. Validate tool allowlist
         if tool not in self._allowed_tools:
-            logger.warning(
-                "ToolProxy: tool '%s' not in allowlist for %s", tool, self._agent_id
-            )
+            logger.warning("ToolProxy: tool '%s' not in allowlist for %s", tool, self._agent_id)
             await self._audit_blocked(tool, params, f"tool '{tool}' not in allowlist")
             return {"ok": False, "error": f"tool-not-permitted: '{tool}' not in agent allowlist"}
 
@@ -290,4 +288,5 @@ class ToolProxy:
 def _constant_time_eq(a: str, b: str) -> bool:
     """Constant-time string comparison to prevent timing attacks."""
     import hmac
+
     return hmac.compare_digest(a.encode(), b.encode())

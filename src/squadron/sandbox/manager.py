@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path

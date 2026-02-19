@@ -13,7 +13,6 @@ import fnmatch
 import logging
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -175,7 +174,9 @@ class DiffInspector:
         for line in diff_text.splitlines():
             if line.startswith("+") and len(line) > self._LONG_LINE_THRESHOLD:
                 reasons.append(f"suspiciously long added line ({len(line)} chars)")
-                logger.warning("Diff inspection: possible binary blob in diff (line len=%d)", len(line))
+                logger.warning(
+                    "Diff inspection: possible binary blob in diff (line len=%d)", len(line)
+                )
                 break
 
         if flagged_paths:

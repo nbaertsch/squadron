@@ -392,7 +392,6 @@ class SquadronConfig(BaseModel):
     # Workflows - deterministic multi-agent orchestration (inline in config)
     workflows: dict[str, "WorkflowConfig"] = Field(default_factory=dict)
 
-
     def get_sandbox_config(self):
         """Return a typed SandboxConfig, lazily importing to avoid circular deps."""
         from squadron.sandbox.config import SandboxConfig

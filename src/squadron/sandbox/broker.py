@@ -15,8 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -131,7 +130,9 @@ class AuthBroker:
             try:
                 response = await self._handle(request)
             except Exception as exc:
-                logger.exception("AuthBroker: unhandled error for %s/%s", request.agent_id, request.tool)
+                logger.exception(
+                    "AuthBroker: unhandled error for %s/%s", request.agent_id, request.tool
+                )
                 response = BrokerResponse(ok=False, error=f"broker internal error: {exc}")
 
             try:
@@ -149,8 +150,7 @@ class AuthBroker:
         # Double-check session is still valid (could have been unregistered)
         if not self.is_valid_session(request.session_token, request.agent_id):
             logger.warning(
-                "AuthBroker: request from unregistered/mismatched session "
-                "(agent=%s, tool=%s)",
+                "AuthBroker: request from unregistered/mismatched session (agent=%s, tool=%s)",
                 request.agent_id,
                 request.tool,
             )
@@ -201,9 +201,7 @@ class AuthBroker:
                 head=api_params["head"],
                 base=api_params.get("base", "main"),
             ),
-            "get_pr_details": lambda: gh.get_pull_request(
-                owner, repo, api_params["pr_number"]
-            ),
+            "get_pr_details": lambda: gh.get_pull_request(owner, repo, api_params["pr_number"]),
             "get_pr_feedback": lambda: gh.get_pull_request_reviews(
                 owner, repo, api_params["pr_number"]
             ),

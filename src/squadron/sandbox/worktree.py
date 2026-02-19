@@ -15,9 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,12 +29,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class WorktreeInfo:
     """Holds paths for an ephemeral sandboxed worktree."""
-    base_dir: Path        # root of all sandbox dirs for this agent
-    lower_dir: Path       # read-only repo snapshot (bind-mounted or rsync)
-    upper_dir: Path       # overlayfs write layer
-    work_dir: Path        # overlayfs work dir (required by kernel)
-    merged_dir: Path      # the overlayfs mount point agents see
-    agent_def_dir: Path   # read-only mount point for .squadron/agents/
+
+    base_dir: Path  # root of all sandbox dirs for this agent
+    lower_dir: Path  # read-only repo snapshot (bind-mounted or rsync)
+    upper_dir: Path  # overlayfs write layer
+    work_dir: Path  # overlayfs work dir (required by kernel)
+    merged_dir: Path  # the overlayfs mount point agents see
+    agent_def_dir: Path  # read-only mount point for .squadron/agents/
     is_overlayfs: bool = False
     is_active: bool = False
 
@@ -108,7 +107,9 @@ class EphemeralWorktree:
         work_dir = info.merged_dir if info.is_active else info.upper_dir
         try:
             proc = await asyncio.create_subprocess_exec(
-                git_exe, "diff", "HEAD",
+                git_exe,
+                "diff",
+                "HEAD",
                 cwd=str(work_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -156,7 +157,9 @@ class EphemeralWorktree:
         try:
             shutil.copytree(str(source), str(dest), dirs_exist_ok=True)
             reason_file = dest / ".sandbox-exit-reason.txt"
-            reason_file.write_text("agent_id: " + agent_id + "\nreason: " + reason + "\nts: " + str(ts) + "\n")
+            reason_file.write_text(
+                "agent_id: " + agent_id + "\nreason: " + reason + "\nts: " + str(ts) + "\n"
+            )
             logger.info("Preserved forensic worktree: %s (reason=%s)", dest, reason)
         except Exception:
             logger.exception("Failed to preserve forensic worktree for %s", agent_id)
@@ -222,8 +225,11 @@ class EphemeralWorktree:
         """
         # Bind-mount the git worktree as the lower dir (read-only)
         rc_bind, _, err_bind = await _run(
-            "mount", "--bind", "--read-only",
-            str(git_worktree), str(info.lower_dir),
+            "mount",
+            "--bind",
+            "--read-only",
+            str(git_worktree),
+            str(info.lower_dir),
         )
         if rc_bind != 0:
             logger.warning("overlayfs bind mount failed: %s", err_bind)
@@ -231,12 +237,15 @@ class EphemeralWorktree:
 
         # Mount overlayfs
         overlay_opts = (
-            f"lowerdir={info.lower_dir},upperdir={info.upper_dir},"
-            f"workdir={info.work_dir}"
+            f"lowerdir={info.lower_dir},upperdir={info.upper_dir},workdir={info.work_dir}"
         )
         rc_overlay, _, err_overlay = await _run(
-            "mount", "-t", "overlay", "overlay",
-            "-o", overlay_opts,
+            "mount",
+            "-t",
+            "overlay",
+            "overlay",
+            "-o",
+            overlay_opts,
             str(info.merged_dir),
         )
         if rc_overlay != 0:
@@ -247,8 +256,11 @@ class EphemeralWorktree:
         # Bind-mount agents dir as read-only inside sandbox
         if agents_dir.exists():
             rc_agents, _, err_agents = await _run(
-                "mount", "--bind", "--read-only",
-                str(agents_dir), str(info.agent_def_dir),
+                "mount",
+                "--bind",
+                "--read-only",
+                str(agents_dir),
+                str(info.agent_def_dir),
             )
             if rc_agents != 0:
                 logger.warning("Agent defs bind mount failed (non-fatal): %s", err_agents)
