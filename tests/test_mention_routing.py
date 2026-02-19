@@ -552,10 +552,10 @@ class TestCommandRouting:
         await manager.stop()
 
     @patch("squadron.agent_manager.CopilotAgent")
-    async def test_command_delivers_to_active_agent_inbox(
+    async def test_command_delivers_to_active_agent_mail_queue(
         self, mock_copilot_cls, registry, tmp_path
     ):
-        """@squadron-dev feat-dev: when it's ACTIVE delivers event to its inbox."""
+        """@squadron-dev feat-dev: when it's ACTIVE, mail message goes to mail_queues (push model)."""
         config = _command_config()
         event_queue = asyncio.Queue()
         router = EventRouter(event_queue, registry, config)
@@ -589,12 +589,15 @@ class TestCommandRouting:
         )
         await router._route_event(event)
 
-        # Event should be in the inbox
+        # Event should be in the mail queue (push model), not the inbox
+        mail_queue = manager.agent_mail_queues.get("feat-dev-issue-10", [])
+        assert len(mail_queue) == 1, "Expected one mail message in queue"
+        mail_msg = mail_queue[0]
+        assert mail_msg.sender is not None
+        assert "check the test results" in mail_msg.body
+        # Inbox should be empty — mention events use the push model
         inbox = manager.agent_inboxes["feat-dev-issue-10"]
-        assert not inbox.empty()
-        queued_event = await inbox.get()
-        assert queued_event.command is not None
-        assert queued_event.command.agent_name == "feat-dev"
+        assert inbox.empty(), "Inbox should be empty; mentions go to mail_queues"
 
     @patch("squadron.agent_manager.CopilotAgent")
     async def test_command_spawns_new_persistent_agent_if_none_exists(

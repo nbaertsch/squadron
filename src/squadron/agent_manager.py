@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from squadron.copilot import CopilotAgent, build_resume_config, build_session_config
-from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEventType
+from squadron.models import AgentRecord, AgentStatus, MailMessage, MessageProvenance, MessageProvenanceType, SquadronEvent, SquadronEventType
 from squadron.sandbox.manager import SandboxManager
 from squadron.tools.squadron_tools import SquadronTools
 
@@ -63,6 +63,11 @@ class AgentManager:
 
         # Per-agent inboxes for event delivery
         self.agent_inboxes: dict[str, asyncio.Queue[SquadronEvent]] = {}
+
+        # Per-agent mail queues for push delivery of @ mention messages.
+        # Mail messages are injected into the next send_and_wait prompt and
+        # then removed — no double-delivery via check_for_events.
+        self.agent_mail_queues: dict[str, list[MailMessage]] = {}
 
         # Unified tool registry (D-7: enforced tool boundaries)
         self._tools = SquadronTools(
@@ -822,6 +827,7 @@ class AgentManager:
         # Create inbox BEFORE registering agent (prevents race condition where
         # events arrive before inbox exists — issue #30 agent responsiveness fix)
         self.agent_inboxes[agent_id] = asyncio.Queue()
+        self.agent_mail_queues[agent_id] = []
 
         # Create agent record
         record = AgentRecord(
@@ -930,9 +936,11 @@ class AgentManager:
         agent.iteration_count += 1  # Track sleep→wake cycles
         await self.registry.update_agent(agent)
 
-        # Ensure inbox exists
+        # Ensure inbox and mail queue exist
         if agent_id not in self.agent_inboxes:
             self.agent_inboxes[agent_id] = asyncio.Queue()
+        if agent_id not in self.agent_mail_queues:
+            self.agent_mail_queues[agent_id] = []
 
         # Ensure CopilotAgent instance exists (may need restart after server restart)
         if agent_id not in self._copilot_agents:
@@ -1102,8 +1110,9 @@ class AgentManager:
         )
         await self.registry.create_agent(record)
 
-        # Create inbox
+        # Create inbox and mail queue
         self.agent_inboxes[agent_id] = asyncio.Queue()
+        self.agent_mail_queues[agent_id] = []
 
         # Create CopilotAgent (reviewers use repo root, no worktree needed)
         copilot = CopilotAgent(
@@ -1275,6 +1284,18 @@ class AgentManager:
                 else:
                     prompt = self._build_agent_prompt(record, trigger_event)
 
+            # Push any pending @ mention mail messages into the prompt.
+            # Messages are drained from the queue here — no double-delivery.
+            pending_mail = self._drain_mail_queue(record.agent_id)
+            if pending_mail:
+                mail_section = self._format_mail_messages(pending_mail)
+                prompt = prompt + "\n\n" + mail_section
+                logger.info(
+                    "Injected %d mail message(s) into prompt for agent %s",
+                    len(pending_mail),
+                    record.agent_id,
+                )
+
             # Layer 2 circuit breaker: pass max_duration as the SDK's own
             # send_and_wait timeout. The SDK defaults to 60s internally if
             # not specified, which was causing premature TimeoutErrors.
@@ -1443,6 +1464,9 @@ class AgentManager:
         self._watchdog_enforced.discard(agent_id)
         # Cancel watchdog timer
         self._cancel_watchdog(agent_id)
+
+        # Clear any undelivered mail messages (agent is done — no push needed)
+        self.agent_mail_queues.pop(agent_id, None)
 
         # Drain inbox and re-queue pending commands for ephemeral singletons
         inbox = self.agent_inboxes.pop(agent_id, None)
@@ -1988,6 +2012,102 @@ class AgentManager:
 
         return "\n".join(lines)
 
+    # ── Mail Message Helpers ─────────────────────────────────────────────
+
+    def _event_to_mail_message(self, event: SquadronEvent) -> MailMessage | None:
+        """Convert a SquadronEvent into a MailMessage for push delivery.
+
+        Returns None if the event does not carry a user-facing @ mention
+        message (in which case callers should fall back to inbox delivery).
+
+        Provenance is determined by the event type and available context:
+        - ISSUE_COMMENT on a PR → MessageProvenanceType.PR_COMMENT
+        - ISSUE_COMMENT on an issue → MessageProvenanceType.ISSUE_COMMENT
+        """
+        if event.event_type not in (
+            SquadronEventType.ISSUE_COMMENT,
+            SquadronEventType.PR_REVIEW_COMMENT,
+        ):
+            # Only comment events carry @ mention messages
+            return None
+
+        # Extract sender and comment body from the event payload
+        sender: str = event.data.get("sender") or "unknown"
+        payload = event.data.get("payload", {})
+        comment_data = payload.get("comment", {})
+        body: str = comment_data.get("body") or (
+            event.command.message if event.command else ""
+        ) or ""
+        comment_id: int | None = comment_data.get("id")
+
+        # Determine provenance type from available context
+        if event.pr_number is not None:
+            provenance = MessageProvenance(
+                type=MessageProvenanceType.PR_COMMENT,
+                pr_number=event.pr_number,
+                comment_id=comment_id,
+            )
+        else:
+            provenance = MessageProvenance(
+                type=MessageProvenanceType.ISSUE_COMMENT,
+                issue_number=event.issue_number,
+                comment_id=comment_id,
+            )
+
+        return MailMessage(sender=sender, body=body, provenance=provenance)
+
+    def _drain_mail_queue(self, agent_id: str) -> list[MailMessage]:
+        """Drain and return all pending mail messages for the agent.
+
+        Clears the queue so messages are not delivered twice.
+        """
+        messages = self.agent_mail_queues.get(agent_id, [])
+        if messages:
+            self.agent_mail_queues[agent_id] = []
+            logger.debug(
+                "Drained %d mail message(s) for agent %s",
+                len(messages),
+                agent_id,
+            )
+        return messages
+
+    def _format_mail_messages(self, messages: list[MailMessage]) -> str:
+        """Render pending mail messages as a prompt section.
+
+        Each message is formatted with sender, structured provenance, and
+        the full comment body so the agent has complete context.
+        """
+        if not messages:
+            return ""
+
+        lines: list[str] = [
+            "## Inbound Messages\n",
+            "The following messages were directed at you while you were running. "
+            "Please read and respond to each one as part of your work.\n",
+        ]
+
+        for msg in messages:
+            prov = msg.provenance
+            if prov.type == MessageProvenanceType.ISSUE_COMMENT:
+                ref = f"issue #{prov.issue_number}"
+                if prov.comment_id:
+                    ref += f" (comment #{prov.comment_id})"
+                source_label = f"issue_comment on {ref}"
+            elif prov.type == MessageProvenanceType.PR_COMMENT:
+                ref = f"PR #{prov.pr_number}"
+                if prov.comment_id:
+                    ref += f" (comment #{prov.comment_id})"
+                source_label = f"pr_comment on {ref}"
+            else:
+                source_label = prov.type.value
+
+            lines.append(f"### Message from @{msg.sender}")
+            lines.append(f"**Source:** {source_label}")
+            lines.append(f"**Received:** {msg.received_at.isoformat()}")
+            lines.append(f"\n{msg.body}\n")
+
+        return "\n".join(lines)
+
     # ── Event Handlers ───────────────────────────────────────────────────
 
     async def _handle_issue_closed(self, event: SquadronEvent) -> None:
@@ -2399,26 +2519,39 @@ class AgentManager:
         event: SquadronEvent,
     ) -> None:
         """Spawn an ephemeral agent via command routing."""
-        # Singleton guard — if agent already active, deliver to its inbox
+        # Singleton guard — if agent already active, push as mail message
         if role_config.singleton:
             all_active = await self.registry.get_all_active_agents()
             active_of_role = [a for a in all_active if a.role == role_name]
             if active_of_role:
                 active_agent = active_of_role[0]
-                inbox = self.agent_inboxes.get(active_agent.agent_id)
-                if inbox is not None:
-                    await inbox.put(event)
+                mail_message = self._event_to_mail_message(event)
+                if mail_message is not None:
+                    self.agent_mail_queues.setdefault(active_agent.agent_id, []).append(
+                        mail_message
+                    )
                     logger.info(
-                        "Singleton %s already active (%s) — delivered command to inbox",
+                        "Singleton %s already active (%s) — mail message queued "
+                        "(will be pushed before next LLM call)",
                         role_name,
                         active_agent.agent_id,
                     )
                 else:
-                    logger.warning(
-                        "Singleton %s already active (%s) but no inbox — command dropped",
-                        role_name,
-                        active_agent.agent_id,
-                    )
+                    # Fallback: non-mention events go to inbox
+                    inbox = self.agent_inboxes.get(active_agent.agent_id)
+                    if inbox is not None:
+                        await inbox.put(event)
+                        logger.info(
+                            "Singleton %s already active (%s) — delivered command to inbox",
+                            role_name,
+                            active_agent.agent_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Singleton %s already active (%s) but no inbox — command dropped",
+                            role_name,
+                            active_agent.agent_id,
+                        )
                 return
 
         assert event.issue_number is not None
@@ -2467,21 +2600,34 @@ class AgentManager:
                 await self.wake_agent(agent.agent_id, wake_event)
 
             elif agent.status == AgentStatus.ACTIVE:
-                # Agent is actively running — deliver to its inbox
-                inbox = self.agent_inboxes.get(agent.agent_id)
-                if inbox is not None:
-                    await inbox.put(event)
+                # Agent is actively running — push as a mail message so it is
+                # injected into the agent's next send_and_wait prompt
+                # automatically (no need for the agent to call check_for_events).
+                mail_message = self._event_to_mail_message(event)
+                if mail_message is not None:
+                    self.agent_mail_queues.setdefault(agent.agent_id, []).append(mail_message)
                     logger.info(
-                        "Command deliver: %s → queued event for active agent %s",
+                        "Command deliver: %s → mail message queued for active agent %s "
+                        "(will be pushed before next LLM call)",
                         role_name,
                         agent.agent_id,
                     )
                 else:
-                    logger.warning(
-                        "Command deliver: %s → agent %s is ACTIVE but has no inbox",
-                        role_name,
-                        agent.agent_id,
-                    )
+                    # Fallback: non-mention events still go to the inbox
+                    inbox = self.agent_inboxes.get(agent.agent_id)
+                    if inbox is not None:
+                        await inbox.put(event)
+                        logger.info(
+                            "Command deliver: %s → queued event for active agent %s",
+                            role_name,
+                            agent.agent_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Command deliver: %s → agent %s is ACTIVE but has no inbox",
+                            role_name,
+                            agent.agent_id,
+                        )
             else:
                 logger.debug(
                     "Command: %s → agent %s is in terminal state %s — spawning new",
