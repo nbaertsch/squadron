@@ -175,7 +175,7 @@ jobs:
           SQ_INSTALLATION_ID: ${{ secrets.SQ_INSTALLATION_ID_DEV }}
           SQ_WEBHOOK_SECRET: ${{ secrets.SQ_WEBHOOK_SECRET }}
           SQ_COPILOT_TOKEN: ${{ secrets.SQ_COPILOT_TOKEN }}
-          SQ_DASHBOARD_API_KEY: ${{ secrets.SQ_DASHBOARD_API_KEY }}
+          SQ_DASHBOARD_API_KEY: ${{ secrets.SQUADRON_DASHBOARD_API_KEY }}
           REPO_URL: https://github.com/${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
