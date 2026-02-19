@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import resource as _resource
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +25,7 @@ logger = logging.getLogger(__name__)
 MEMORY_WARNING_PERCENT = 85  # warn when system memory usage exceeds this %
 DISK_WARNING_PERCENT = 90  # warn when disk usage exceeds this %
 WORKTREE_SIZE_WARNING_MB = 500  # warn per worktree exceeding this size
+PROCESS_WARNING_PERCENT = 80  # warn when per-user process count exceeds this % of nproc limit
 
 
 @dataclass
@@ -40,6 +43,10 @@ class ResourceSnapshot:
 
     # Per-agent worktree sizes (agent_id → MB)
     worktree_sizes: dict[str, float] = field(default_factory=dict)
+
+    # Process count (tracks OS process pool exhaustion — root cause of bash spawn failures)
+    # Counts only processes owned by the current user (RLIMIT_NPROC is per-user)
+    process_count: int = 0
 
     # Aggregate
     total_worktree_mb: float = 0
@@ -69,6 +76,53 @@ def _read_system_memory() -> tuple[float, float, float]:
     except (FileNotFoundError, OSError):
         # Non-Linux or container without /proc — return zeros
         return 0, 0, 0
+
+
+def _get_nproc_limit() -> int:
+    """Read the current user's nproc soft limit via RLIMIT_NPROC.
+
+    Returns the soft limit, or 0 if unavailable (e.g. RLIM_INFINITY or
+    non-Linux platforms).  A return value of 0 means "limit unknown —
+    skip percentage-based threshold check".
+    """
+    try:
+        soft, _ = _resource.getrlimit(_resource.RLIMIT_NPROC)
+        if soft == _resource.RLIM_INFINITY or soft <= 0:
+            return 0
+        return soft
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def _read_process_count() -> int:
+    """Read the number of running processes owned by the current user.
+
+    Reads /proc entries on Linux (each numeric directory = one process),
+    filtering to entries whose owner UID matches os.getuid().  This
+    mirrors the scope of RLIMIT_NPROC, which is enforced per-user —
+    kernel threads owned by root do not consume the current user's budget.
+
+    Falls back to 0 on non-Linux systems or when /proc is unavailable.
+
+    A high process count approaching the nproc ulimit is the root cause
+    of 'Failed to start bash process' errors in Copilot agent sessions
+    (Issue #86).
+    """
+    if sys.platform != "linux":
+        return 0
+    uid = os.getuid()
+    count = 0
+    try:
+        for entry in os.scandir("/proc"):
+            if entry.name.isdigit():
+                try:
+                    if entry.stat().st_uid == uid:
+                        count += 1
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return count
 
 
 def _get_dir_size_mb(path: Path) -> float:
@@ -184,6 +238,9 @@ class ResourceMonitor:
         snap.total_worktree_mb = sum(snap.worktree_sizes.values())
         snap.active_agent_count = len(snap.worktree_sizes)
 
+        # Process count — detect OS process pool exhaustion before bash spawning fails
+        snap.process_count = _read_process_count()
+
         return snap
 
     async def _monitor_loop(self) -> None:
@@ -226,11 +283,27 @@ class ResourceMonitor:
                     WORKTREE_SIZE_WARNING_MB,
                 )
 
+        # Check process count against the actual nproc limit for the current user.
+        # RLIMIT_NPROC is per-user, so we read the real soft limit at runtime rather
+        # than assuming a hardcoded value (e.g. the Docker default of 1024).
+        nproc_limit = _get_nproc_limit()
+        if nproc_limit > 0 and snap.process_count / nproc_limit * 100 >= PROCESS_WARNING_PERCENT:
+            logger.warning(
+                "RESOURCE WARNING — process count at %d / %d (%.0f%% of nproc limit). "
+                "High process counts can cause 'Failed to start bash process' errors "
+                "in agent tool calls (see issue #86).",
+                snap.process_count,
+                nproc_limit,
+                snap.process_count / nproc_limit * 100,
+            )
+
         if snap.active_agent_count > 0:
+            process_info = f", processes: {snap.process_count}" if snap.process_count > 0 else ""
             logger.info(
-                "Resource snapshot — mem: %.0f%%, disk: %.0f%%, worktrees: %d (%.0f MB total)",
+                "Resource snapshot — mem: %.0f%%, disk: %.0f%%, worktrees: %d (%.0f MB total)%s",
                 snap.memory_percent,
                 snap.disk_percent,
                 snap.active_agent_count,
                 snap.total_worktree_mb,
+                process_info,
             )
