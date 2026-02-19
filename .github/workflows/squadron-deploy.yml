@@ -48,6 +48,7 @@ on:
     paths:
       - ".squadron/**"
       - "src/**"
+      - "infra/**"
       - "Dockerfile"
       - "pyproject.toml"
 
@@ -76,7 +77,7 @@ jobs:
       - name: Check for code vs config changes
         id: check
         run: |
-          if git diff --name-only HEAD~1 | grep -qE '^(src/|Dockerfile|pyproject\.toml)'; then
+          if git diff --name-only HEAD~1 | grep -qE '^(src/|infra/|Dockerfile|pyproject\.toml)'; then
             echo "code_changed=true" >> "$GITHUB_OUTPUT"
             echo "Code changes detected — will trigger full deploy"
           else
