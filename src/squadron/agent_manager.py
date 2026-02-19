@@ -191,6 +191,12 @@ class AgentManager:
         # Register handler for PR opened (set up review requirements)
         self.router.on(SquadronEventType.PR_OPENED, self._handle_pr_opened)
 
+        # Register framework-level handler for PR review events (issue #112).
+        # This ensures sleeping PR-owning agents are notified of reviews via their
+        # inbox regardless of config trigger setup.
+        self.router.on(SquadronEventType.PR_REVIEW_SUBMITTED, self._handle_pr_review_submitted)
+        self.router.on(SquadronEventType.PR_REVIEW_COMMENT, self._handle_pr_review_comment)
+
         logger.info("Agent manager started")
 
     async def stop(self) -> None:
@@ -1986,27 +1992,54 @@ class AgentManager:
         Contains only structured event context — no workflow instructions.
         The agent's .md definition provides the Wake Protocol.
         Agents should use `get_pr_feedback` tool to fetch review details.
+
+        Enhancement (issue #112): Always includes issue_number from the agent
+        record when the trigger event payload doesn't carry one (e.g.
+        pull_request_review.submitted webhooks have no linked issue).  Also adds
+        an explicit directive to call get_pr_feedback when woken by a review.
         """
         lines = [f"## Session Resumed: {record.agent_id}\n"]
 
         if trigger_event:
             lines.append(f"**Trigger:** {trigger_event.event_type.value}")
-            if trigger_event.issue_number:
-                lines.append(f"**Issue:** #{trigger_event.issue_number}")
+
+            # Always include issue number — fall back to the agent record when the
+            # trigger event payload does not carry one (e.g. pull_request_review.submitted
+            # webhooks do not include the linked issue number).
+            effective_issue = trigger_event.issue_number or record.issue_number
+            if effective_issue:
+                lines.append(f"**Issue:** #{effective_issue}")
             if trigger_event.pr_number:
                 lines.append(f"**PR:** #{trigger_event.pr_number}")
 
             payload = trigger_event.data.get("payload", {})
-            # Include review summary from the triggering event
+
+            # ── PR review notification ─────────────────────────────────────────
+            # Include review summary and explicit directive to call get_pr_feedback.
             review = payload.get("review", {})
             if review:
                 state = review.get("state", "N/A")
-                lines.append(f"\n**Review state:** {state}")
+                lines.append(f"\n**Review state:** {state.upper()}")
                 review_body = review.get("body", "")
                 if review_body:
-                    lines.append(f"**Review comment:** {review_body}")
+                    lines.append(f"**Review summary:** {review_body}")
                 reviewer = review.get("user", {}).get("login", "unknown")
-                lines.append(f"**Reviewer:** {reviewer}")
+                lines.append(f"**Reviewer:** @{reviewer}")
+                lines.append(
+                    "\n> **Action required:** Call `get_pr_feedback` to fetch all review "
+                    "comments (including inline code comments), then address each piece of "
+                    "feedback before pushing updates."
+                )
+
+            # ── Inbox hint — pending review comments ──────────────────────────
+            # When inline review comments were queued into the inbox while sleeping,
+            # include a count so the agent knows to call check_for_events.
+            inbox = self.agent_inboxes.get(record.agent_id)
+            if inbox and not inbox.empty():
+                lines.append(
+                    f"\n**Inbox:** {inbox.qsize()} pending event(s) — call "
+                    "`check_for_events` to see details."
+                )
 
             # Include resolved blocker info
             resolved = trigger_event.data.get("resolved_issue")
@@ -2308,6 +2341,118 @@ class AgentManager:
 
         # Note: Respawning reviewers is handled by config triggers with action: "wake"
         # which are already registered via _register_trigger_handlers
+
+    async def _handle_pr_review_submitted(self, event: SquadronEvent) -> None:
+        """Handle PR review submission — deliver review context to the PR-owning agent.
+
+        This is a framework-level supplement to config-trigger based waking (issue #112).
+        When a review is submitted on a PR, we find all sleeping agents that own that PR
+        (identified by agent.pr_number) and queue a rich review notification into their
+        inbox.  The config trigger system remains responsible for actually waking the agent;
+        this handler enriches the inbox so the agent sees full review details when it calls
+        check_for_events after waking.
+
+        Design rationale: config triggers may match and call _trigger_wake independently,
+        but they don't populate the inbox — the inbox delivery here is additive.  Using the
+        message-passing system (agent_inboxes) ensures the review context is available to
+        the agent regardless of how it was woken (config trigger, command mention, etc.).
+        """
+        if not event.pr_number:
+            return
+
+        payload = event.data.get("payload", {})
+        review = payload.get("review", {})
+        review_state = review.get("state", "").upper()
+
+        # Find sleeping agents that own this PR
+        all_agents = await self.registry.get_all_active_agents()
+        pr_owners = [
+            a
+            for a in all_agents
+            if a.pr_number == event.pr_number and a.status == AgentStatus.SLEEPING
+        ]
+
+        if not pr_owners:
+            logger.debug(
+                "PR review for #%d: no sleeping PR-owning agents found",
+                event.pr_number,
+            )
+            return
+
+        for agent in pr_owners:
+            # Ensure inbox exists for the sleeping agent (it will be consumed on wake)
+            if agent.agent_id not in self.agent_inboxes:
+                self.agent_inboxes[agent.agent_id] = asyncio.Queue()
+
+            # Enqueue the review event so the agent sees it via check_for_events
+            review_event = SquadronEvent(
+                event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
+                pr_number=event.pr_number,
+                issue_number=agent.issue_number,  # populate from agent record
+                data=event.data,
+            )
+            await self.agent_inboxes[agent.agent_id].put(review_event)
+
+            logger.info(
+                "PR review queued to inbox of PR-owning agent %s "
+                "(pr=#%d, state=%s, reviewer=%s)",
+                agent.agent_id,
+                event.pr_number,
+                review_state,
+                review.get("user", {}).get("login", "unknown"),
+            )
+
+    async def _handle_pr_review_comment(self, event: SquadronEvent) -> None:
+        """Handle inline PR review comment — queue it into the PR-owning agent's inbox.
+
+        Inline review comments (pull_request_review_comment.created) arrive one at a
+        time as a reviewer is writing their review.  We don't wake the PR owner for
+        each individual comment (that would be noisy); instead we queue the comment
+        into the agent's inbox so that when it wakes (triggered by the full review
+        submission), it can see all inline comments via check_for_events.
+
+        If the agent is ACTIVE (running), the inbox message is available immediately.
+        """
+        if not event.pr_number:
+            return
+
+        all_agents = await self.registry.get_all_active_agents()
+        pr_owners = [a for a in all_agents if a.pr_number == event.pr_number]
+
+        if not pr_owners:
+            logger.debug(
+                "PR review comment for #%d: no PR-owning agents found",
+                event.pr_number,
+            )
+            return
+
+        payload = event.data.get("payload", {})
+        review_comment = payload.get("comment", {})
+
+        for agent in pr_owners:
+            if agent.status not in (AgentStatus.ACTIVE, AgentStatus.SLEEPING):
+                continue
+
+            # Ensure inbox exists
+            if agent.agent_id not in self.agent_inboxes:
+                self.agent_inboxes[agent.agent_id] = asyncio.Queue()
+
+            comment_event = SquadronEvent(
+                event_type=SquadronEventType.PR_REVIEW_COMMENT,
+                pr_number=event.pr_number,
+                issue_number=agent.issue_number,
+                data=event.data,
+            )
+            await self.agent_inboxes[agent.agent_id].put(comment_event)
+
+            logger.debug(
+                "Inline review comment queued to inbox of PR-owning agent %s "
+                "(pr=#%d, path=%s, line=%s)",
+                agent.agent_id,
+                event.pr_number,
+                review_comment.get("path", "unknown"),
+                review_comment.get("line") or review_comment.get("original_line"),
+            )
 
     @staticmethod
     def _extract_issue_number(body: str) -> int | None:

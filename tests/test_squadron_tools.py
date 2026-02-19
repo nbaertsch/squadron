@@ -156,7 +156,8 @@ class TestCheckForEvents:
 
         result = await tools.check_for_events("agent-1", CheckEventsParams())
         assert "Pending events" in result
-        assert "review_submitted" in result
+        # The new rich format uses uppercase PR_REVIEW_SUBMITTED label (issue #112)
+        assert "PR_REVIEW_SUBMITTED" in result or "review_submitted" in result
 
 
 class TestReportBlocked:

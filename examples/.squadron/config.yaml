@@ -51,6 +51,10 @@ agent_roles:
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
         action: wake
+      # Wake dev agent when reviewer leaves comments/questions (needs response)
+      - event: "pull_request_review.submitted"
+        condition: {review_state: "commented"}
+        action: wake
       # Wake dev agent when PR is closed without merge (needs rework)
       - event: "pull_request.closed"
         condition: {merged: false}
@@ -68,6 +72,9 @@ agent_roles:
         action: sleep
       - event: "pull_request_review.submitted"
         condition: {review_state: "changes_requested"}
+        action: wake
+      - event: "pull_request_review.submitted"
+        condition: {review_state: "commented"}
         action: wake
       - event: "pull_request.closed"
         condition: {merged: false}
