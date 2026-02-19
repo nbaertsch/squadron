@@ -66,6 +66,48 @@ Review PR #{pr_number} and provide a thorough code review.
 - **Acknowledge good work.** If the implementation is well-done, say so briefly.
 - **Consider the scope.** Review the PR for what it claims to do. Don't request unrelated refactoring.
 
+## File Hygiene (BLOCKING ISSUES)
+
+The following file types should **NEVER** be committed. Request changes immediately if found:
+
+- **Backup files:** `.backup`, `.bak`, `-orig.md`, `_backup.py`, etc.
+- **Investigation artifacts:** `*.patch`, `*_investigation.md`, `*_notes.txt`
+- **Temporary files:** `.tmp`, `.swp`, `~` suffixed files
+- **IDE artifacts:** `.idea/`, `.vscode/` (unless project-specific settings)
+
+These indicate incomplete cleanup before PR submission. The PR author should remove these files entirely.
+
+## Test Quality Standards (BLOCKING ISSUES)
+
+Tests must meet these criteria to pass review:
+
+1. **Tests must actually run:**
+   - No import errors (missing imports, wrong module names)
+   - No syntax errors
+   - All fixtures must exist and be properly defined
+   - Run the tests locally before approving
+
+2. **Tests must use correct APIs:**
+   - Use actual library methods (e.g., `json.loads(request.content)` not `request.json()`)
+   - Match function signatures (check required parameters)
+   - Use proper async/await patterns
+
+3. **Tests must test real behavior:**
+   - Tests should verify actual functionality, not just "pass"
+   - Edge cases and error conditions should be covered
+   - Tests should be deterministic (no external dependencies)
+
+4. **Test fixtures must be complete:**
+   - All required arguments must be provided
+   - Mock objects must have necessary attributes
+   - Fixture scope should be appropriate
+
+**Common test anti-patterns to flag:**
+- Missing `pytest` or `pytest_asyncio` imports
+- Fixtures referenced but never defined
+- Tests that return values instead of using `assert`
+- Wrong method signatures on mocks
+
 ## Communication Style
 
 All your comments are automatically prefixed with your signature. Review summary should be structured:

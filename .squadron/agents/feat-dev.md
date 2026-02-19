@@ -88,6 +88,19 @@ If during implementation you discover a bug, missing dependency, or prerequisite
 - Handle errors explicitly — don't silently swallow exceptions
 - No hardcoded values — use constants or configuration
 
+## File Hygiene (CRITICAL)
+
+**NEVER commit these file types:**
+
+- **Backup files:** `.backup`, `.bak`, `-orig`, `_backup` — these are anti-patterns
+- **Investigation artifacts:** `*.patch`, `*_investigation.md`, debug notes
+- **Temporary files:** `.tmp`, `.swp`, editor swap files
+
+Before opening a PR, run `git status` and verify you are ONLY committing intentional changes. If you created backup copies while working, delete them before committing.
+
+**Bad:** `config.yaml.backup`, `agent_manager.py.bak`, `feature-orig.md`
+**Good:** Clean commits with only the intended changes
+
 ## Communication Style
 
 All your comments are automatically prefixed with your signature. Example of what users will see:
