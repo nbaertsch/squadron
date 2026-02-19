@@ -668,6 +668,133 @@ class TestCommandRouting:
         assert "feat-dev" in body.lower()
 
     @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_includes_dashboard_url(
+        self, mock_copilot_cls, registry, tmp_path, monkeypatch
+    ):
+        """@squadron-dev help includes the dashboard URL from SQUADRON_PUBLIC_URL."""
+        monkeypatch.setenv("SQUADRON_PUBLIC_URL", "http://localhost:8080")
+
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=11)
+        await router._route_event(event)
+
+        github.comment_on_issue.assert_called_once()
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "Dashboard" in body
+        assert "http://localhost:8080" in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_dashboard_url_fallback(
+        self, mock_copilot_cls, registry, tmp_path, monkeypatch
+    ):
+        """@squadron-dev help shows 'not available' when SQUADRON_PUBLIC_URL is not set."""
+        monkeypatch.delenv("SQUADRON_PUBLIC_URL", raising=False)
+
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=12)
+        await router._route_event(event)
+
+        github.comment_on_issue.assert_called_once()
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "Dashboard" in body
+        assert "not available" in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_auth_enabled(
+        self, mock_copilot_cls, registry, tmp_path, monkeypatch
+    ):
+        """@squadron-dev help shows auth enabled when SQUADRON_DASHBOARD_API_KEY is set."""
+        monkeypatch.setenv("SQUADRON_DASHBOARD_API_KEY", "supersecretkey")
+
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=13)
+        await router._route_event(event)
+
+        github.comment_on_issue.assert_called_once()
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "Auth" in body
+        assert "enabled" in body
+        assert "API key required" in body
+
+    @patch("squadron.agent_manager.CopilotAgent")
+    async def test_help_command_auth_disabled(
+        self, mock_copilot_cls, registry, tmp_path, monkeypatch
+    ):
+        """@squadron-dev help shows auth disabled when SQUADRON_DASHBOARD_API_KEY is not set."""
+        monkeypatch.delenv("SQUADRON_DASHBOARD_API_KEY", raising=False)
+
+        config = _command_config()
+        event_queue = asyncio.Queue()
+        router = EventRouter(event_queue, registry, config)
+        github = AsyncMock()
+
+        manager = AgentManager(
+            config=config,
+            registry=registry,
+            github=github,
+            router=router,
+            agent_definitions=_make_agent_defs(),
+            repo_root=Path(tmp_path),
+        )
+        await manager.start()
+
+        event = _comment_event(body="@squadron-dev help", issue_number=14)
+        await router._route_event(event)
+
+        github.comment_on_issue.assert_called_once()
+        call_args = github.comment_on_issue.call_args
+        body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
+        assert "Auth" in body
+        assert "disabled" in body
+        assert "public access" in body
+
+
+    @patch("squadron.agent_manager.CopilotAgent")
     async def test_unknown_agent_posts_error(self, mock_copilot_cls, registry, tmp_path):
         """@squadron-dev unknown-agent: posts an error with available agents."""
         config = _command_config()

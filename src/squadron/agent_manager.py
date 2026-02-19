@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from squadron.copilot import CopilotAgent, build_resume_config, build_session_config
+from squadron.dashboard_security import DASHBOARD_API_KEY_ENV
 from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEventType
 from squadron.sandbox.manager import SandboxManager
 from squadron.tools.squadron_tools import SquadronTools
@@ -2358,6 +2360,13 @@ class AgentManager:
         lines.append("**Usage:** `@squadron-dev <agent>: <your message>`")
         lines.append("")
         lines.append("**Example:** `@squadron-dev pm: triage this issue`")
+        lines.append("")
+
+        # Dashboard URL and auth status
+        dashboard_url = self._get_dashboard_url()
+        auth_status = self._get_auth_status()
+        lines.append(f"**Dashboard:** {dashboard_url}")
+        lines.append(f"**Auth:** {auth_status}")
 
         await self.github.comment_on_issue(
             self.config.project.owner,
@@ -2366,6 +2375,29 @@ class AgentManager:
             "\n".join(lines),
         )
         logger.info("Posted help response on issue #%d", event.issue_number)
+
+    def _get_dashboard_url(self) -> str:
+        """Return the dashboard URL from configuration.
+
+        Reads the ``SQUADRON_PUBLIC_URL`` environment variable.  If not set,
+        returns a graceful fallback string so the help output is never broken.
+        """
+        public_url = os.environ.get("SQUADRON_PUBLIC_URL", "").strip()
+        if public_url:
+            return public_url
+        return "not available"
+
+    def _get_auth_status(self) -> str:
+        """Return a human-readable API authentication status string.
+
+        Reads the ``SQUADRON_DASHBOARD_API_KEY`` environment variable.
+        - Set  → ``enabled (API key required)``
+        - Unset → ``disabled (public access)``
+        """
+        api_key = os.environ.get(DASHBOARD_API_KEY_ENV)
+        if api_key is None:
+            return "disabled (public access)"
+        return "enabled (API key required)"
 
     async def _post_unknown_agent_error(self, event: SquadronEvent, agent_name: str) -> None:
         """Post error message when unknown agent is requested."""
