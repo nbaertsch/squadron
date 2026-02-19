@@ -68,17 +68,23 @@ async def require_api_key(
     """FastAPI dependency that validates API key if configured.
 
     Returns True if:
-    - No API key is configured (authentication disabled)
+    - No API key is configured (SQUADRON_DASHBOARD_API_KEY not set / None)
     - Valid API key is provided in Authorization header
 
     Raises HTTPException 401 if:
-    - API key is configured but not provided
+    - API key is configured (even if empty string) but not provided
     - API key is configured but invalid
+
+    Note: Uses `is None` check (not falsy `not expected_key`) so that an empty-
+    string key (e.g. a misconfigured secrets manager or Docker Compose env var
+    without a value) still enforces authentication rather than silently bypassing
+    it.  This keeps behavior consistent with get_security_config() which also
+    uses `api_key is not None`.
     """
     expected_key = os.environ.get(DASHBOARD_API_KEY_ENV)
 
-    # No authentication required
-    if not expected_key:
+    # No authentication required — key not configured at all
+    if expected_key is None:
         return True
 
     # Authentication required but no credentials provided
@@ -122,11 +128,14 @@ def validate_sse_token(token: str | None) -> bool:
 
     Raises:
         HTTPException if authentication fails.
+
+    Note: Uses `is None` check (not falsy `not expected_key`) consistent with
+    require_api_key() — see its docstring for the rationale.
     """
     expected_key = os.environ.get(DASHBOARD_API_KEY_ENV)
 
-    # No authentication required
-    if not expected_key:
+    # No authentication required — key not configured at all
+    if expected_key is None:
         return True
 
     # No token provided
