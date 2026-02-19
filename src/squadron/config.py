@@ -382,12 +382,27 @@ class SquadronConfig(BaseModel):
     review_policy: ReviewPolicyConfig = Field(default_factory=ReviewPolicyConfig)
     human_invocation: HumanInvocationConfig = Field(default_factory=HumanInvocationConfig)
 
+    # Sandbox configuration (issue #85: sandboxed worktree execution)
+    sandbox: Any = Field(default_factory=dict)
+
     # DEPRECATED: kept for backward compatibility, use review_policy instead
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
     commands: dict[str, "CommandDefinition"] = Field(default_factory=dict)
 
     # Workflows - deterministic multi-agent orchestration (inline in config)
     workflows: dict[str, "WorkflowConfig"] = Field(default_factory=dict)
+
+
+    def get_sandbox_config(self):
+        """Return a typed SandboxConfig, lazily importing to avoid circular deps."""
+        from squadron.sandbox.config import SandboxConfig
+
+        raw = self.sandbox
+        if isinstance(raw, SandboxConfig):
+            return raw
+        if isinstance(raw, dict):
+            return SandboxConfig(**raw)
+        return SandboxConfig()
 
 
 # ── Workflow Definitions ─────────────────────────────────────────────────────
@@ -966,6 +981,19 @@ def load_config(squadron_dir: Path) -> SquadronConfig:
     worktree_dir = os.environ.get("SQUADRON_WORKTREE_DIR")
     if worktree_dir:
         config.runtime.worktree_dir = worktree_dir
+
+    # Sandbox environment overrides
+    sandbox_enabled = os.environ.get("SQUADRON_SANDBOX_ENABLED")
+    if sandbox_enabled is not None:
+        sandbox_raw = config.sandbox if isinstance(config.sandbox, dict) else {}
+        sandbox_raw["enabled"] = sandbox_enabled.lower() in ("1", "true", "yes")
+        config.sandbox = sandbox_raw
+
+    sandbox_retention = os.environ.get("SQUADRON_SANDBOX_RETENTION_PATH")
+    if sandbox_retention:
+        sandbox_raw = config.sandbox if isinstance(config.sandbox, dict) else {}
+        sandbox_raw["retention_path"] = sandbox_retention
+        config.sandbox = sandbox_raw
 
     logger.info("Loaded Squadron config: project=%s", config.project.name)
     return config

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from squadron.copilot import CopilotAgent, build_resume_config, build_session_config
 from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEventType
+from squadron.sandbox.manager import SandboxManager
 from squadron.tools.squadron_tools import SquadronTools
 
 if TYPE_CHECKING:
@@ -86,6 +87,16 @@ class AgentManager:
         # Per-agent duration watchdog tasks (D-10: background timer enforcement)
         self._watchdog_tasks: dict[str, asyncio.Task] = {}
 
+        # Sandbox manager (issue #85: sandboxed worktree execution)
+        sandbox_config = config.get_sandbox_config()
+        self._sandbox = SandboxManager(
+            config=sandbox_config,
+            github=github,
+            repo_root=repo_root,
+            owner=config.project.owner,
+            repo=config.project.repo,
+        )
+
         # Track watchdog success/failure for monitoring (fix for issue #51)
         self._watchdog_enforced: set[str] = set()
 
@@ -142,6 +153,9 @@ class AgentManager:
         """Start the agent manager — register config-driven event handlers."""
         self._running = True
 
+        # Start sandbox infrastructure (auth broker, audit log)
+        await self._sandbox.start()
+
         # Register config-driven trigger handler for all event types
         # that appear in agent_roles.triggers
         self._register_trigger_handlers()
@@ -194,6 +208,10 @@ class AgentManager:
         self._copilot_agents.clear()
 
         self._agent_tasks.clear()
+
+        # Stop sandbox infrastructure
+        await self._sandbox.stop()
+
         logger.info("Agent manager stopped")
 
     # ── Config-Driven Trigger Matching ───────────────────────────────────
@@ -831,10 +849,29 @@ class AgentManager:
         record.active_since = datetime.now(timezone.utc)
         await self.registry.update_agent(record)
 
+        # Create sandbox session (issue #85: sandboxed worktree execution)
+        # This sets up the auth broker session, tool proxy, and ephemeral worktree.
+        # When sandbox is disabled, this is a lightweight no-op.
+        agent_def = self.agent_definitions.get(role)
+        allowed_tools = list(agent_def.tools or []) if agent_def else []
+        agents_dir = self.repo_root / ".squadron" / "agents"
+        await self._sandbox.create_session(
+            agent_id=agent_id,
+            issue_number=issue_number,
+            allowed_tools=allowed_tools,
+            git_worktree=Path(record.worktree_path) if record.worktree_path else self.repo_root,
+            agents_dir=agents_dir,
+        )
+
+        # Determine the working directory (sandbox overlay if active, else worktree/root)
+        sandbox_working_dir = self._sandbox.get_working_directory(
+            agent_id, Path(record.worktree_path) if record.worktree_path else self.repo_root
+        )
+
         # Create CopilotAgent instance (one CLI subprocess per agent)
         copilot = CopilotAgent(
             runtime_config=self.config.runtime,
-            working_directory=str(record.worktree_path or self.repo_root),
+            working_directory=str(sandbox_working_dir),
         )
         await copilot.start()
         self._copilot_agents[agent_id] = copilot
@@ -1429,6 +1466,13 @@ class AgentManager:
                                 self._command_spawn(agent_record.role, role_config, event),
                                 name=f"respawn-{agent_record.role}-{event.issue_number}",
                             )
+
+        # Tear down sandbox session (issue #85)
+        # Pass abnormal=True if this cleanup was triggered by an error
+        try:
+            await self._sandbox.teardown_session(agent_id, abnormal=False, reason="agent cleanup")
+        except Exception:
+            logger.warning("Failed to tear down sandbox session for %s", agent_id, exc_info=True)
 
         # Remove git worktree (if any)
         agent_record = await self.registry.get_agent(agent_id)
@@ -2827,6 +2871,23 @@ class AgentManager:
         args = ["push", "origin", agent.branch]
         if force:
             args.insert(1, "--force-with-lease")
+
+        # Diff inspection before push (issue #85: supply chain protection)
+        inspection = await self._sandbox.inspect_diff_before_push(agent.agent_id)
+        if not inspection.passed:
+            logger.error(
+                "Diff inspection blocked push for agent %s: %s (flagged paths: %s)",
+                agent.agent_id,
+                inspection.reason,
+                inspection.flagged_paths,
+            )
+            return (
+                1,
+                "",
+                f"Push blocked by diff inspection: {inspection.reason}. "
+                f"Flagged paths: {inspection.flagged_paths}. "
+                "Human review required before this push can proceed.",
+            )
 
         return await self._run_git_in(worktree, *args, timeout=120, auth=True)
 
