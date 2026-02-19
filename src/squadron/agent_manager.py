@@ -404,17 +404,29 @@ class AgentManager:
             role_name,
             issue_number,
         )
-        record = await self.create_agent(role_name, issue_number, trigger_event=event)
+        # Extract the PR's head branch BEFORE creating the agent so that the worktree
+        # is created from the feature branch (not a freshly-generated reviewer branch).
+        # This is the fix for issue #101: reviewer agents previously received a worktree
+        # checked out to their own generated branch (e.g. "security/issue-85"), meaning
+        # they could only see squadron-dev code, not the code being reviewed.
+        pr_head_branch: str | None = None
+        if event.pr_number:
+            _payload = event.data.get("payload", {})
+            _pr_data = _payload.get("pull_request", {})
+            pr_head_branch = _pr_data.get("head", {}).get("ref") or None
+
+        record = await self.create_agent(
+            role_name,
+            issue_number,
+            trigger_event=event,
+            override_branch=pr_head_branch,
+        )
         if record:
             self.last_spawn_time = datetime.now(timezone.utc).isoformat()
-        # For PR-spawned agents, associate with the PR
+        # For PR-spawned agents, associate with the PR number if not already set.
+        # (The branch is already correct because we passed override_branch above.)
         if record and event.pr_number and not record.pr_number:
             record.pr_number = event.pr_number
-            payload = event.data.get("payload", {})
-            pr_data = payload.get("pull_request", {})
-            # Use PR's head branch for reviewer agents
-            if pr_data.get("head", {}).get("ref"):
-                record.branch = pr_data["head"]["ref"]
             await self.registry.update_agent(record)
 
     async def _trigger_wake(self, role_name: str, event: SquadronEvent) -> None:
@@ -690,6 +702,7 @@ class AgentManager:
         role: str,
         issue_number: int,
         trigger_event: SquadronEvent | None = None,
+        override_branch: str | None = None,
     ) -> AgentRecord:
         """Create a new agent for an issue.
 
@@ -757,9 +770,23 @@ class AgentManager:
         # Determine branch name (ephemeral agents don't need branches)
         # For non-ephemeral agents, check if an existing open PR already targets
         # this issue — if so, reuse its branch to avoid opening a duplicate PR.
+        # When override_branch is provided (e.g. for reviewer agents spawned via a PR
+        # trigger), use it directly so the worktree is created from the PR's HEAD branch
+        # rather than a freshly-generated reviewer branch. (issue #101)
         existing_pr_number: int | None = None
         if is_ephemeral:
             branch = ""
+        elif override_branch:
+            # Caller explicitly specified the branch (e.g. PR's head branch for reviewers).
+            # Skip _find_existing_pr_for_issue to avoid redundant API calls and to ensure
+            # the correct branch is used regardless of PR body keywords.
+            branch = override_branch
+            logger.debug(
+                "Using override_branch '%s' for %s issue #%d",
+                override_branch,
+                role,
+                issue_number,
+            )
         else:
             existing_pr = await self._find_existing_pr_for_issue(issue_number)
             if existing_pr:
