@@ -18,6 +18,7 @@
             --accent-red: #f85149;
             --accent-yellow: #d29922;
             --accent-purple: #a371f7;
+            --accent-cyan: #39c5cf;
         }
 
         * {
@@ -34,7 +35,7 @@
         }
 
         .container {
-            max-width: 1400px;
+            max-width: 1600px;
             margin: 0 auto;
             padding: 20px;
         }
@@ -72,9 +73,28 @@
             background: var(--accent-green);
         }
 
+        .controls-bar {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .control-group label {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
         .grid {
             display: grid;
-            grid-template-columns: 350px 1fr;
+            grid-template-columns: 300px 1fr;
             gap: 20px;
         }
 
@@ -99,8 +119,32 @@
             padding: 16px;
         }
 
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tab {
+            padding: 12px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            color: var(--text-secondary);
+            transition: all 0.15s;
+        }
+
+        .tab:hover {
+            color: var(--text-primary);
+        }
+
+        .tab.active {
+            color: var(--accent-blue);
+            border-bottom-color: var(--accent-blue);
+        }
+
         .agent-list {
             list-style: none;
+            max-height: 500px;
+            overflow-y: auto;
         }
 
         .agent-item {
@@ -148,6 +192,7 @@
         .status-sleeping { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
         .status-completed { background: rgba(88, 166, 255, 0.2); color: var(--accent-blue); }
         .status-escalated { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
+        .status-failed { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
 
         .agent-meta {
             font-size: 12px;
@@ -155,7 +200,7 @@
         }
 
         .activity-feed {
-            height: 600px;
+            height: 700px;
             overflow-y: auto;
         }
 
@@ -169,11 +214,16 @@
             border-bottom: none;
         }
 
+        .activity-item.expanded .activity-details {
+            display: block;
+        }
+
         .activity-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 6px;
+            cursor: pointer;
         }
 
         .activity-type {
@@ -184,13 +234,14 @@
         }
 
         .activity-type-icon {
-            width: 16px;
-            height: 16px;
-            border-radius: 3px;
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 10px;
+            font-size: 11px;
+            font-weight: bold;
         }
 
         .icon-tool { background: var(--accent-purple); }
@@ -198,18 +249,20 @@
         .icon-github { background: #333; }
         .icon-circuit { background: var(--accent-yellow); }
         .icon-error { background: var(--accent-red); }
+        .icon-info { background: var(--accent-cyan); }
+        .icon-reasoning { background: var(--accent-green); }
 
         .activity-time {
             font-size: 11px;
             color: var(--text-muted);
         }
 
-        .activity-content {
+        .activity-summary {
             color: var(--text-secondary);
             word-break: break-word;
         }
 
-        .activity-content code {
+        .activity-summary code {
             background: var(--bg-tertiary);
             padding: 2px 6px;
             border-radius: 3px;
@@ -223,6 +276,40 @@
             gap: 12px;
             font-size: 11px;
             color: var(--text-muted);
+        }
+
+        .activity-details {
+            display: none;
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            font-size: 12px;
+        }
+
+        .detail-section {
+            margin-bottom: 12px;
+        }
+
+        .detail-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .detail-label {
+            color: var(--text-muted);
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
+
+        .detail-content {
+            background: var(--bg-primary);
+            padding: 8px;
+            border-radius: 4px;
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
         }
 
         .btn {
@@ -249,27 +336,54 @@
             background: #4c8ed9;
         }
 
-        .auth-section {
-            margin-bottom: 20px;
-            padding: 16px;
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 6px;
+        .btn-small {
+            padding: 4px 8px;
+            font-size: 11px;
         }
 
-        .auth-section input {
+        select, input {
             background: var(--bg-tertiary);
             border: 1px solid var(--border);
             color: var(--text-primary);
-            padding: 8px 12px;
+            padding: 6px 10px;
             border-radius: 6px;
-            font-size: 14px;
-            width: 300px;
-            margin-right: 10px;
+            font-size: 13px;
         }
 
-        .auth-section input::placeholder {
+        select:focus, input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        input::placeholder {
             color: var(--text-muted);
+        }
+
+        .filter-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .filter-chip {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .filter-chip:hover {
+            border-color: var(--accent-blue);
+        }
+
+        .filter-chip.active {
+            background: rgba(88, 166, 255, 0.2);
+            border-color: var(--accent-blue);
+            color: var(--accent-blue);
         }
 
         .empty-state {
@@ -278,7 +392,29 @@
             color: var(--text-secondary);
         }
 
-        @media (max-width: 900px) {
+        .pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            padding: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        .success-badge {
+            color: var(--accent-green);
+        }
+
+        .error-badge {
+            color: var(--accent-red);
+        }
+
+        .duration-badge {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        @media (max-width: 1000px) {
             .grid {
                 grid-template-columns: 1fr;
             }
@@ -295,32 +431,97 @@
             </div>
         </header>
 
-        <div class="auth-section">
-            <input type="password" id="apiKey" placeholder="API Key (if required)">
-            <button class="btn btn-primary" onclick="connect()">Connect</button>
-            <button class="btn" onclick="disconnect()">Disconnect</button>
+        <div class="controls-bar">
+            <div class="control-group">
+                <input type="password" id="apiKey" placeholder="API Key (if required)" style="width: 200px;">
+                <button class="btn btn-primary" onclick="connect()">Connect</button>
+                <button class="btn" onclick="disconnect()">Disconnect</button>
+            </div>
+            <div class="control-group">
+                <label>Event Types:</label>
+                <select id="eventTypeFilter" multiple style="min-width: 200px; height: 32px;">
+                    <option value="">All Events</option>
+                    <optgroup label="Agent Lifecycle">
+                        <option value="agent_spawned">Agent Spawned</option>
+                        <option value="agent_woke">Agent Woke</option>
+                        <option value="agent_sleeping">Agent Sleeping</option>
+                        <option value="agent_completed">Agent Completed</option>
+                        <option value="agent_escalated">Agent Escalated</option>
+                        <option value="agent_failed">Agent Failed</option>
+                    </optgroup>
+                    <optgroup label="Tool Execution">
+                        <option value="tool_call_start">Tool Call Start</option>
+                        <option value="tool_call_end">Tool Call End</option>
+                    </optgroup>
+                    <optgroup label="LLM Interaction">
+                        <option value="reasoning">Reasoning</option>
+                        <option value="user_message">User Message</option>
+                    </optgroup>
+                    <optgroup label="GitHub Operations">
+                        <option value="github_comment">GitHub Comment</option>
+                        <option value="github_pr_opened">GitHub PR Opened</option>
+                        <option value="github_review">GitHub Review</option>
+                        <option value="github_issue_created">GitHub Issue Created</option>
+                    </optgroup>
+                    <optgroup label="System Events">
+                        <option value="error">Error</option>
+                        <option value="warning">Warning</option>
+                        <option value="info">Info</option>
+                        <option value="circuit_breaker_warning">Circuit Breaker Warning</option>
+                        <option value="circuit_breaker_triggered">Circuit Breaker Triggered</option>
+                    </optgroup>
+                </select>
+            </div>
         </div>
 
-        <div class="grid">
+        <div class="filter-chips" id="activeFilters"></div>
+
+        <div class="grid" style="margin-top: 16px;">
             <div class="panel">
                 <div class="panel-header">
                     Agents
-                    <button class="btn" onclick="refreshAgents()">Refresh</button>
+                    <button class="btn btn-small" onclick="refreshAgents()">Refresh</button>
                 </div>
-                <div class="panel-content" style="padding: 0;">
-                    <ul class="agent-list" id="agentList">
-                        <li class="empty-state">Connect to view agents</li>
-                    </ul>
+                <div class="agent-item" onclick="selectAgent(null)" id="allAgentsOption" style="border-bottom: 2px solid var(--border);">
+                    <div class="agent-header">
+                        <span class="agent-id">All Agents</span>
+                    </div>
+                    <div class="agent-meta">Show events from all agents</div>
                 </div>
+                <ul class="agent-list" id="agentList">
+                    <li class="empty-state">Connect to view agents</li>
+                </ul>
             </div>
 
             <div class="panel">
-                <div class="panel-header">
-                    Activity Feed
-                    <button class="btn" onclick="clearFeed()">Clear</button>
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('live')" id="tabLive">Live Stream</div>
+                    <div class="tab" onclick="switchTab('history')" id="tabHistory">History</div>
                 </div>
-                <div class="activity-feed" id="activityFeed">
-                    <div class="empty-state">Activity events will appear here</div>
+
+                <div id="liveView">
+                    <div class="panel-header" style="border-top: none;">
+                        <span id="streamInfo">Streaming all events</span>
+                        <button class="btn btn-small" onclick="clearFeed()">Clear</button>
+                    </div>
+                    <div class="activity-feed" id="activityFeed">
+                        <div class="empty-state">Activity events will appear here</div>
+                    </div>
+                </div>
+
+                <div id="historyView" style="display: none;">
+                    <div class="panel-header" style="border-top: none;">
+                        <span>Historical Events</span>
+                        <button class="btn btn-small" onclick="loadHistory()">Load</button>
+                    </div>
+                    <div class="activity-feed" id="historyFeed">
+                        <div class="empty-state">Click "Load" to view historical events</div>
+                    </div>
+                    <div class="pagination">
+                        <button class="btn btn-small" onclick="loadHistory(currentOffset - 100)" id="prevPage" disabled>Previous</button>
+                        <span id="pageInfo">Page 1</span>
+                        <button class="btn btn-small" onclick="loadHistory(currentOffset + 100)" id="nextPage">Next</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -329,13 +530,15 @@
     <script>
         let eventSource = null;
         let selectedAgent = null;
+        let selectedEventTypes = [];
+        let currentTab = 'live';
+        let currentOffset = 0;
 
         function getApiKey() {
             return document.getElementById('apiKey').value || null;
         }
 
         function getBaseUrl() {
-            // Use current origin for the API
             return window.location.origin;
         }
 
@@ -344,11 +547,9 @@
 
             const apiKey = getApiKey();
             const baseUrl = getBaseUrl();
-            let url = `${baseUrl}/dashboard/stream`;
-
-            if (selectedAgent) {
-                url = `${baseUrl}/dashboard/agents/${selectedAgent}/stream`;
-            }
+            let url = selectedAgent
+                ? `${baseUrl}/dashboard/agents/${selectedAgent}/stream`
+                : `${baseUrl}/dashboard/stream`;
 
             if (apiKey) {
                 url += `?token=${encodeURIComponent(apiKey)}`;
@@ -363,17 +564,21 @@
 
             eventSource.addEventListener('activity', (e) => {
                 const event = JSON.parse(e.data);
-                addActivityItem(event);
+                // Apply client-side event type filter
+                if (selectedEventTypes.length === 0 || selectedEventTypes.includes(event.event_type)) {
+                    addActivityItem(event, 'activityFeed');
+                }
             });
 
             eventSource.addEventListener('heartbeat', () => {
-                // Keep connection status green
                 updateConnectionStatus(true);
             });
 
             eventSource.onerror = () => {
                 updateConnectionStatus(false);
             };
+
+            updateStreamInfo();
         }
 
         function disconnect() {
@@ -397,6 +602,15 @@
             }
         }
 
+        function updateStreamInfo() {
+            const info = document.getElementById('streamInfo');
+            let text = selectedAgent ? `Streaming: ${selectedAgent}` : 'Streaming: all agents';
+            if (selectedEventTypes.length > 0) {
+                text += ` | Filtering: ${selectedEventTypes.length} event type(s)`;
+            }
+            info.textContent = text;
+        }
+
         async function refreshAgents() {
             const apiKey = getApiKey();
             const baseUrl = getBaseUrl();
@@ -408,13 +622,10 @@
                 }
 
                 const response = await fetch(`${baseUrl}/dashboard/agents`, { headers });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
-                }
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
                 const data = await response.json();
-                renderAgentList(data.active_agents);
+                renderAgentList(data.active_agents, data.recent_agents);
             } catch (error) {
                 console.error('Failed to fetch agents:', error);
                 document.getElementById('agentList').innerHTML =
@@ -422,15 +633,28 @@
             }
         }
 
-        function renderAgentList(agents) {
+        function renderAgentList(activeAgents, recentAgents) {
             const list = document.getElementById('agentList');
+            const allOption = document.getElementById('allAgentsOption');
 
-            if (!agents || agents.length === 0) {
-                list.innerHTML = '<li class="empty-state">No active agents</li>';
+            // Update "All Agents" selection state
+            allOption.className = selectedAgent === null ? 'agent-item selected' : 'agent-item';
+
+            const agents = [...(activeAgents || []), ...(recentAgents || [])];
+            // Deduplicate by agent_id
+            const seen = new Set();
+            const uniqueAgents = agents.filter(a => {
+                if (seen.has(a.agent_id)) return false;
+                seen.add(a.agent_id);
+                return true;
+            });
+
+            if (uniqueAgents.length === 0) {
+                list.innerHTML = '<li class="empty-state">No agents found</li>';
                 return;
             }
 
-            list.innerHTML = agents.map(agent => `
+            list.innerHTML = uniqueAgents.map(agent => `
                 <li class="agent-item ${selectedAgent === agent.agent_id ? 'selected' : ''}"
                     onclick="selectAgent('${agent.agent_id}')">
                     <div class="agent-header">
@@ -446,23 +670,116 @@
         }
 
         function selectAgent(agentId) {
-            if (selectedAgent === agentId) {
-                selectedAgent = null;
-            } else {
-                selectedAgent = agentId;
-            }
-
-            // Re-render to update selection
+            selectedAgent = agentId;
             refreshAgents();
-
-            // Reconnect to stream for selected agent
             if (eventSource) {
                 connect();
             }
+            if (currentTab === 'history') {
+                loadHistory(0);
+            }
         }
 
-        function addActivityItem(event) {
-            const feed = document.getElementById('activityFeed');
+        // Event type filtering
+        document.getElementById('eventTypeFilter').addEventListener('change', function(e) {
+            selectedEventTypes = Array.from(this.selectedOptions)
+                .map(opt => opt.value)
+                .filter(v => v !== '');
+
+            updateFilterChips();
+            updateStreamInfo();
+        });
+
+        function updateFilterChips() {
+            const container = document.getElementById('activeFilters');
+            if (selectedEventTypes.length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+
+            container.innerHTML = selectedEventTypes.map(type => `
+                <span class="filter-chip active" onclick="removeFilter('${type}')">
+                    ${formatEventType(type)} ×
+                </span>
+            `).join('');
+        }
+
+        function removeFilter(type) {
+            selectedEventTypes = selectedEventTypes.filter(t => t !== type);
+            // Update the select element
+            const select = document.getElementById('eventTypeFilter');
+            Array.from(select.options).forEach(opt => {
+                if (opt.value === type) opt.selected = false;
+            });
+            updateFilterChips();
+            updateStreamInfo();
+        }
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.getElementById('tabLive').classList.toggle('active', tab === 'live');
+            document.getElementById('tabHistory').classList.toggle('active', tab === 'history');
+            document.getElementById('liveView').style.display = tab === 'live' ? 'block' : 'none';
+            document.getElementById('historyView').style.display = tab === 'history' ? 'block' : 'none';
+
+            if (tab === 'history') {
+                loadHistory(0);
+            }
+        }
+
+        async function loadHistory(offset = 0) {
+            currentOffset = Math.max(0, offset);
+            const apiKey = getApiKey();
+            const baseUrl = getBaseUrl();
+
+            try {
+                const headers = {};
+                if (apiKey) {
+                    headers['Authorization'] = `Bearer ${apiKey}`;
+                }
+
+                let url;
+                if (selectedAgent) {
+                    url = `${baseUrl}/dashboard/agents/${selectedAgent}/activity?limit=100&offset=${currentOffset}`;
+                } else {
+                    url = `${baseUrl}/dashboard/activity?limit=100`;
+                }
+
+                if (selectedEventTypes.length > 0) {
+                    url += `&event_types=${selectedEventTypes.join(',')}`;
+                }
+
+                const response = await fetch(url, { headers });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                renderHistoryFeed(data.events);
+
+                // Update pagination
+                document.getElementById('prevPage').disabled = currentOffset === 0;
+                document.getElementById('nextPage').disabled = data.events.length < 100;
+                document.getElementById('pageInfo').textContent = `Showing ${currentOffset + 1}-${currentOffset + data.events.length}`;
+
+            } catch (error) {
+                console.error('Failed to load history:', error);
+                document.getElementById('historyFeed').innerHTML =
+                    '<div class="empty-state">Failed to load history</div>';
+            }
+        }
+
+        function renderHistoryFeed(events) {
+            const feed = document.getElementById('historyFeed');
+            if (!events || events.length === 0) {
+                feed.innerHTML = '<div class="empty-state">No events found</div>';
+                return;
+            }
+
+            feed.innerHTML = '';
+            events.forEach(event => addActivityItem(event, 'historyFeed'));
+        }
+
+        function addActivityItem(event, feedId) {
+            const feed = document.getElementById(feedId);
 
             // Remove empty state if present
             const emptyState = feed.querySelector('.empty-state');
@@ -475,43 +792,93 @@
 
             const iconClass = getIconClass(event.event_type);
             const time = new Date(event.timestamp).toLocaleTimeString();
+            const date = new Date(event.timestamp).toLocaleDateString();
 
-            let content = '';
+            // Build summary content
+            let summary = '';
             if (event.tool_name) {
-                content = `<code>${event.tool_name}</code>`;
+                summary = `<code>${event.tool_name}</code>`;
                 if (event.tool_duration_ms) {
-                    content += ` (${event.tool_duration_ms}ms)`;
+                    summary += ` <span class="duration-badge">(${event.tool_duration_ms}ms)</span>`;
                 }
-                if (event.tool_success === false) {
-                    content += ' <span style="color: var(--accent-red);">FAILED</span>';
+                if (event.tool_success === true) {
+                    summary += ' <span class="success-badge">✓</span>';
+                } else if (event.tool_success === false) {
+                    summary += ' <span class="error-badge">✗ FAILED</span>';
                 }
             } else if (event.content) {
-                content = escapeHtml(event.content.substring(0, 200));
-                if (event.content.length > 200) content += '...';
+                const truncated = event.content.length > 150
+                    ? event.content.substring(0, 150) + '...'
+                    : event.content;
+                summary = escapeHtml(truncated);
+            }
+
+            // Build details section
+            let details = '';
+            if (event.tool_args) {
+                details += `
+                    <div class="detail-section">
+                        <div class="detail-label">Tool Arguments</div>
+                        <div class="detail-content">${escapeHtml(JSON.stringify(event.tool_args, null, 2))}</div>
+                    </div>
+                `;
+            }
+            if (event.tool_result) {
+                details += `
+                    <div class="detail-section">
+                        <div class="detail-label">Tool Result</div>
+                        <div class="detail-content">${escapeHtml(event.tool_result)}</div>
+                    </div>
+                `;
+            }
+            if (event.content && event.content.length > 150) {
+                details += `
+                    <div class="detail-section">
+                        <div class="detail-label">Full Content</div>
+                        <div class="detail-content">${escapeHtml(event.content)}</div>
+                    </div>
+                `;
+            }
+            if (event.metadata && Object.keys(event.metadata).length > 0) {
+                details += `
+                    <div class="detail-section">
+                        <div class="detail-label">Metadata</div>
+                        <div class="detail-content">${escapeHtml(JSON.stringify(event.metadata, null, 2))}</div>
+                    </div>
+                `;
             }
 
             item.innerHTML = `
-                <div class="activity-header">
+                <div class="activity-header" onclick="toggleDetails(this)">
                     <span class="activity-type">
                         <span class="activity-type-icon ${iconClass}">${getIcon(event.event_type)}</span>
                         ${formatEventType(event.event_type)}
                     </span>
-                    <span class="activity-time">${time}</span>
+                    <span class="activity-time">${date} ${time}</span>
                 </div>
-                <div class="activity-content">${content}</div>
+                <div class="activity-summary">${summary}</div>
                 <div class="activity-meta">
                     <span>Agent: ${event.agent_id}</span>
                     ${event.issue_number ? `<span>Issue: #${event.issue_number}</span>` : ''}
                     ${event.pr_number ? `<span>PR: #${event.pr_number}</span>` : ''}
                 </div>
+                ${details ? `<div class="activity-details">${details}</div>` : ''}
             `;
 
-            feed.insertBefore(item, feed.firstChild);
-
-            // Keep only last 500 items
-            while (feed.children.length > 500) {
-                feed.removeChild(feed.lastChild);
+            if (feedId === 'activityFeed') {
+                feed.insertBefore(item, feed.firstChild);
+                // Keep only last 500 items
+                while (feed.children.length > 500) {
+                    feed.removeChild(feed.lastChild);
+                }
+            } else {
+                feed.appendChild(item);
             }
+        }
+
+        function toggleDetails(header) {
+            const item = header.closest('.activity-item');
+            item.classList.toggle('expanded');
         }
 
         function getIconClass(eventType) {
@@ -520,16 +887,26 @@
             if (eventType.includes('github_')) return 'icon-github';
             if (eventType.includes('circuit_breaker')) return 'icon-circuit';
             if (eventType === 'error') return 'icon-error';
+            if (eventType === 'warning') return 'icon-circuit';
+            if (eventType === 'reasoning') return 'icon-reasoning';
+            if (eventType === 'info') return 'icon-info';
             return 'icon-lifecycle';
         }
 
         function getIcon(eventType) {
             if (eventType.includes('tool_call')) return 'T';
+            if (eventType === 'agent_spawned') return '+';
+            if (eventType === 'agent_completed') return '✓';
+            if (eventType === 'agent_failed') return '✗';
+            if (eventType === 'agent_escalated') return '!';
             if (eventType.includes('agent_')) return 'A';
             if (eventType.includes('github_')) return 'G';
-            if (eventType.includes('circuit_breaker')) return '!';
+            if (eventType.includes('circuit_breaker')) return '⚡';
             if (eventType === 'error') return 'E';
-            return '*';
+            if (eventType === 'warning') return '⚠';
+            if (eventType === 'reasoning') return '💭';
+            if (eventType === 'info') return 'i';
+            return '•';
         }
 
         function formatEventType(type) {
@@ -549,7 +926,6 @@
 
         // Auto-connect if no API key is required
         window.addEventListener('load', () => {
-            // Try to connect without key first
             fetch(`${getBaseUrl()}/dashboard/status`)
                 .then(r => r.json())
                 .then(data => {

@@ -318,19 +318,29 @@ class ActivityLogger:
     async def get_recent_activity(
         self,
         limit: int = 100,
+        offset: int = 0,
+        agent_id: str | None = None,
         event_types: list[ActivityEventType] | None = None,
     ) -> list[ActivityEvent]:
-        """Get recent activity across all agents."""
+        """Get recent activity across all agents (or filtered by agent)."""
         query = "SELECT * FROM agent_activity"
         params: list[Any] = []
+        conditions = []
+
+        if agent_id:
+            conditions.append("agent_id = ?")
+            params.append(agent_id)
 
         if event_types:
             placeholders = ",".join("?" * len(event_types))
-            query += f" WHERE event_type IN ({placeholders})"
+            conditions.append(f"event_type IN ({placeholders})")
             params.extend(et.value for et in event_types)
 
-        query += " ORDER BY timestamp DESC LIMIT ?"
-        params.append(limit)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
 
         async with self.db.execute(query, params) as cursor:
             rows = await cursor.fetchall()

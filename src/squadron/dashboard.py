@@ -245,13 +245,18 @@ async def get_agent_stats(
 @router.get("/activity")
 async def get_recent_activity(
     limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    agent_id: str | None = Query(
+        default=None,
+        description="Filter by agent ID",
+    ),
     event_types: str | None = Query(
         default=None,
         description="Comma-separated event types to filter",
     ),
     _: bool = Depends(require_api_key),
 ):
-    """Get recent activity events across all agents.
+    """Get recent activity events across all agents (or filtered by agent).
 
     Returns events in reverse chronological order (newest first).
     """
@@ -266,10 +271,14 @@ async def get_recent_activity(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid event type: {e}")
 
-    events = await _activity_logger.get_recent_activity(limit=limit, event_types=type_filter)
+    events = await _activity_logger.get_recent_activity(
+        limit=limit, offset=offset, agent_id=agent_id, event_types=type_filter
+    )
 
     return {
         "count": len(events),
+        "offset": offset,
+        "agent_id": agent_id,
         "events": [
             {
                 "id": e.id,
@@ -277,9 +286,14 @@ async def get_recent_activity(
                 "event_type": e.event_type.value,
                 "timestamp": e.timestamp.isoformat(),
                 "tool_name": e.tool_name,
+                "tool_args": e.tool_args,
+                "tool_result": e.tool_result[:500]
+                if e.tool_result and len(e.tool_result) > 500
+                else e.tool_result,
                 "tool_success": e.tool_success,
                 "tool_duration_ms": e.tool_duration_ms,
                 "content": e.content[:500] if e.content and len(e.content) > 500 else e.content,
+                "metadata": e.metadata,
                 "issue_number": e.issue_number,
                 "pr_number": e.pr_number,
             }
