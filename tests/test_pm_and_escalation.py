@@ -612,7 +612,8 @@ class TestWakePromptContext:
 
         prompt = await mgr._build_wake_prompt(agent, event)
         # Event-level review info is still included as context
-        assert "changes_requested" in prompt
+        # Review state is now uppercased for clarity (issue #112)
+        assert "CHANGES_REQUESTED" in prompt.upper()
         assert "Needs work" in prompt
         assert "reviewer1" in prompt
         # Inline review comments are no longer injected -- agents use

@@ -105,6 +105,17 @@ If events are pending, read and process them before continuing. This ensures you
 1. **Check for pending events** — call `check_for_events` to see what triggered your wake
 2. **Determine wake reason** — if you woke up due to a PR merge event, proceed to **PR Merge Cleanup**. Otherwise continue with normal wake protocol.
 
+### PR Review Response Protocol
+
+**When woken by `pr.review_submitted` or `pr.review_comment`:**
+
+3. **Fetch all review feedback** — call `get_pr_feedback` to retrieve all review comments (including inline code comments). Do NOT skip this step.
+4. **Read each comment carefully** — distinguish between blocking issues, suggestions, questions, and nits.
+5. **Pull latest changes** — `git fetch origin && git rebase origin/{base_branch}`
+6. **Address the feedback** — make code changes as needed.
+7. **Respond to the reviewer** — use `comment_on_pr` to explain changes. For specific threads, use `reply_to_review_comment`.
+8. **Push updates** — commit and call `git_push`.
+
 ### Normal Wake Protocol (PR review feedback, comments, etc.)
 
 3. Pull latest changes — `git fetch origin && git rebase origin/{base_branch}`

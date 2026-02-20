@@ -424,19 +424,74 @@ class SquadronTools:
     # ── Framework Tools (agent lifecycle) ────────────────────────────────
 
     async def check_for_events(self, agent_id: str, params: CheckEventsParams) -> str:
-        """Check for pending framework events in the agent's inbox."""
+        """Check for pending framework events in the agent's inbox.
+
+        Returns a human-readable summary of each queued event.  For PR review
+        events (PR_REVIEW_SUBMITTED, PR_REVIEW_COMMENT) the response includes
+        the review state, body, reviewer, and file/line info so the agent has
+        enough context to act without needing to call get_pr_feedback first.
+        """
+        from squadron.models import SquadronEventType
+
         inbox = self.agent_inboxes.get(agent_id)
         if not inbox or inbox.empty():
             return "No pending events."
 
-        events = []
+        event_lines = []
         while not inbox.empty():
             event = inbox.get_nowait()
-            events.append(
-                f"- [{event.event_type.value}] issue=#{event.issue_number} pr=#{event.pr_number}"
-            )
+            payload = event.data.get("payload", {})
 
-        return "Pending events:\n" + "\n".join(events)
+            if event.event_type == SquadronEventType.PR_REVIEW_SUBMITTED:
+                # Rich review context for PR review submissions
+                review = payload.get("review", {})
+                state = review.get("state", "unknown").upper()
+                reviewer = review.get("user", {}).get("login", "unknown")
+                body = review.get("body") or ""
+                body_snippet = body[:200] + "..." if len(body) > 200 else body
+                line = (
+                    f"- [PR_REVIEW_SUBMITTED] PR #{event.pr_number} "
+                    f"| state={state} | reviewer=@{reviewer}"
+                )
+                if body_snippet:
+                    line += f"\n  Summary: {body_snippet}"
+                line += (
+                    f"\n  → Call `get_pr_feedback` to fetch all inline comments."
+                )
+                event_lines.append(line)
+
+            elif event.event_type == SquadronEventType.PR_REVIEW_COMMENT:
+                # Inline review comment details
+                comment = payload.get("comment", {})
+                reviewer = comment.get("user", {}).get("login", "unknown")
+                path = comment.get("path", "unknown file")
+                line_num = comment.get("line") or comment.get("original_line")
+                body = comment.get("body") or ""
+                body_snippet = body[:150] + "..." if len(body) > 150 else body
+                line = (
+                    f"- [PR_REVIEW_COMMENT] PR #{event.pr_number} "
+                    f"| {path}"
+                    + (f":{line_num}" if line_num else "")
+                    + f" | reviewer=@{reviewer}"
+                )
+                if body_snippet:
+                    line += f"\n  Comment: {body_snippet}"
+                event_lines.append(line)
+
+            elif event.event_type == SquadronEventType.BLOCKER_RESOLVED:
+                resolved = event.data.get("resolved_issue")
+                event_lines.append(
+                    f"- [BLOCKER_RESOLVED] Issue #{resolved} has been closed — "
+                    "your blocker is unblocked."
+                )
+
+            else:
+                event_lines.append(
+                    f"- [{event.event_type.value}] "
+                    f"issue=#{event.issue_number} pr=#{event.pr_number}"
+                )
+
+        return "Pending events:\n" + "\n".join(event_lines)
 
     async def report_blocked(self, agent_id: str, params: ReportBlockedParams) -> str:
         """Report that the agent is blocked on another issue."""
