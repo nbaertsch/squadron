@@ -119,28 +119,6 @@
             padding: 16px;
         }
 
-        .tabs {
-            display: flex;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .tab {
-            padding: 12px 20px;
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            color: var(--text-secondary);
-            transition: all 0.15s;
-        }
-
-        .tab:hover {
-            color: var(--text-primary);
-        }
-
-        .tab.active {
-            color: var(--accent-blue);
-            border-bottom-color: var(--accent-blue);
-        }
-
         .agent-list {
             list-style: none;
             max-height: 500px;
@@ -392,15 +370,6 @@
             color: var(--text-secondary);
         }
 
-        .pagination {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            padding: 12px;
-            border-top: 1px solid var(--border);
-        }
-
         .success-badge {
             color: var(--accent-green);
         }
@@ -412,6 +381,45 @@
         .duration-badge {
             color: var(--text-muted);
             font-size: 11px;
+        }
+
+        /* Tool call spinner animation */
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid var(--text-muted);
+            border-top-color: var(--accent-purple);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+        }
+
+        .tool-call-pending .activity-type-icon {
+            background: var(--accent-yellow);
+        }
+
+        .stream-status-bar {
+            padding: 6px 16px;
+            font-size: 11px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 28px;
+        }
+
+        .hydrating-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--accent-yellow);
         }
 
         @media (max-width: 1000px) {
@@ -450,8 +458,8 @@
                         <option value="agent_failed">Agent Failed</option>
                     </optgroup>
                     <optgroup label="Tool Execution">
-                        <option value="tool_call_start">Tool Call Start</option>
-                        <option value="tool_call_end">Tool Call End</option>
+                        <option value="tool_call_start">Tool Call</option>
+                        <option value="tool_call_end">Tool Call Result</option>
                     </optgroup>
                     <optgroup label="LLM Interaction">
                         <option value="reasoning">Reasoning</option>
@@ -494,34 +502,16 @@
             </div>
 
             <div class="panel">
-                <div class="tabs">
-                    <div class="tab active" onclick="switchTab('live')" id="tabLive">Live Stream</div>
-                    <div class="tab" onclick="switchTab('history')" id="tabHistory">History</div>
+                <div class="panel-header" style="border-bottom: none;">
+                    <span id="streamInfo">Activity Stream</span>
+                    <button class="btn btn-small" onclick="clearFeed()">Clear</button>
                 </div>
-
-                <div id="liveView">
-                    <div class="panel-header" style="border-top: none;">
-                        <span id="streamInfo">Streaming all events</span>
-                        <button class="btn btn-small" onclick="clearFeed()">Clear</button>
-                    </div>
-                    <div class="activity-feed" id="activityFeed">
-                        <div class="empty-state">Activity events will appear here</div>
-                    </div>
+                <!-- Stream status bar: shows hydration progress or live status -->
+                <div class="stream-status-bar" id="streamStatusBar">
+                    <span id="streamStatusText">Not connected</span>
                 </div>
-
-                <div id="historyView" style="display: none;">
-                    <div class="panel-header" style="border-top: none;">
-                        <span>Historical Events</span>
-                        <button class="btn btn-small" onclick="loadHistory()">Load</button>
-                    </div>
-                    <div class="activity-feed" id="historyFeed">
-                        <div class="empty-state">Click "Load" to view historical events</div>
-                    </div>
-                    <div class="pagination">
-                        <button class="btn btn-small" onclick="loadHistory(currentOffset - 100)" id="prevPage" disabled>Previous</button>
-                        <span id="pageInfo">Page 1</span>
-                        <button class="btn btn-small" onclick="loadHistory(currentOffset + 100)" id="nextPage">Next</button>
-                    </div>
+                <div class="activity-feed" id="activityFeed">
+                    <div class="empty-state">Connect to view activity</div>
                 </div>
             </div>
         </div>
@@ -531,8 +521,11 @@
         let eventSource = null;
         let selectedAgent = null;
         let selectedEventTypes = [];
-        let currentTab = 'live';
-        let currentOffset = 0;
+        // Tracks pending tool_call_start items awaiting their tool_call_end.
+        // Key: "${agent_id}:${tool_name}", Value: array of DOM element references (FIFO)
+        const pendingToolCalls = {};
+        // Whether we are still receiving history events (before 'hydrated' signal)
+        let isHydrating = false;
 
         function getApiKey() {
             return document.getElementById('apiKey').value || null;
@@ -544,6 +537,7 @@
 
         function connect() {
             disconnect();
+            resetPendingToolCalls();
 
             const apiKey = getApiKey();
             const baseUrl = getBaseUrl();
@@ -556,18 +550,30 @@
             }
 
             eventSource = new EventSource(url);
+            isHydrating = true;
 
             eventSource.addEventListener('connected', (e) => {
                 updateConnectionStatus(true);
+                updateStreamStatus('hydrating');
                 refreshAgents();
             });
 
             eventSource.addEventListener('activity', (e) => {
                 const event = JSON.parse(e.data);
-                // Apply client-side event type filter
-                if (selectedEventTypes.length === 0 || selectedEventTypes.includes(event.event_type)) {
-                    addActivityItem(event, 'activityFeed');
+                // Apply client-side event type filter.
+                // For tool_call_end we check against 'tool_call_start' as well since
+                // they are presented as a single merged UI element.
+                const passesFilter = selectedEventTypes.length === 0
+                    || selectedEventTypes.includes(event.event_type)
+                    || (event.event_type === 'tool_call_end' && selectedEventTypes.includes('tool_call_start'));
+                if (passesFilter) {
+                    handleActivityEvent(event);
                 }
+            });
+
+            eventSource.addEventListener('hydrated', () => {
+                isHydrating = false;
+                updateStreamStatus('live');
             });
 
             eventSource.addEventListener('heartbeat', () => {
@@ -576,6 +582,7 @@
 
             eventSource.onerror = () => {
                 updateConnectionStatus(false);
+                updateStreamStatus('disconnected');
             };
 
             updateStreamInfo();
@@ -586,7 +593,15 @@
                 eventSource.close();
                 eventSource = null;
             }
+            isHydrating = false;
             updateConnectionStatus(false);
+            updateStreamStatus('disconnected');
+        }
+
+        function resetPendingToolCalls() {
+            for (const key in pendingToolCalls) {
+                delete pendingToolCalls[key];
+            }
         }
 
         function updateConnectionStatus(connected) {
@@ -602,11 +617,33 @@
             }
         }
 
+        function updateStreamStatus(state) {
+            const bar = document.getElementById('streamStatusBar');
+            const text = document.getElementById('streamStatusText');
+            bar.innerHTML = '';
+
+            if (state === 'hydrating') {
+                bar.innerHTML = `
+                    <span class="hydrating-indicator">
+                        <span class="spinner"></span>
+                        Loading history&hellip;
+                    </span>`;
+            } else if (state === 'live') {
+                text.textContent = '● Live';
+                text.style.color = 'var(--accent-green)';
+                bar.appendChild(text);
+            } else {
+                text.textContent = 'Not connected';
+                text.style.color = '';
+                bar.appendChild(text);
+            }
+        }
+
         function updateStreamInfo() {
             const info = document.getElementById('streamInfo');
-            let text = selectedAgent ? `Streaming: ${selectedAgent}` : 'Streaming: all agents';
+            let text = selectedAgent ? `Stream: ${selectedAgent}` : 'Activity Stream';
             if (selectedEventTypes.length > 0) {
-                text += ` | Filtering: ${selectedEventTypes.length} event type(s)`;
+                text += ` | ${selectedEventTypes.length} filter(s)`;
             }
             info.textContent = text;
         }
@@ -637,11 +674,9 @@
             const list = document.getElementById('agentList');
             const allOption = document.getElementById('allAgentsOption');
 
-            // Update "All Agents" selection state
             allOption.className = selectedAgent === null ? 'agent-item selected' : 'agent-item';
 
             const agents = [...(activeAgents || []), ...(recentAgents || [])];
-            // Deduplicate by agent_id
             const seen = new Set();
             const uniqueAgents = agents.filter(a => {
                 if (seen.has(a.agent_id)) return false;
@@ -673,10 +708,9 @@
             selectedAgent = agentId;
             refreshAgents();
             if (eventSource) {
+                // Reconnect so we get history for the selected agent
+                clearFeed();
                 connect();
-            }
-            if (currentTab === 'history') {
-                loadHistory(0);
             }
         }
 
@@ -706,7 +740,6 @@
 
         function removeFilter(type) {
             selectedEventTypes = selectedEventTypes.filter(t => t !== type);
-            // Update the select element
             const select = document.getElementById('eventTypeFilter');
             Array.from(select.options).forEach(opt => {
                 if (opt.value === type) opt.selected = false;
@@ -715,97 +748,236 @@
             updateStreamInfo();
         }
 
-        function switchTab(tab) {
-            currentTab = tab;
-            document.getElementById('tabLive').classList.toggle('active', tab === 'live');
-            document.getElementById('tabHistory').classList.toggle('active', tab === 'history');
-            document.getElementById('liveView').style.display = tab === 'live' ? 'block' : 'none';
-            document.getElementById('historyView').style.display = tab === 'history' ? 'block' : 'none';
+        // ── Activity Feed ─────────────────────────────────────────────────────
 
-            if (tab === 'history') {
-                loadHistory(0);
+        /**
+         * Route an activity event to the appropriate handler.
+         *
+         * tool_call_start events create a pending Tool Call item (spinner).
+         * tool_call_end events look for a matching pending item and update it
+         * (spinner → check/cross) so both events share a single UI element.
+         * All other events are rendered directly.
+         */
+        function handleActivityEvent(event) {
+            if (event.event_type === 'tool_call_start') {
+                addToolCallStartItem(event);
+            } else if (event.event_type === 'tool_call_end') {
+                mergeToolCallResult(event);
+            } else {
+                addActivityItem(event);
             }
         }
 
-        async function loadHistory(offset = 0) {
-            currentOffset = Math.max(0, offset);
-            const apiKey = getApiKey();
-            const baseUrl = getBaseUrl();
+        /**
+         * Add a pending Tool Call item with a spinner.
+         * The item is stored in pendingToolCalls so the matching
+         * tool_call_end can update it later.
+         */
+        function addToolCallStartItem(event) {
+            const feed = document.getElementById('activityFeed');
+            removeEmptyState(feed);
 
-            try {
-                const headers = {};
-                if (apiKey) {
-                    headers['Authorization'] = `Bearer ${apiKey}`;
+            const item = document.createElement('div');
+            item.className = 'activity-item tool-call-pending';
+            item.dataset.agentId = event.agent_id;
+            item.dataset.toolName = event.tool_name || '';
+
+            const time = formatTimestamp(event.timestamp);
+
+            item.innerHTML = buildToolCallPendingHTML(event, time);
+
+            feed.insertBefore(item, feed.firstChild);
+            trimFeed(feed);
+
+            // Register as pending so tool_call_end can find it
+            const key = pendingToolCallKey(event.agent_id, event.tool_name);
+            if (!pendingToolCalls[key]) {
+                pendingToolCalls[key] = [];
+            }
+            pendingToolCalls[key].push(item);
+        }
+
+        /**
+         * Find the oldest pending tool call item for this result and update it
+         * in-place: replace spinner with check/cross and add result details.
+         * If no matching pending item exists (e.g. page loaded mid-stream),
+         * fall back to rendering a standalone completed item.
+         */
+        function mergeToolCallResult(event) {
+            const key = pendingToolCallKey(event.agent_id, event.tool_name);
+            const queue = pendingToolCalls[key];
+
+            if (queue && queue.length > 0) {
+                // FIFO: the oldest pending start matches this result
+                const item = queue.shift();
+                if (queue.length === 0) {
+                    delete pendingToolCalls[key];
                 }
-
-                let url;
-                if (selectedAgent) {
-                    url = `${baseUrl}/dashboard/agents/${selectedAgent}/activity?limit=100&offset=${currentOffset}`;
-                } else {
-                    url = `${baseUrl}/dashboard/activity?limit=100`;
-                }
-
-                if (selectedEventTypes.length > 0) {
-                    url += `&event_types=${selectedEventTypes.join(',')}`;
-                }
-
-                const response = await fetch(url, { headers });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-                const data = await response.json();
-                renderHistoryFeed(data.events);
-
-                // Update pagination
-                document.getElementById('prevPage').disabled = currentOffset === 0;
-                document.getElementById('nextPage').disabled = data.events.length < 100;
-                document.getElementById('pageInfo').textContent = `Showing ${currentOffset + 1}-${currentOffset + data.events.length}`;
-
-            } catch (error) {
-                console.error('Failed to load history:', error);
-                document.getElementById('historyFeed').innerHTML =
-                    '<div class="empty-state">Failed to load history</div>';
+                updateToolCallItem(item, event);
+            } else {
+                // No matching start found — render as a completed item directly
+                addCompletedToolCallItem(event);
             }
         }
 
-        function renderHistoryFeed(events) {
-            const feed = document.getElementById('historyFeed');
-            if (!events || events.length === 0) {
-                feed.innerHTML = '<div class="empty-state">No events found</div>';
-                return;
-            }
-
-            feed.innerHTML = '';
-            events.forEach(event => addActivityItem(event, 'historyFeed'));
+        function pendingToolCallKey(agentId, toolName) {
+            return `${agentId}:${toolName || ''}`;
         }
 
-        function addActivityItem(event, feedId) {
-            const feed = document.getElementById(feedId);
+        /**
+         * Build the inner HTML for a pending (spinner) tool call item.
+         */
+        function buildToolCallPendingHTML(event, time) {
+            const argsDetails = event.tool_args
+                ? `<div class="detail-section">
+                       <div class="detail-label">Tool Arguments</div>
+                       <div class="detail-content">${escapeHtml(JSON.stringify(event.tool_args, null, 2))}</div>
+                   </div>`
+                : '';
 
-            // Remove empty state if present
-            const emptyState = feed.querySelector('.empty-state');
-            if (emptyState) {
-                emptyState.remove();
+            return `
+                <div class="activity-header" onclick="toggleDetails(this)">
+                    <span class="activity-type">
+                        <span class="activity-type-icon icon-tool">T</span>
+                        Tool Call
+                    </span>
+                    <span class="activity-time">${time}</span>
+                </div>
+                <div class="activity-summary">
+                    <code>${escapeHtml(event.tool_name || '')}</code>
+                    <span class="spinner" title="Awaiting result"></span>
+                </div>
+                <div class="activity-meta">
+                    <span>Agent: ${escapeHtml(event.agent_id)}</span>
+                    ${event.issue_number ? `<span>Issue: #${event.issue_number}</span>` : ''}
+                    ${event.pr_number ? `<span>PR: #${event.pr_number}</span>` : ''}
+                </div>
+                ${argsDetails ? `<div class="activity-details">${argsDetails}</div>` : ''}
+            `;
+        }
+
+        /**
+         * Update an existing pending tool call item in-place with result data.
+         * Replaces the spinner with a success/failure badge and appends result
+         * details to the expandable section.
+         */
+        function updateToolCallItem(item, resultEvent) {
+            item.classList.remove('tool-call-pending');
+
+            const successBadge = resultEvent.tool_success === true
+                ? '<span class="success-badge" title="Success">✓</span>'
+                : resultEvent.tool_success === false
+                    ? '<span class="error-badge" title="Failed">✗ FAILED</span>'
+                    : '';
+
+            const durationBadge = resultEvent.tool_duration_ms
+                ? `<span class="duration-badge">(${resultEvent.tool_duration_ms}ms)</span>`
+                : '';
+
+            // Update summary: remove spinner, add result badges
+            const summary = item.querySelector('.activity-summary');
+            if (summary) {
+                summary.innerHTML = `
+                    <code>${escapeHtml(resultEvent.tool_name || '')}</code>
+                    ${durationBadge}
+                    ${successBadge}
+                `;
             }
+
+            // Append result to details section
+            if (resultEvent.tool_result) {
+                let details = item.querySelector('.activity-details');
+                if (!details) {
+                    details = document.createElement('div');
+                    details.className = 'activity-details';
+                    item.appendChild(details);
+                }
+                const resultSection = document.createElement('div');
+                resultSection.className = 'detail-section';
+                resultSection.innerHTML = `
+                    <div class="detail-label">Tool Result</div>
+                    <div class="detail-content">${escapeHtml(resultEvent.tool_result)}</div>
+                `;
+                details.appendChild(resultSection);
+            }
+        }
+
+        /**
+         * Render a completed tool call as a single item (fallback when no
+         * matching start was found — e.g. loaded mid-stream or from history).
+         */
+        function addCompletedToolCallItem(event) {
+            const feed = document.getElementById('activityFeed');
+            removeEmptyState(feed);
+
+            const item = document.createElement('div');
+            item.className = 'activity-item';
+
+            const time = formatTimestamp(event.timestamp);
+            const successBadge = event.tool_success === true
+                ? '<span class="success-badge">✓</span>'
+                : event.tool_success === false
+                    ? '<span class="error-badge">✗ FAILED</span>'
+                    : '';
+            const durationBadge = event.tool_duration_ms
+                ? `<span class="duration-badge">(${event.tool_duration_ms}ms)</span>`
+                : '';
+
+            let details = '';
+            if (event.tool_args) {
+                details += `<div class="detail-section">
+                    <div class="detail-label">Tool Arguments</div>
+                    <div class="detail-content">${escapeHtml(JSON.stringify(event.tool_args, null, 2))}</div>
+                </div>`;
+            }
+            if (event.tool_result) {
+                details += `<div class="detail-section">
+                    <div class="detail-label">Tool Result</div>
+                    <div class="detail-content">${escapeHtml(event.tool_result)}</div>
+                </div>`;
+            }
+
+            item.innerHTML = `
+                <div class="activity-header" onclick="toggleDetails(this)">
+                    <span class="activity-type">
+                        <span class="activity-type-icon icon-tool">T</span>
+                        Tool Call
+                    </span>
+                    <span class="activity-time">${time}</span>
+                </div>
+                <div class="activity-summary">
+                    <code>${escapeHtml(event.tool_name || '')}</code>
+                    ${durationBadge}
+                    ${successBadge}
+                </div>
+                <div class="activity-meta">
+                    <span>Agent: ${escapeHtml(event.agent_id)}</span>
+                    ${event.issue_number ? `<span>Issue: #${event.issue_number}</span>` : ''}
+                    ${event.pr_number ? `<span>PR: #${event.pr_number}</span>` : ''}
+                </div>
+                ${details ? `<div class="activity-details">${details}</div>` : ''}
+            `;
+
+            feed.insertBefore(item, feed.firstChild);
+            trimFeed(feed);
+        }
+
+        /**
+         * Render a non-tool-call activity item.
+         */
+        function addActivityItem(event) {
+            const feed = document.getElementById('activityFeed');
+            removeEmptyState(feed);
 
             const item = document.createElement('div');
             item.className = 'activity-item';
 
             const iconClass = getIconClass(event.event_type);
-            const time = new Date(event.timestamp).toLocaleTimeString();
-            const date = new Date(event.timestamp).toLocaleDateString();
+            const time = formatTimestamp(event.timestamp);
 
-            // Build summary content
             let summary = '';
             if (event.tool_name) {
-                summary = `<code>${event.tool_name}</code>`;
-                if (event.tool_duration_ms) {
-                    summary += ` <span class="duration-badge">(${event.tool_duration_ms}ms)</span>`;
-                }
-                if (event.tool_success === true) {
-                    summary += ' <span class="success-badge">✓</span>';
-                } else if (event.tool_success === false) {
-                    summary += ' <span class="error-badge">✗ FAILED</span>';
-                }
+                summary = `<code>${escapeHtml(event.tool_name)}</code>`;
             } else if (event.content) {
                 const truncated = event.content.length > 150
                     ? event.content.substring(0, 150) + '...'
@@ -813,39 +985,30 @@
                 summary = escapeHtml(truncated);
             }
 
-            // Build details section
             let details = '';
             if (event.tool_args) {
-                details += `
-                    <div class="detail-section">
-                        <div class="detail-label">Tool Arguments</div>
-                        <div class="detail-content">${escapeHtml(JSON.stringify(event.tool_args, null, 2))}</div>
-                    </div>
-                `;
+                details += `<div class="detail-section">
+                    <div class="detail-label">Tool Arguments</div>
+                    <div class="detail-content">${escapeHtml(JSON.stringify(event.tool_args, null, 2))}</div>
+                </div>`;
             }
             if (event.tool_result) {
-                details += `
-                    <div class="detail-section">
-                        <div class="detail-label">Tool Result</div>
-                        <div class="detail-content">${escapeHtml(event.tool_result)}</div>
-                    </div>
-                `;
+                details += `<div class="detail-section">
+                    <div class="detail-label">Tool Result</div>
+                    <div class="detail-content">${escapeHtml(event.tool_result)}</div>
+                </div>`;
             }
             if (event.content && event.content.length > 150) {
-                details += `
-                    <div class="detail-section">
-                        <div class="detail-label">Full Content</div>
-                        <div class="detail-content">${escapeHtml(event.content)}</div>
-                    </div>
-                `;
+                details += `<div class="detail-section">
+                    <div class="detail-label">Full Content</div>
+                    <div class="detail-content">${escapeHtml(event.content)}</div>
+                </div>`;
             }
             if (event.metadata && Object.keys(event.metadata).length > 0) {
-                details += `
-                    <div class="detail-section">
-                        <div class="detail-label">Metadata</div>
-                        <div class="detail-content">${escapeHtml(JSON.stringify(event.metadata, null, 2))}</div>
-                    </div>
-                `;
+                details += `<div class="detail-section">
+                    <div class="detail-label">Metadata</div>
+                    <div class="detail-content">${escapeHtml(JSON.stringify(event.metadata, null, 2))}</div>
+                </div>`;
             }
 
             item.innerHTML = `
@@ -854,31 +1017,54 @@
                         <span class="activity-type-icon ${iconClass}">${getIcon(event.event_type)}</span>
                         ${formatEventType(event.event_type)}
                     </span>
-                    <span class="activity-time">${date} ${time}</span>
+                    <span class="activity-time">${time}</span>
                 </div>
                 <div class="activity-summary">${summary}</div>
                 <div class="activity-meta">
-                    <span>Agent: ${event.agent_id}</span>
+                    <span>Agent: ${escapeHtml(event.agent_id)}</span>
                     ${event.issue_number ? `<span>Issue: #${event.issue_number}</span>` : ''}
                     ${event.pr_number ? `<span>PR: #${event.pr_number}</span>` : ''}
                 </div>
                 ${details ? `<div class="activity-details">${details}</div>` : ''}
             `;
 
-            if (feedId === 'activityFeed') {
-                feed.insertBefore(item, feed.firstChild);
-                // Keep only last 500 items
-                while (feed.children.length > 500) {
-                    feed.removeChild(feed.lastChild);
-                }
-            } else {
-                feed.appendChild(item);
-            }
+            feed.insertBefore(item, feed.firstChild);
+            trimFeed(feed);
         }
+
+        // ── History: replay paired tool_call_start+end events ─────────────────
+        //
+        // When history is replayed the events arrive in chronological order.
+        // tool_call_start events are added with a spinner; the matching
+        // tool_call_end follows shortly after and merges in the same way as
+        // live events.  After hydration the pendingToolCalls map is cleared so
+        // stale pending items (tool_call_start without a matching end, e.g. an
+        // in-progress call that pre-dates this page load) stay as spinners
+        // rather than polluting future live events.
+        eventSource && document.addEventListener('hydrated', () => {
+            resetPendingToolCalls();
+        });
 
         function toggleDetails(header) {
             const item = header.closest('.activity-item');
             item.classList.toggle('expanded');
+        }
+
+        function removeEmptyState(feed) {
+            const emptyState = feed.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+        }
+
+        function trimFeed(feed) {
+            // Keep only the most recent 500 items to avoid memory bloat
+            while (feed.children.length > 500) {
+                feed.removeChild(feed.lastChild);
+            }
+        }
+
+        function formatTimestamp(isoString) {
+            const d = new Date(isoString);
+            return `${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
         }
 
         function getIconClass(eventType) {
@@ -914,14 +1100,16 @@
         }
 
         function escapeHtml(text) {
+            if (typeof text !== 'string') return String(text);
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
 
         function clearFeed() {
-            const feed = document.getElementById('activityFeed');
-            feed.innerHTML = '<div class="empty-state">Activity events will appear here</div>';
+            document.getElementById('activityFeed').innerHTML =
+                '<div class="empty-state">Activity events will appear here</div>';
+            resetPendingToolCalls();
         }
 
         // Auto-connect if no API key is required
