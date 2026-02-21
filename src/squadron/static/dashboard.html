@@ -456,6 +456,13 @@
                         <option value="agent_completed">Agent Completed</option>
                         <option value="agent_escalated">Agent Escalated</option>
                         <option value="agent_failed">Agent Failed</option>
+                        <option value="agent_heartbeat">Agent Heartbeat</option>
+                    </optgroup>
+                    <optgroup label="Session Lifecycle">
+                        <option value="session_created">Session Created</option>
+                        <option value="prompt_ready">Prompt Ready</option>
+                        <option value="model_request_started">Model Request Started</option>
+                        <option value="model_request_completed">Model Request Completed</option>
                     </optgroup>
                     <optgroup label="Tool Execution">
                         <option value="tool_call_start">Tool Call</option>
@@ -1069,6 +1076,8 @@
 
         function getIconClass(eventType) {
             if (eventType.includes('tool_call')) return 'icon-tool';
+            if (eventType.includes('model_request')) return 'icon-info';
+            if (eventType === 'session_created' || eventType === 'prompt_ready') return 'icon-info';
             if (eventType.includes('agent_')) return 'icon-lifecycle';
             if (eventType.includes('github_')) return 'icon-github';
             if (eventType.includes('circuit_breaker')) return 'icon-circuit';
@@ -1085,7 +1094,12 @@
             if (eventType === 'agent_completed') return '✓';
             if (eventType === 'agent_failed') return '✗';
             if (eventType === 'agent_escalated') return '!';
+            if (eventType === 'agent_heartbeat') return '~';
             if (eventType.includes('agent_')) return 'A';
+            if (eventType === 'session_created') return 'S';
+            if (eventType === 'prompt_ready') return 'P';
+            if (eventType === 'model_request_started') return '>';
+            if (eventType === 'model_request_completed') return '<';
             if (eventType.includes('github_')) return 'G';
             if (eventType.includes('circuit_breaker')) return '⚡';
             if (eventType === 'error') return 'E';

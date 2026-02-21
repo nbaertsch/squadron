@@ -40,6 +40,7 @@ from squadron.dashboard import configure as configure_dashboard
 from squadron.dashboard import router as dashboard_router
 from squadron.event_router import EventRouter
 from squadron.github_client import GitHubClient
+from squadron.log_buffer import LogBuffer, RingBufferHandler
 from squadron.models import AgentStatus, GitHubEvent, SquadronEvent, SquadronEventType
 from squadron.reconciliation import ReconciliationLoop
 from squadron.registry import AgentRegistry
@@ -75,6 +76,7 @@ class SquadronServer:
         self.workflow_db: aiosqlite.Connection | None = None
         self.workflow_registry: WorkflowRegistryV2 | None = None
         self.activity_logger: ActivityLogger | None = None
+        self.log_buffer: LogBuffer = LogBuffer(maxlen=20_000)
 
     async def start(self) -> None:
         """Initialize all components and start background loops."""
@@ -116,6 +118,11 @@ class SquadronServer:
         self.activity_logger = ActivityLogger(activity_db_path)
         await self.activity_logger.initialize()
         logger.info("Activity logger initialized: %s", activity_db_path)
+
+        # 2c. Attach ring-buffer log handler to root logger for remote log access
+        ring_handler = RingBufferHandler(self.log_buffer)
+        logging.getLogger().addHandler(ring_handler)
+        logger.info("Ring-buffer log handler attached (capacity=%d)", self.log_buffer.maxlen)
 
         # 3. Recover stale agents + reconstruct from GitHub
         await self._recover_agents()
@@ -195,8 +202,8 @@ class SquadronServer:
             expected_repo_full_name=repo_full_name,
         )
 
-        # 8a. Configure dashboard endpoints (activity logging + SSE)
-        configure_dashboard(self.activity_logger, self.registry)
+        # 8a. Configure dashboard endpoints (activity logging + SSE + log buffer)
+        configure_dashboard(self.activity_logger, self.registry, self.log_buffer)
 
         # 8b. Create workflow engine (if workflows are defined)
         if self.config.workflows:
