@@ -388,6 +388,7 @@ class SquadronConfig(BaseModel):
     # DEPRECATED: kept for backward compatibility, use review_policy instead
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
     commands: dict[str, "CommandDefinition"] = Field(default_factory=dict)
+    command_prefix: str = Field(default="/squadron", description="Prefix for slash commands")
 
     # Workflows - deterministic multi-agent orchestration (inline in config)
     workflows: dict[str, "WorkflowConfig"] = Field(default_factory=dict)
@@ -1023,10 +1024,69 @@ def load_agent_definitions(squadron_dir: Path) -> dict[str, AgentDefinition]:
 # ── Command Configuration ─────────────────────────────────────────────────────
 
 
+class CommandPermissions(BaseModel):
+    """Permissions for a slash command."""
+
+    require_human: bool = False
+    allowed_roles: list[str] | None = None
+
+
 class CommandDefinition(BaseModel):
-    """Configuration for a specific command."""
+    """Configuration for a slash or mention command.
+
+    New schema (type-based):
+        type: "agent" | "action" | "static"
+        agent: agent role to invoke (type=agent)
+        action: built-in action name (type=action): status|cancel|retry|list
+        args: list of argument names expected (type=action with args)
+        inject_message: optional message to inject when invoking an agent
+        permissions: permission requirements for this command
+        description: human-readable description for /squadron help
+
+    Backward-compat schema (migrated from old invoke_agent/delegate_to):
+        invoke_agent: True → migrated to type=agent with agent=delegate_to
+        delegate_to: agent role → migrated to agent field
+        response: static response → migrated to type=static
+    """
 
     enabled: bool = True
-    invoke_agent: bool = True
-    delegate_to: str | None = None  # Agent role to delegate to if invoke_agent is True
-    response: str | None = None  # Static response for commands with invoke_agent=False
+    type: Literal["agent", "action", "static"] | None = None
+    agent: str | None = None  # Agent role to invoke (type=agent)
+    action: str | None = None  # Built-in action name (type=action)
+    args: list[str] = Field(default_factory=list)  # Argument names (type=action with args)
+    inject_message: str | None = None  # Message to inject when invoking agent
+    permissions: CommandPermissions = Field(default_factory=CommandPermissions)
+    description: str | None = None  # Description for help display
+    response: str | None = None  # Static response text (type=static)
+
+    # ── Backward-compat fields (deprecated) ──────────────────────────────────
+    invoke_agent: bool | None = None  # DEPRECATED: use type=agent
+    delegate_to: str | None = None  # DEPRECATED: use agent=
+
+    @model_validator(mode="after")
+    def _migrate_legacy_schema(self) -> "CommandDefinition":
+        """Migrate old invoke_agent/delegate_to schema to new type-based schema.
+
+        Old schema:
+          invoke_agent: true, delegate_to: pm  → type: agent, agent: pm
+          invoke_agent: false, response: "..." → type: static, response: "..."
+        """
+        if self.type is not None:
+            # Already using new schema — nothing to migrate
+            return self
+
+        if self.invoke_agent is False:
+            # Old static response command
+            object.__setattr__(self, "type", "static")
+        elif self.delegate_to is not None:
+            # Old agent delegation command
+            object.__setattr__(self, "type", "agent")
+            if self.agent is None:
+                object.__setattr__(self, "agent", self.delegate_to)
+        elif self.invoke_agent is True:
+            # invoke_agent=True without delegate_to → treated as agent type
+            object.__setattr__(self, "type", "agent")
+
+        return self
+
+
