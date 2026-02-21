@@ -34,6 +34,7 @@ from copilot.types import (
 )
 
 from squadron.config import RuntimeConfig
+from squadron.dashboard_security import DASHBOARD_API_KEY_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ _SECRET_ENV_VARS: frozenset[str] = frozenset(
         "GITHUB_TOKEN",
         "GH_TOKEN",
         # Dashboard API key
-        "SQUADRON_DASHBOARD_API_KEY",
+        DASHBOARD_API_KEY_ENV,
     }
 )
 
@@ -75,6 +76,20 @@ def build_agent_env(extra_blocked: set[str] | None = None) -> dict[str, str]:
 
     The returned dict retains everything the Copilot CLI needs to function:
     PATH, HOME, TMPDIR, locale settings, etc.
+
+    .. note:: **Design decision — blocklist vs allowlist**
+
+       This function uses a *blocklist* approach (strip known secrets, pass
+       everything else) rather than an *allowlist* (pass only explicitly
+       approved vars).  An allowlist would be more secure in theory, but the
+       Copilot CLI and the tools it spawns (git, node, language servers, etc.)
+       depend on a wide and unpredictable set of environment variables (PATH,
+       HOME, TMPDIR, locale, SSH_AUTH_SOCK, custom tool config, etc.).
+       Maintaining an allowlist that doesn't break legitimate tool usage
+       across different OSes and CI environments is impractical.  The
+       blocklist is a pragmatic trade-off: we strip the secrets we *know*
+       about, and accept that novel secrets added to the framework must also
+       be added here.
 
     Args:
         extra_blocked: Additional env var names to strip (e.g. dynamic BYOK
