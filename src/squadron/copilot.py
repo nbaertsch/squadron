@@ -37,17 +37,77 @@ from squadron.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
+# ── Secret isolation ──────────────────────────────────────────────────────
+# Environment variables that contain application secrets and MUST NOT be
+# inherited by agent CLI subprocesses.  The agent's bash tool runs inside
+# that subprocess, so any env var present there is trivially exfiltrable
+# via `env`, `printenv`, or `/proc/self/environ`.
+#
+# All GitHub API interactions are handled framework-side (Squadron tools
+# use the framework's GitHubClient; git push uses _git_auth_env which
+# builds its own env).  BYOK API keys are resolved once by the framework
+# and passed as values in the SDK SessionConfig — the subprocess does not
+# need the env var.
+
+_SECRET_ENV_VARS: frozenset[str] = frozenset(
+    {
+        # GitHub App credentials — used only by the framework's GitHubClient
+        "GITHUB_APP_ID",
+        "GITHUB_PRIVATE_KEY",
+        "GITHUB_WEBHOOK_SECRET",
+        "GITHUB_INSTALLATION_ID",
+        # Copilot / GitHub tokens — used by server startup or Azure deploy
+        "COPILOT_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        # Dashboard API key
+        "SQUADRON_DASHBOARD_API_KEY",
+    }
+)
+
+
+def build_agent_env(extra_blocked: set[str] | None = None) -> dict[str, str]:
+    """Build a sanitized copy of os.environ for agent CLI subprocesses.
+
+    Strips all known secret env vars (and optionally additional ones, e.g.
+    BYOK ``api_key_env`` names) so the agent's built-in bash tool cannot
+    read application credentials.
+
+    The returned dict retains everything the Copilot CLI needs to function:
+    PATH, HOME, TMPDIR, locale settings, etc.
+
+    Args:
+        extra_blocked: Additional env var names to strip (e.g. dynamic BYOK
+            key names like ``ANTHROPIC_API_KEY``).
+
+    Returns:
+        A dict suitable for passing as ``CopilotClient({"env": ...})``.
+    """
+    blocked = _SECRET_ENV_VARS | (extra_blocked or set())
+    return {k: v for k, v in os.environ.items() if k not in blocked}
+
 
 class CopilotAgent:
     """Manages a CopilotClient instance for a single agent.
 
     One CopilotAgent = one CLI subprocess (Pattern 1 from research).
     Handles session creation, resumption, and cleanup.
+
+    The ``env`` parameter controls the environment inherited by the CLI
+    subprocess.  Callers MUST pass a sanitized env (via
+    :func:`build_agent_env`) to prevent the agent's built-in bash tool
+    from reading application secrets.
     """
 
-    def __init__(self, runtime_config: RuntimeConfig, working_directory: str):
+    def __init__(
+        self,
+        runtime_config: RuntimeConfig,
+        working_directory: str,
+        env: dict[str, str] | None = None,
+    ):
         self.runtime_config = runtime_config
         self.working_directory = working_directory
+        self._env = env  # sanitized env for CLI subprocess
         self._client: CopilotClient | None = None
         self._session: SDKSession | None = None
 
@@ -60,9 +120,15 @@ class CopilotAgent:
         max_retries = 3
         retry_delay = 2.0  # seconds
 
+        # Build client options — always include cwd; include env when
+        # a sanitized env dict was provided (which it always should be).
+        client_opts: dict[str, Any] = {"cwd": self.working_directory}
+        if self._env is not None:
+            client_opts["env"] = self._env
+
         for attempt in range(max_retries + 1):
             try:
-                self._client = CopilotClient({"cwd": self.working_directory})
+                self._client = CopilotClient(client_opts)
                 await self._client.start()
                 logger.info("CopilotClient started (cwd=%s)", self.working_directory)
                 return
