@@ -455,9 +455,7 @@ class SquadronTools:
                 )
                 if body_snippet:
                     line += f"\n  Summary: {body_snippet}"
-                line += (
-                    f"\n  → Call `get_pr_feedback` to fetch all inline comments."
-                )
+                line += "\n  → Call `get_pr_feedback` to fetch all inline comments."
                 event_lines.append(line)
 
             elif event.event_type == SquadronEventType.PR_REVIEW_COMMENT:
@@ -470,9 +468,7 @@ class SquadronTools:
                 body_snippet = body[:150] + "..." if len(body) > 150 else body
                 line = (
                     f"- [PR_REVIEW_COMMENT] PR #{event.pr_number} "
-                    f"| {path}"
-                    + (f":{line_num}" if line_num else "")
-                    + f" | reviewer=@{reviewer}"
+                    f"| {path}" + (f":{line_num}" if line_num else "") + f" | reviewer=@{reviewer}"
                 )
                 if body_snippet:
                     line += f"\n  Comment: {body_snippet}"

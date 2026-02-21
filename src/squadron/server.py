@@ -153,6 +153,25 @@ class SquadronServer:
             activity_logger=self.activity_logger,
         )
 
+        # 6a. Warn if sandbox is disabled and agents have bash access (#117)
+        sandbox_cfg = self.config.get_sandbox_config()
+        if not sandbox_cfg.enabled:
+            bash_agents = [
+                defn.name or defn.role
+                for defn in agent_definitions.values()
+                if defn.tools is None or "bash" in defn.tools
+            ]
+            if bash_agents:
+                logger.warning(
+                    "SECURITY: sandbox is disabled but %d agent(s) have bash "
+                    "tool access (%s). Application secrets are stripped from "
+                    "agent subprocess environments, but filesystem-level "
+                    "isolation is NOT active. Set sandbox.enabled=true in "
+                    "config.yaml for full protection.",
+                    len(bash_agents),
+                    ", ".join(bash_agents),
+                )
+
         # 7. Create reconciliation loop
         self.reconciliation = ReconciliationLoop(
             config=self.config,

@@ -149,7 +149,6 @@ class TestParseCommand:
         assert result.is_help is True
 
 
-
 # ── Self-loop guard unit tests ───────────────────────────────────────────────
 
 
@@ -716,6 +715,7 @@ class TestCommandRouting:
 
         event = _comment_event(body="@squadron-dev help", issue_number=10)
         import os as _os
+
         env = {k: v for k, v in _os.environ.items() if k != "SQUADRON_PUBLIC_URL"}
         with patch.dict("os.environ", env, clear=True):
             await router._route_event(event)
@@ -770,6 +770,7 @@ class TestCommandRouting:
 
         event = _comment_event(body="@squadron-dev help", issue_number=10)
         import os as _os
+
         env = {k: v for k, v in _os.environ.items() if k != "SQUADRON_DASHBOARD_API_KEY"}
         with patch.dict("os.environ", env, clear=True):
             await router._route_event(event)
@@ -1034,9 +1035,7 @@ class TestParseCommandBacktickExemption:
 
     def test_inline_code_mention_with_surrounding_plain_text(self):
         """Backtick mention surrounded by plain prose must not match."""
-        result = parse_command(
-            "To trigger the PM agent, write `@squadron-dev pm` in a comment."
-        )
+        result = parse_command("To trigger the PM agent, write `@squadron-dev pm` in a comment.")
         assert result is None
 
     # ── Fenced code blocks ───────────────────────────────────────────────
@@ -1102,10 +1101,7 @@ class TestParseCommandBacktickExemption:
 
     def test_plain_mention_after_inline_code_mention_works(self):
         """Plain mention following a backtick mention must still fire."""
-        body = (
-            "See `@squadron-dev pm` for reference.\n\n"
-            "@squadron-dev feat-dev: implement this"
-        )
+        body = "See `@squadron-dev pm` for reference.\n\n@squadron-dev feat-dev: implement this"
         result = parse_command(body)
         assert result is not None
         assert result.agent_name == "feat-dev"
@@ -1130,31 +1126,37 @@ class TestStripCodeSpans:
 
     def test_strips_inline_code(self):
         from squadron.models import _strip_code_spans
+
         result = _strip_code_spans("`hello world`")
         assert "hello world" not in result
 
     def test_strips_fenced_code_block(self):
         from squadron.models import _strip_code_spans
+
         result = _strip_code_spans("```\nsome code\n```")
         assert "some code" not in result
 
     def test_strips_fenced_code_with_language(self):
         from squadron.models import _strip_code_spans
+
         result = _strip_code_spans("```python\nprint('hi')\n```")
         assert "print" not in result
 
     def test_strips_tilde_fenced_block(self):
         from squadron.models import _strip_code_spans
+
         result = _strip_code_spans("~~~\nsome code\n~~~")
         assert "some code" not in result
 
     def test_leaves_plain_text_intact(self):
         from squadron.models import _strip_code_spans
+
         original = "@squadron-dev pm: do work"
         assert _strip_code_spans(original) == original
 
     def test_strips_inline_but_leaves_surrounding_text(self):
         from squadron.models import _strip_code_spans
+
         result = _strip_code_spans("before `code` after")
         assert "before" in result
         assert "after" in result
@@ -1162,15 +1164,18 @@ class TestStripCodeSpans:
 
     def test_empty_string(self):
         from squadron.models import _strip_code_spans
+
         assert _strip_code_spans("") == ""
 
     def test_no_backticks(self):
         from squadron.models import _strip_code_spans
+
         text = "just plain text with @squadron-dev pm mention"
         assert _strip_code_spans(text) == text
 
     def test_strips_multiple_inline_spans(self):
         from squadron.models import _strip_code_spans
+
         result = _strip_code_spans("`one` and `two` and `three`")
         assert "one" not in result
         assert "two" not in result
@@ -1179,6 +1184,7 @@ class TestStripCodeSpans:
     def test_fenced_stripped_before_inline(self):
         """Fenced blocks are processed before inline spans to avoid partial matches."""
         from squadron.models import _strip_code_spans
+
         # Fenced block containing what looks like an inline span inside it
         text = "```\nprint(`hello`)\n```"
         result = _strip_code_spans(text)

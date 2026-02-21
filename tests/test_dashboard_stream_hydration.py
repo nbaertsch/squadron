@@ -11,9 +11,8 @@ Verifies that:
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,7 +23,9 @@ from squadron.dashboard import _HYDRATION_LIMIT
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def make_event(agent_id: str = "agent-1", event_type: ActivityEventType = ActivityEventType.INFO) -> ActivityEvent:
+def make_event(
+    agent_id: str = "agent-1", event_type: ActivityEventType = ActivityEventType.INFO
+) -> ActivityEvent:
     return ActivityEvent(
         id=1,
         agent_id=agent_id,
@@ -80,7 +81,7 @@ class TestSseGeneratorHydration:
         gen = dashboard_mod._sse_generator(agent_id=None)
         # First item must be the 'connected' event
         first = await gen.__anext__()
-        assert 'event: connected' in first
+        assert "event: connected" in first
 
     @pytest.mark.asyncio
     async def test_history_events_sent_before_hydrated_marker(self):
@@ -100,11 +101,13 @@ class TestSseGeneratorHydration:
         for _ in range(4):
             collected.append(await gen.__anext__())
 
-        event_lines = [c for c in collected if c.startswith('event:')]
-        assert event_lines[0].startswith("event: connected"), f"Expected connected first, got: {event_lines}"
+        event_lines = [c for c in collected if c.startswith("event:")]
+        assert event_lines[0].startswith("event: connected"), (
+            f"Expected connected first, got: {event_lines}"
+        )
         # History activity events should come before hydrated
-        hydrated_idx = next(i for i, c in enumerate(collected) if 'event: hydrated' in c)
-        activity_indices = [i for i, c in enumerate(collected) if 'event: activity' in c]
+        hydrated_idx = next(i for i, c in enumerate(collected) if "event: hydrated" in c)
+        activity_indices = [i for i, c in enumerate(collected) if "event: activity" in c]
         assert all(i < hydrated_idx for i in activity_indices), (
             "All history activity events must precede the 'hydrated' marker"
         )
@@ -125,7 +128,7 @@ class TestSseGeneratorHydration:
         await gen.__anext__()
         # Next should be 'hydrated' (no history events)
         hydrated = await gen.__anext__()
-        assert 'event: hydrated' in hydrated
+        assert "event: hydrated" in hydrated
         assert '"status": "hydrated"' in hydrated
 
     @pytest.mark.asyncio
@@ -177,9 +180,7 @@ class TestSseGeneratorHydration:
         await gen.__anext__()  # connected
         await gen.__anext__()  # hydrated
 
-        mock_logger.get_agent_activity.assert_called_once_with(
-            "agent-123", limit=_HYDRATION_LIMIT
-        )
+        mock_logger.get_agent_activity.assert_called_once_with("agent-123", limit=_HYDRATION_LIMIT)
         mock_logger.get_recent_activity.assert_not_called()
 
     @pytest.mark.asyncio
@@ -209,11 +210,11 @@ class TestSseGeneratorHydration:
         call_order = []
 
         async def track_subscribe(agent_id):
-            call_order.append('subscribe')
+            call_order.append("subscribe")
             return asyncio.Queue()
 
         async def track_get_recent_activity(limit):
-            call_order.append('get_recent_activity')
+            call_order.append("get_recent_activity")
             return []
 
         mock_logger = MagicMock()
@@ -226,7 +227,7 @@ class TestSseGeneratorHydration:
         await gen.__anext__()  # connected (triggers subscribe + history fetch)
         await gen.__anext__()  # hydrated
 
-        assert call_order.index('subscribe') < call_order.index('get_recent_activity'), (
+        assert call_order.index("subscribe") < call_order.index("get_recent_activity"), (
             "subscribe() must be called before get_recent_activity() to avoid missing live events"
         )
 
@@ -238,7 +239,7 @@ class TestSseGeneratorHydration:
         dashboard_mod._activity_logger = None
         gen = dashboard_mod._sse_generator(agent_id=None)
         first = await gen.__anext__()
-        assert 'event: error' in first
+        assert "event: error" in first
         assert '"error"' in first
 
     @pytest.mark.asyncio
@@ -262,7 +263,7 @@ class TestSseGeneratorHydration:
         # Now push a live event to the queue
         await queue.put(live_event)
         live_chunk = await gen.__anext__()
-        assert 'event: activity' in live_chunk
+        assert "event: activity" in live_chunk
         assert '"live-agent"' in live_chunk
 
 

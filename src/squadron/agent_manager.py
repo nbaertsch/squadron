@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from squadron.copilot import CopilotAgent, build_resume_config, build_session_config
+from squadron.copilot import (
+    CopilotAgent,
+    build_agent_env,
+    build_resume_config,
+    build_session_config,
+)
 from squadron.dashboard_security import DASHBOARD_API_KEY_ENV
 from squadron.models import (
     AgentRecord,
@@ -718,22 +723,11 @@ class AgentManager:
         except Exception:
             logger.exception("Workflow engine error evaluating %s", github_event_type)
 
-        # 2. For PR review events, check if this advances a workflow stage
-        if event.event_type == SquadronEventType.PR_REVIEW_SUBMITTED and event.pr_number:
-            review = payload.get("review", {})
-            try:
-                await self._workflow_engine.handle_pr_review(
-                    pr_number=event.pr_number,
-                    reviewer=review.get("user", {}).get("login", ""),
-                    review_state=review.get("state", ""),
-                    payload=payload,
-                    squadron_event=event,
-                )
-            except Exception:
-                logger.exception(
-                    "Workflow engine error handling PR review for #%d",
-                    event.pr_number,
-                )
+        # TODO: PR review events should advance workflow stages once
+        # WorkflowEngine.handle_pr_review() is implemented.  The engine's
+        # resume_workflow() can advance a running stage when a review is
+        # submitted, but the lookup logic (PR → active run → stage) has
+        # not been built yet.  See issue #117 audit notes.
 
     # ── Agent Creation ───────────────────────────────────────────────────
 
@@ -892,9 +886,11 @@ class AgentManager:
         )
 
         # Create CopilotAgent instance (one CLI subprocess per agent)
+        # Pass sanitized env to prevent secret leakage via bash tool (#117)
         copilot = CopilotAgent(
             runtime_config=self.config.runtime,
             working_directory=str(sandbox_working_dir),
+            env=self._build_agent_env(),
         )
         await copilot.start()
         self._copilot_agents[agent_id] = copilot
@@ -992,6 +988,7 @@ class AgentManager:
             copilot = CopilotAgent(
                 runtime_config=self.config.runtime,
                 working_directory=str(working_directory),
+                env=self._build_agent_env(),
             )
             await copilot.start()
             self._copilot_agents[agent_id] = copilot
@@ -1066,11 +1063,11 @@ class AgentManager:
     async def spawn_workflow_agent(
         self,
         role: str,
-        pr_number: int,
-        event: SquadronEvent,
+        issue_number: int,
         *,
+        trigger_event: SquadronEvent | None = None,
         workflow_run_id: str | None = None,
-        stage_name: str | None = None,
+        stage_id: str | None = None,
         action: str | None = None,
     ) -> str | None:
         """Spawn a review agent for a workflow pipeline stage.
@@ -1079,21 +1076,30 @@ class AgentManager:
         The agent_id includes the workflow run ID to distinguish from
         approval flow agents.
 
+        Conforms to the :class:`~squadron.workflow.engine.SpawnAgentCallback`
+        protocol.
+
         Args:
             role: Agent role name (e.g. "test-coverage", "security-review").
-            pr_number: PR number under review.
-            event: The triggering SquadronEvent.
+            issue_number: Issue number associated with the workflow run.
+            trigger_event: The triggering SquadronEvent (carries PR data).
             workflow_run_id: Workflow run ID for tracking.
-            stage_name: Name of the workflow stage.
+            stage_id: ID of the workflow stage.
             action: Stage action ("review", "review_and_merge", etc.).
 
         Returns:
             The agent_id of the created agent, or None on failure.
         """
+        # Extract PR number and data from the triggering event
+        event = trigger_event
+        payload = event.data.get("payload", {}) if event else {}
+        pr_data = payload.get("pull_request", {})
+        pr_number = (event.pr_number if event else None) or pr_data.get("number") or issue_number
+
         # Build unique agent ID for workflow agents
         suffix = f"wf-{pr_number}"
-        if stage_name:
-            suffix = f"wf-{stage_name}-{pr_number}"
+        if stage_id:
+            suffix = f"wf-{stage_id}-{pr_number}"
         agent_id = f"{role}-{suffix}"
 
         # Check for existing agent with same ID
@@ -1108,17 +1114,14 @@ class AgentManager:
             logger.error("No agent definition for workflow role: %s", role)
             return None
 
-        payload = event.data.get("payload", {})
-        pr_data = payload.get("pull_request", {})
-
-        # Determine issue number (from PR body or fallback to pr_number)
+        # Determine issue number (from PR body or fallback to passed issue_number)
         source_issue = pr_data.get("body", "") or ""
-        issue_number = self._extract_issue_number(source_issue) or pr_number
+        resolved_issue = self._extract_issue_number(source_issue) or issue_number
 
         record = AgentRecord(
             agent_id=agent_id,
             role=role,
-            issue_number=issue_number,
+            issue_number=resolved_issue,
             pr_number=pr_number,
             session_id=f"squadron-{agent_id}",
             status=AgentStatus.ACTIVE,
@@ -1132,9 +1135,11 @@ class AgentManager:
         self.agent_mail_queues[agent_id] = []
 
         # Create CopilotAgent (reviewers use repo root, no worktree needed)
+        # Pass sanitized env to prevent secret leakage via bash tool (#117)
         copilot = CopilotAgent(
             runtime_config=self.config.runtime,
             working_directory=str(self.repo_root),
+            env=self._build_agent_env(),
         )
         await copilot.start()
         self._copilot_agents[agent_id] = copilot
@@ -1143,11 +1148,11 @@ class AgentManager:
         review_event = SquadronEvent(
             event_type=SquadronEventType.PR_OPENED,
             pr_number=pr_number,
-            issue_number=issue_number,
+            issue_number=resolved_issue,
             data={
-                **event.data,
+                **(event.data if event else {}),
                 "workflow_run_id": workflow_run_id,
-                "workflow_stage": stage_name,
+                "workflow_stage": stage_id,
                 "workflow_action": action,
             },
         )
@@ -1161,7 +1166,7 @@ class AgentManager:
             "Created workflow agent %s for PR #%d (stage=%s, action=%s, run=%s)",
             agent_id,
             pr_number,
-            stage_name,
+            stage_id,
             action,
             workflow_run_id,
         )
@@ -1170,12 +1175,12 @@ class AgentManager:
         await self._log_activity(
             agent_id=agent_id,
             event_type="agent_spawned",
-            issue_number=issue_number,
+            issue_number=resolved_issue,
             pr_number=pr_number,
-            content=f"Workflow agent spawned: role={role}, stage={stage_name}, run={workflow_run_id}",
+            content=f"Workflow agent spawned: role={role}, stage={stage_id}, run={workflow_run_id}",
             role=role,
             lifecycle="workflow",
-            stage=stage_name,
+            stage=stage_id,
             workflow_run_id=workflow_run_id,
         )
 
@@ -1284,7 +1289,9 @@ class AgentManager:
                     mcp_servers=mcp_servers,
                     available_tools=sdk_available_tools,
                 )
-                session = await copilot.resume_session(record.session_id, resume_config)
+                session = await copilot.resume_session(
+                    record.session_id or record.agent_id, resume_config
+                )
                 prompt = await self._build_wake_prompt(record, trigger_event)
             else:
                 logger.info(
@@ -1660,24 +1667,25 @@ class AgentManager:
             )
 
             # Post escalation comment on the issue (with bounded timeout)
-            try:
-                await asyncio.wait_for(
-                    self.github.comment_on_issue(
-                        self.config.project.owner,
-                        self.config.project.repo,
-                        agent.issue_number,
-                        f"{self._agent_signature(agent.role)}⚠️ **Agent timed out** — exceeded maximum "
-                        f"active duration ({max_seconds}s). Escalating to human.\n\n"
-                        f"Agent `{agent_id}` has been stopped. Branch `{agent.branch}` "
-                        f"is preserved for manual pickup.\n\n"
-                        f"_Timeout enforced by: watchdog (layer 1)_",
-                    ),
-                    timeout=CLEANUP_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error("Timed out posting watchdog escalation comment for %s", agent_id)
-            except Exception:
-                logger.exception("Failed to post watchdog escalation comment for %s", agent_id)
+            if agent.issue_number is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.github.comment_on_issue(
+                            self.config.project.owner,
+                            self.config.project.repo,
+                            agent.issue_number,
+                            f"{self._agent_signature(agent.role)}⚠️ **Agent timed out** — exceeded maximum "
+                            f"active duration ({max_seconds}s). Escalating to human.\n\n"
+                            f"Agent `{agent_id}` has been stopped. Branch `{agent.branch}` "
+                            f"is preserved for manual pickup.\n\n"
+                            f"_Timeout enforced by: watchdog (layer 1)_",
+                        ),
+                        timeout=CLEANUP_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("Timed out posting watchdog escalation comment for %s", agent_id)
+                except Exception:
+                    logger.exception("Failed to post watchdog escalation comment for %s", agent_id)
 
     def _build_custom_agents(self, agent_def: "AgentDefinition") -> list[dict[str, Any]] | None:
         """Build SDK CustomAgentConfig list from the role's configured subagents.
@@ -2394,8 +2402,7 @@ class AgentManager:
             await self.agent_inboxes[agent.agent_id].put(review_event)
 
             logger.info(
-                "PR review queued to inbox of PR-owning agent %s "
-                "(pr=#%d, state=%s, reviewer=%s)",
+                "PR review queued to inbox of PR-owning agent %s (pr=#%d, state=%s, reviewer=%s)",
                 agent.agent_id,
                 event.pr_number,
                 review_state,
@@ -2936,7 +2943,9 @@ class AgentManager:
         Returns the first matching PR dict, or None if none found.
         """
         try:
-            prs = await self.github.list_pull_requests(self.owner, self.repo, state="open")
+            prs = await self.github.list_pull_requests(
+                self.config.project.owner, self.config.project.repo, state="open"
+            )
         except Exception:
             logger.debug(
                 "Could not list PRs when checking for existing PR for issue #%d",
@@ -3017,6 +3026,11 @@ class AgentManager:
         large repos.  The agent will ``git sparse-checkout add <dir>``
         on-demand as it navigates the codebase.
         """
+        if not record.branch:
+            raise ValueError(
+                f"Cannot create worktree for agent {record.agent_id}: branch is not set"
+            )
+
         worktree_base = (
             Path(self.config.runtime.worktree_dir)
             if self.config.runtime.worktree_dir
@@ -3146,19 +3160,33 @@ class AgentManager:
             (stderr_bytes or b"").decode(),
         )
 
+    def _build_agent_env(self) -> dict[str, str]:
+        """Build a sanitized environment for agent CLI subprocesses.
+
+        Strips all known framework secrets plus the dynamic BYOK API key
+        env var (if configured) so the agent's built-in bash tool cannot
+        exfiltrate application credentials.
+        """
+        extra_blocked: set[str] = set()
+        api_key_env = self.config.runtime.provider.api_key_env
+        if api_key_env:
+            extra_blocked.add(api_key_env)
+        return build_agent_env(extra_blocked=extra_blocked)
+
     async def _git_auth_env(self) -> dict[str, str]:
         """Build environment dict with GitHub App token for git authentication.
 
-        Uses GIT_ASKPASS with a simple echo script that returns the token as password.
+        Uses a credential helper that returns the token as password.
         This allows git push/fetch to authenticate without modifying the remote URL.
-        """
-        import os
 
+        Starts from the sanitized agent env (secrets stripped) so that even
+        framework-side git subprocesses don't carry unnecessary secrets.
+        """
         # Get fresh installation token from GitHubClient
         token = await self.github._ensure_token()
 
-        # Copy current environment and add git auth
-        env = os.environ.copy()
+        # Start from sanitized env — no application secrets (#117)
+        env = self._build_agent_env()
 
         # Disable interactive prompts
         env["GIT_TERMINAL_PROMPT"] = "0"
