@@ -1239,10 +1239,13 @@ class AgentManager:
 
         if agent_def.tools is not None:
             custom_tool_names = [t for t in agent_def.tools if t in ALL_TOOL_NAMES_SET]
-            # SDK available_tools must include both builtins AND custom tool names
-            # so the model can see them all.  If the .md lists tools, use the
-            # full list as the allowlist; otherwise leave it open (None).
-            sdk_available_tools = agent_def.tools
+            # SDK available_tools must ONLY include SDK built-in tool names (not custom
+            # Squadron tool names like `read_issue` or `check_for_events`).
+            # If custom tool names are passed here, the SDK rejects the entire allowlist
+            # and blocks all built-in tools including bash and grep.
+            # Custom Squadron tools are already registered via tools= above.
+            # (Fix for issue #118: bash/grep tools non-functional)
+            sdk_available_tools = [t for t in agent_def.tools if t not in ALL_TOOL_NAMES_SET] or None
         else:
             custom_tool_names = None  # → no Squadron tools (must be in frontmatter)
             sdk_available_tools = None  # → all SDK tools visible
