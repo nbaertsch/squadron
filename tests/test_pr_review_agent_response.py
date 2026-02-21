@@ -362,9 +362,7 @@ class TestHandlePRReviewComment:
 
             event = _pr_review_comment_event(pr_number=87)
             await mgr._handle_pr_review_comment(
-                await _make_squadron_event_from_github(
-                    event, SquadronEventType.PR_REVIEW_COMMENT
-                )
+                await _make_squadron_event_from_github(event, SquadronEventType.PR_REVIEW_COMMENT)
             )
 
             inbox = mgr.agent_inboxes["feat-dev-issue-42"]
@@ -386,9 +384,7 @@ class TestHandlePRReviewComment:
 
             event = _pr_review_comment_event(pr_number=87)
             await mgr._handle_pr_review_comment(
-                await _make_squadron_event_from_github(
-                    event, SquadronEventType.PR_REVIEW_COMMENT
-                )
+                await _make_squadron_event_from_github(event, SquadronEventType.PR_REVIEW_COMMENT)
             )
 
             inbox = mgr.agent_inboxes.get("feat-dev-issue-42")
@@ -517,16 +513,33 @@ class TestCheckForEventsRichOutput:
         agent_inboxes["feat-dev-issue-42"] = asyncio.Queue()
 
         # Queue a review and one inline comment
-        await agent_inboxes["feat-dev-issue-42"].put(SquadronEvent(
-            event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
-            pr_number=87,
-            data={"payload": {"review": {"state": "COMMENTED", "body": "", "user": {"login": "r1"}}}},
-        ))
-        await agent_inboxes["feat-dev-issue-42"].put(SquadronEvent(
-            event_type=SquadronEventType.PR_REVIEW_COMMENT,
-            pr_number=87,
-            data={"payload": {"comment": {"body": "Comment 1", "path": "foo.py", "line": 1, "user": {"login": "r1"}}}},
-        ))
+        await agent_inboxes["feat-dev-issue-42"].put(
+            SquadronEvent(
+                event_type=SquadronEventType.PR_REVIEW_SUBMITTED,
+                pr_number=87,
+                data={
+                    "payload": {
+                        "review": {"state": "COMMENTED", "body": "", "user": {"login": "r1"}}
+                    }
+                },
+            )
+        )
+        await agent_inboxes["feat-dev-issue-42"].put(
+            SquadronEvent(
+                event_type=SquadronEventType.PR_REVIEW_COMMENT,
+                pr_number=87,
+                data={
+                    "payload": {
+                        "comment": {
+                            "body": "Comment 1",
+                            "path": "foo.py",
+                            "line": 1,
+                            "user": {"login": "r1"},
+                        }
+                    }
+                },
+            )
+        )
 
         result = await tools.check_for_events("feat-dev-issue-42", _empty_params())
 
@@ -623,7 +636,11 @@ class TestBuildWakePrompt:
             event_type=SquadronEventType.WAKE_AGENT,
             pr_number=87,
             issue_number=None,
-            data={"payload": {"review": {"state": "CHANGES_REQUESTED", "body": "", "user": {"login": "r"}}}},
+            data={
+                "payload": {
+                    "review": {"state": "CHANGES_REQUESTED", "body": "", "user": {"login": "r"}}
+                }
+            },
         )
 
         prompt = await mgr._build_wake_prompt(agent, wake_event)
@@ -647,7 +664,12 @@ class TestBuildWakePrompt:
         prompt = await mgr._build_wake_prompt(agent, wake_event)
 
         # Should NOT have the review directive (no review in this wake)
-        assert "Action required:" not in prompt or "get_pr_feedback" not in prompt.split("Action required:")[1] if "Action required:" in prompt else True
+        assert (
+            "Action required:" not in prompt
+            or "get_pr_feedback" not in prompt.split("Action required:")[1]
+            if "Action required:" in prompt
+            else True
+        )
         assert "Resolved blocker" in prompt
         assert "#99" in prompt
         assert "closed" in prompt
@@ -853,4 +875,5 @@ async def _make_squadron_event_from_github(
 
 class _empty_params:
     """Minimal params object for check_for_events."""
+
     pass

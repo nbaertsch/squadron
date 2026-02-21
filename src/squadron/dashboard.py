@@ -103,9 +103,7 @@ async def _sse_generator(agent_id: str | None = None):
         # Fetch recent events (newest-first from DB) and send oldest-first so
         # the client sees them in chronological order.
         if agent_id:
-            history = await _activity_logger.get_agent_activity(
-                agent_id, limit=_HYDRATION_LIMIT
-            )
+            history = await _activity_logger.get_agent_activity(agent_id, limit=_HYDRATION_LIMIT)
         else:
             history = await _activity_logger.get_recent_activity(limit=_HYDRATION_LIMIT)
 
