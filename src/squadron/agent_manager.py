@@ -118,6 +118,9 @@ class AgentManager:
             repo=config.project.repo,
         )
 
+        # Per-agent heartbeat tasks (emit AGENT_HEARTBEAT every 60s during send_and_wait)
+        self._heartbeat_tasks: dict[str, asyncio.Task] = {}
+
         # Track watchdog success/failure for monitoring (fix for issue #51)
         self._watchdog_enforced: set[str] = set()
 
@@ -1303,6 +1306,15 @@ class AgentManager:
                     role_config.lifecycle if role_config else "persistent",
                 )
                 session = await copilot.create_session(session_config)
+                await self._log_activity(
+                    record.agent_id,
+                    "session_created",
+                    issue_number=record.issue_number,
+                    pr_number=record.pr_number,
+                    content="Copilot session created",
+                    session_id=record.session_id,
+                    lifecycle="ephemeral" if is_ephemeral else "persistent",
+                )
                 if is_ephemeral:
                     prompt = await self._build_stateless_prompt(record, trigger_event)
                 else:
@@ -1320,12 +1332,35 @@ class AgentManager:
                     record.agent_id,
                 )
 
+            await self._log_activity(
+                record.agent_id,
+                "prompt_ready",
+                issue_number=record.issue_number,
+                pr_number=record.pr_number,
+                content="Prompt assembled, ready to send to model",
+                prompt_length=len(prompt),
+                has_mail=bool(pending_mail),
+                resume=resume,
+            )
+
             # Layer 2 circuit breaker: pass max_duration as the SDK's own
             # send_and_wait timeout. The SDK defaults to 60s internally if
             # not specified, which was causing premature TimeoutErrors.
             try:
+                await self._log_activity(
+                    record.agent_id,
+                    "model_request_started",
+                    issue_number=record.issue_number,
+                    pr_number=record.pr_number,
+                    content="Sending prompt to model via send_and_wait",
+                    timeout_seconds=max_duration,
+                )
+                # Start heartbeat task so the dashboard can distinguish
+                # "model is thinking" from "agent is hung"
+                self._start_heartbeat(record)
                 result = await session.send_and_wait({"prompt": prompt}, timeout=max_duration)
             except asyncio.TimeoutError:
+                self._stop_heartbeat(record.agent_id)
                 logger.warning(
                     "CIRCUIT BREAKER — agent %s exceeded max_active_duration (%ds)",
                     record.agent_id,
@@ -1341,6 +1376,7 @@ class AgentManager:
                 )
                 return
             except Exception:
+                self._stop_heartbeat(record.agent_id)
                 logger.exception("Agent %s send_and_wait failed", record.agent_id)
                 record.status = AgentStatus.ESCALATED
                 await self.registry.update_agent(record)
@@ -1351,6 +1387,17 @@ class AgentManager:
                     session_id=record.session_id,
                 )
                 return
+
+            # send_and_wait succeeded — stop heartbeat and log completion
+            self._stop_heartbeat(record.agent_id)
+            await self._log_activity(
+                record.agent_id,
+                "model_request_completed",
+                issue_number=record.issue_number,
+                pr_number=record.pr_number,
+                content="Model returned response",
+                result_type=result.type.value if result else "no_response",
+            )
 
             logger.info(
                 "AGENT [%s] completed turn — result=%s",
@@ -1587,6 +1634,49 @@ class AgentManager:
         watchdog = self._watchdog_tasks.pop(agent_id, None)
         if watchdog and not watchdog.done():
             watchdog.cancel()
+
+    # ── Heartbeat (diagnostic visibility during send_and_wait) ───────────
+
+    def _start_heartbeat(self, record: "AgentRecord") -> None:
+        """Start a periodic heartbeat task for an agent during send_and_wait.
+
+        Emits AGENT_HEARTBEAT activity events every 60s so the dashboard can
+        distinguish "model is still thinking" from "agent is hung/dead".
+        """
+        self._stop_heartbeat(record.agent_id)  # ensure no stale task
+        task = asyncio.create_task(
+            self._heartbeat_loop(record),
+            name=f"heartbeat-{record.agent_id}",
+        )
+        self._heartbeat_tasks[record.agent_id] = task
+
+    def _stop_heartbeat(self, agent_id: str) -> None:
+        """Cancel the heartbeat task for an agent."""
+        task = self._heartbeat_tasks.pop(agent_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    async def _heartbeat_loop(self, record: "AgentRecord") -> None:
+        """Emit AGENT_HEARTBEAT every 60s until cancelled."""
+        import time
+
+        start = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(60)
+                elapsed = int(time.monotonic() - start)
+                await self._log_activity(
+                    record.agent_id,
+                    "agent_heartbeat",
+                    issue_number=record.issue_number,
+                    pr_number=record.pr_number,
+                    content=f"Agent alive — model thinking for {elapsed}s",
+                    elapsed_seconds=elapsed,
+                    tool_call_count=record.tool_call_count,
+                    turn_count=record.turn_count,
+                )
+        except asyncio.CancelledError:
+            return
 
     async def _duration_watchdog(self, agent_id: str, max_seconds: int) -> None:
         """Background timer that kills an agent when max_active_duration is exceeded.

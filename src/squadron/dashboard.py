@@ -7,12 +7,14 @@ Endpoints:
     SSE Streaming:
     - GET /dashboard/agents/{agent_id}/stream - Real-time activity stream for one agent
     - GET /dashboard/stream - Real-time activity stream for all agents (global)
+    - GET /dashboard/logs/stream - Real-time log stream (filtered by level/name)
 
     REST Queries:
     - GET /dashboard/agents/{agent_id}/activity - Historical activity for one agent
     - GET /dashboard/agents/{agent_id}/stats - Summary statistics for one agent
     - GET /dashboard/activity - Recent activity across all agents
     - GET /dashboard/agents - List all active agents with status
+    - GET /dashboard/logs - Query in-memory log ring buffer
 
     Status:
     - GET /dashboard/status - Server and security status
@@ -25,6 +27,7 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,6 +40,7 @@ from squadron.dashboard_security import require_api_key, validate_sse_token, get
 
 if TYPE_CHECKING:
     from squadron.activity import ActivityLogger
+    from squadron.log_buffer import LogBuffer
     from squadron.registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
@@ -49,14 +53,20 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Module-level references (configured at startup)
 _activity_logger: "ActivityLogger | None" = None
 _registry: "AgentRegistry | None" = None
+_log_buffer: "LogBuffer | None" = None
 
 
-def configure(activity_logger: "ActivityLogger", registry: "AgentRegistry") -> None:
+def configure(
+    activity_logger: "ActivityLogger",
+    registry: "AgentRegistry",
+    log_buffer: "LogBuffer | None" = None,
+) -> None:
     """Configure the dashboard router with required dependencies."""
-    global _activity_logger, _registry
+    global _activity_logger, _registry, _log_buffer
     _activity_logger = activity_logger
     _registry = registry
-    logger.info("Dashboard router configured")
+    _log_buffer = log_buffer
+    logger.info("Dashboard router configured (log_buffer=%s)", "yes" if log_buffer else "no")
 
 
 # ── Dashboard UI ──────────────────────────────────────────────────────────────
@@ -383,6 +393,138 @@ async def get_status(
         "status": "ok",
         "activity_logging": _activity_logger is not None,
         "registry": _registry is not None,
+        "log_buffer": _log_buffer is not None,
+        "log_buffer_size": _log_buffer.size if _log_buffer else 0,
+        "log_buffer_capacity": _log_buffer.maxlen if _log_buffer else 0,
         "security": security,
         "client_ip": request.client.host if request.client else None,
     }
+
+
+# ── Log Buffer Endpoints ─────────────────────────────────────────────────────
+
+
+@router.get("/logs")
+async def get_logs(
+    level: str | None = Query(
+        default=None,
+        description="Minimum log level filter (e.g. WARNING, ERROR)",
+    ),
+    name: str | None = Query(
+        default=None,
+        description="Logger name prefix filter (e.g. squadron.agent_manager)",
+    ),
+    limit: int = Query(default=500, ge=1, le=5000),
+    _: bool = Depends(require_api_key),
+):
+    """Query the in-memory log ring buffer.
+
+    Returns log entries from the ring buffer (newest first).
+    The ring buffer holds the last 20,000 log lines — no disk I/O,
+    no container log access required.
+
+    Filters:
+    - ``level``: Minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+      Records at or above this level are returned.
+    - ``name``: Logger name prefix (e.g. ``squadron.agent_manager``).
+      Uses startswith matching.
+    """
+    if _log_buffer is None:
+        raise HTTPException(status_code=503, detail="Log buffer not configured")
+
+    entries = _log_buffer.query(level=level, name=name, limit=limit)
+
+    return {
+        "count": len(entries),
+        "buffer_size": _log_buffer.size,
+        "buffer_capacity": _log_buffer.maxlen,
+        "filters": {"level": level, "name": name},
+        "entries": entries,
+    }
+
+
+async def _log_sse_generator(
+    *,
+    level: str | None = None,
+    name: str | None = None,
+):
+    """Generate SSE events from the log ring buffer.
+
+    Sends recent history first, then streams live log entries.
+    Supports the same level/name filters as the REST endpoint.
+    """
+    if _log_buffer is None:
+        yield 'event: error\ndata: {"error": "Log buffer not configured"}\n\n'
+        return
+
+    # Subscribe BEFORE fetching history (same pattern as activity SSE)
+    queue = await _log_buffer.subscribe()
+
+    try:
+        yield 'event: connected\ndata: {"status": "connected"}\n\n'
+
+        # ── History hydration (last 200 matching entries, oldest first) ──
+        level_num = getattr(logging, level.upper(), None) if level else None
+        history = _log_buffer.query(level=level, name=name, limit=200)
+        for entry in reversed(history):  # oldest first
+            yield f"event: log\ndata: {json.dumps(entry)}\n\n"
+
+        yield 'event: hydrated\ndata: {"status": "hydrated"}\n\n'
+
+        # ── Live stream ──────────────────────────────────────────────────
+        while True:
+            try:
+                entry = await asyncio.wait_for(queue.get(), timeout=30.0)
+                # Apply filters to live entries
+                if level_num is not None:
+                    entry_level = getattr(logging, entry.get("level", "DEBUG"), logging.DEBUG)
+                    if entry_level < level_num:
+                        continue
+                if name is not None and not entry.get("name", "").startswith(name):
+                    continue
+                yield f"event: log\ndata: {json.dumps(entry)}\n\n"
+            except asyncio.TimeoutError:
+                yield "event: heartbeat\ndata: {}\n\n"
+            except asyncio.CancelledError:
+                break
+    finally:
+        await _log_buffer.unsubscribe(queue)
+
+
+@router.get("/logs/stream")
+async def stream_logs(
+    token: str | None = Query(default=None, description="API key for authentication"),
+    level: str | None = Query(
+        default=None,
+        description="Minimum log level filter (e.g. WARNING, ERROR)",
+    ),
+    name: str | None = Query(
+        default=None,
+        description="Logger name prefix filter (e.g. squadron.agent_manager)",
+    ),
+):
+    """Stream live log entries via SSE.
+
+    Connect with EventSource:
+    ```javascript
+    const es = new EventSource('/dashboard/logs/stream?token=KEY&level=WARNING');
+    es.addEventListener('log', (e) => console.log(JSON.parse(e.data)));
+    ```
+
+    Event types:
+    - connected: Initial connection confirmation
+    - log: A log entry ``{timestamp, level, name, message, agent_id}``
+    - hydrated: History replay complete
+    - heartbeat: Keep-alive ping (every 30s)
+    """
+    validate_sse_token(token)
+
+    return StreamingResponse(
+        _log_sse_generator(level=level, name=name),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
