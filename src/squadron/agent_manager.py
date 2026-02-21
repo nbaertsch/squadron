@@ -51,6 +51,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _slash_command_default_description(cmd: "Any") -> str:
+    """Build a fallback description for a slash command based on its type/action."""
+    if cmd.type == "agent" and cmd.agent:
+        return f"Invoke `{cmd.agent}` agent"
+    if cmd.type == "action" and cmd.action:
+        return f"Run built-in `{cmd.action}` action"
+    if cmd.type == "static":
+        return "Post static response"
+    return "No description"
+
+
 class AgentManager:
     """Manages the lifecycle of all agent instances."""
 
@@ -2511,6 +2522,22 @@ class AgentManager:
 
     # ── Command-Based Routing (Layer 2) ──────────────────────────────────
 
+    def _is_bot_sender(self, event: SquadronEvent) -> bool:
+        """Return True if the comment was posted by any bot account.
+
+        Uses the same detection logic as _get_sender_agent_role — checks
+        sender.type == "Bot" or the configured bot_username.  Does NOT
+        require matching a specific agent role signature.
+        """
+        payload = event.data.get("payload", {})
+        comment_data = payload.get("comment", {})
+        sender = comment_data.get("user", {})
+
+        sender_login = (sender.get("login") or "").lower()
+        bot_username = (self.config.project.bot_username or "").lower()
+
+        return sender.get("type") == "Bot" or bool(bot_username and sender_login == bot_username)
+
     def _get_sender_agent_role(self, event: SquadronEvent) -> str | None:
         """Determine if the comment sender is a squadron agent, and return its role.
 
@@ -2548,22 +2575,23 @@ class AgentManager:
         return None
 
     async def _handle_command_routing(self, event: SquadronEvent) -> None:
-        """Route comment events based on @squadron-dev commands.
+        """Route comment events based on squadron commands (slash or @mention).
 
         This is Layer 2 routing — command-based dispatch:
 
-        1. Parse ``@squadron-dev <agent>: <message>`` or ``@squadron-dev help``
-           from the comment body (already populated on ``event.command``).
-        2. Handle help command: post markdown table of available agents.
-        3. Handle agent command: validate agent exists and route accordingly.
-        4. Apply self-loop guard: if the comment was posted by a squadron
-           agent of role X, don't let it re-trigger itself.
+        1. Slash syntax: ``/squadron <command> [args...]``
+           - Looks up command in config.commands, dispatches by type (agent/action/static)
+           - Handles built-in framework actions (status, cancel, retry, list)
+        2. Mention syntax: ``@squadron-dev <agent>: <message>``
+           - Validates agent exists in config, routes via wake/spawn logic
+        3. Help command (both syntaxes): posts agent + command table
+        4. Self-loop guard: prevents agents from re-triggering themselves
 
-        Comments without @squadron-dev commands are silently ignored.
+        Comments without command syntax are silently ignored.
         """
         if not event.command:
             logger.debug(
-                "Comment on issue #%s has no @squadron-dev command — skipping",
+                "Comment on issue #%s has no command — skipping",
                 event.issue_number,
             )
             return
@@ -2572,12 +2600,17 @@ class AgentManager:
             logger.warning("Comment event has no issue_number — skipping command routing")
             return
 
-        # Handle help command
+        # Handle help command (either source)
         if event.command.is_help:
             await self._handle_help_command(event)
             return
 
-        # Handle agent routing command
+        # Route slash commands via config.commands lookup
+        if event.command.source == "slash":
+            await self._handle_slash_command(event)
+            return
+
+        # Handle @mention agent routing command
         agent_name = event.command.agent_name
         if not agent_name:
             logger.warning("Command parsed but no agent_name — skipping")
@@ -2610,6 +2643,301 @@ class AgentManager:
         else:
             await self._command_wake_or_spawn(agent_name, role_config, event)
 
+    async def _handle_slash_command(self, event: SquadronEvent) -> None:
+        """Dispatch a slash command (``/squadron <command> [args...]``).
+
+        Looks up the command name in config.commands and dispatches by type:
+        - type=agent  → spawn/wake the configured agent role
+        - type=action → built-in framework action (status, cancel, retry, list)
+        - type=static → post static response text
+
+        Unknown or disabled commands post an error comment.
+        """
+        assert event.issue_number is not None
+        command_name = event.command.command_name  # type: ignore[union-attr]
+        args = event.command.args  # type: ignore[union-attr]
+
+        # "list" is an alias for help
+        if command_name == "list":
+            await self._handle_help_command(event)
+            return
+
+        cmd_config = self.config.commands.get(command_name)
+        if not cmd_config or not cmd_config.enabled:
+            await self._post_unknown_slash_command_error(event, command_name)
+            return
+
+        # Permission check: require_human blocks bot-authored commands
+        if cmd_config.permissions.require_human:
+            if self._is_bot_sender(event):
+                sender_role = self._get_sender_agent_role(event)
+                logger.info(
+                    "Slash command '%s' blocked — require_human=True but sender is bot (role=%s)",
+                    command_name,
+                    sender_role or "unknown",
+                )
+                return
+
+        cmd_type = cmd_config.type
+
+        if cmd_type == "agent":
+            # Invoke an agent role
+            agent_name = cmd_config.agent
+            if not agent_name:
+                logger.warning("Slash command '%s' has type=agent but no agent field", command_name)
+                return
+
+            # Inject a custom message if configured
+            if cmd_config.inject_message and event.command:
+                from squadron.models import ParsedCommand
+                event = event.model_copy(
+                    update={
+                        "command": event.command.model_copy(
+                            update={
+                                "agent_name": agent_name,
+                                "message": cmd_config.inject_message,
+                            }
+                        )
+                    }
+                )
+
+            role_config = self.config.agent_roles.get(agent_name)
+            if not role_config:
+                await self._post_unknown_agent_error(event, agent_name)
+                return
+
+            logger.info(
+                "Slash command '%s' → agent %s on issue #%d",
+                command_name,
+                agent_name,
+                event.issue_number,
+            )
+            if role_config.is_ephemeral:
+                await self._command_spawn(agent_name, role_config, event)
+            else:
+                await self._command_wake_or_spawn(agent_name, role_config, event)
+
+        elif cmd_type == "action":
+            action_name = cmd_config.action or command_name
+            await self._handle_builtin_action(event, action_name, args)
+
+        elif cmd_type == "static":
+            if cmd_config.response:
+                await self.github.comment_on_issue(
+                    self.config.project.owner,
+                    self.config.project.repo,
+                    event.issue_number,
+                    cmd_config.response,
+                )
+                logger.info(
+                    "Slash command '%s' → posted static response on issue #%d",
+                    command_name,
+                    event.issue_number,
+                )
+            else:
+                logger.warning("Slash command '%s' has type=static but no response text", command_name)
+
+        else:
+            logger.warning("Slash command '%s' has unknown type '%s'", command_name, cmd_type)
+
+    async def _handle_builtin_action(
+        self, event: SquadronEvent, action_name: str, args: list[str]
+    ) -> None:
+        """Dispatch a built-in framework action.
+
+        Built-in actions:
+        - ``status``: post a markdown table of agents active on this issue
+        - ``cancel <role>``: cancel an active/sleeping agent of the given role
+        - ``retry <role>``: respawn a completed/failed agent of the given role
+        - ``list``: alias for help
+        """
+        assert event.issue_number is not None
+
+        if action_name == "status":
+            await self._action_status(event)
+        elif action_name == "cancel":
+            role = args[0] if args else None
+            await self._action_cancel(event, role)
+        elif action_name == "retry":
+            role = args[0] if args else None
+            await self._action_retry(event, role)
+        elif action_name == "list":
+            await self._handle_help_command(event)
+        else:
+            logger.warning(
+                "Unknown built-in action '%s' on issue #%d", action_name, event.issue_number
+            )
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"❌ **Unknown action:** `{action_name}`\n\nAvailable actions: `status`, `cancel`, `retry`, `list`",
+            )
+
+    async def _action_status(self, event: SquadronEvent) -> None:
+        """Post a markdown status table for agents on the current issue."""
+        assert event.issue_number is not None
+
+        agents = await self.registry.get_all_agents_for_issue(event.issue_number)
+
+        lines = [f"📊 **Agent Status — Issue #{event.issue_number}**", ""]
+
+        if not agents:
+            lines.append("No agents have been spawned for this issue yet.")
+        else:
+            lines.append("| Agent ID | Role | Status | Active Since | Turns |")
+            lines.append("|----------|------|--------|--------------|-------|")
+            for agent in agents:
+                active_since = (
+                    agent.active_since.strftime("%Y-%m-%d %H:%M UTC")
+                    if agent.active_since
+                    else "—"
+                )
+                lines.append(
+                    f"| `{agent.agent_id}` | `{agent.role}` | {agent.status.value} "
+                    f"| {active_since} | {agent.turn_count} |"
+                )
+
+        await self.github.comment_on_issue(
+            self.config.project.owner,
+            self.config.project.repo,
+            event.issue_number,
+            "\n".join(lines),
+        )
+        logger.info("Posted status for issue #%d (%d agents)", event.issue_number, len(agents))
+
+    async def _action_cancel(self, event: SquadronEvent, role: str | None) -> None:
+        """Cancel an active or sleeping agent of the given role on this issue."""
+        assert event.issue_number is not None
+
+        if not role:
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                "❌ **Usage:** `/squadron cancel <role>`\n\nExample: `/squadron cancel feat-dev`",
+            )
+            return
+
+        agents = await self.registry.get_all_agents_for_issue(event.issue_number)
+        cancellable = [
+            a
+            for a in agents
+            if a.role == role and a.status in (AgentStatus.ACTIVE, AgentStatus.SLEEPING, AgentStatus.CREATED)
+        ]
+
+        if not cancellable:
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"⚠️ No active or sleeping `{role}` agent found for issue #{event.issue_number}.",
+            )
+            return
+
+        agent = cancellable[0]
+        try:
+            agent.status = AgentStatus.COMPLETED
+            await self.registry.update_agent(agent)
+            await self._cleanup_agent(agent.agent_id, destroy_session=True)
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"✅ **Cancelled** agent `{agent.agent_id}` (`{role}`) on issue #{event.issue_number}.",
+            )
+            logger.info("Cancelled agent %s on issue #%d via /squadron cancel", agent.agent_id, event.issue_number)
+        except Exception:
+            logger.exception("Failed to cancel agent %s", agent.agent_id)
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"❌ Failed to cancel agent `{agent.agent_id}`. Check logs for details.",
+            )
+
+    async def _action_retry(self, event: SquadronEvent, role: str | None) -> None:
+        """Respawn a completed or failed agent of the given role on this issue."""
+        assert event.issue_number is not None
+
+        if not role:
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                "❌ **Usage:** `/squadron retry <role>`\n\nExample: `/squadron retry feat-dev`",
+            )
+            return
+
+        # Validate role exists in config
+        role_config = self.config.agent_roles.get(role)
+        if not role_config:
+            await self._post_unknown_agent_error(event, role)
+            return
+
+        agents = await self.registry.get_all_agents_for_issue(event.issue_number)
+        retryable = [
+            a
+            for a in agents
+            if a.role == role
+            and a.status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.ESCALATED)
+        ]
+
+        if not retryable:
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"⚠️ No completed or failed `{role}` agent found for issue #{event.issue_number}. "
+                f"Use `/squadron {role}` to spawn a fresh agent.",
+            )
+            return
+
+        logger.info(
+            "Retrying role %s for issue #%d via /squadron retry",
+            role,
+            event.issue_number,
+        )
+        record = await self.create_agent(role, event.issue_number, trigger_event=event)
+        if record:
+            self.last_spawn_time = datetime.now(timezone.utc).isoformat()
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"🔄 **Retrying** `{role}` agent for issue #{event.issue_number} — spawned `{record.agent_id}`.",
+            )
+
+    async def _post_unknown_slash_command_error(
+        self, event: SquadronEvent, command_name: str
+    ) -> None:
+        """Post error message when unknown slash command is used."""
+        assert event.issue_number is not None
+
+        available = sorted(
+            name for name, cmd in self.config.commands.items() if cmd.enabled
+        )
+        available_str = ", ".join(f"`{c}`" for c in available) if available else "*(none configured)*"
+        prefix = self.config.command_prefix
+
+        message = (
+            f"❌ **Unknown command:** `{prefix} {command_name}`\n\n"
+            f"**Available commands:** {available_str}\n\n"
+            f"Use `{prefix} help` to see all commands and agents."
+        )
+
+        await self.github.comment_on_issue(
+            self.config.project.owner,
+            self.config.project.repo,
+            event.issue_number,
+            message,
+        )
+        logger.info(
+            "Posted unknown slash command error for '%s' on issue #%d",
+            command_name,
+            event.issue_number,
+        )
+
     def _get_dashboard_url(self) -> str:
         """Return the public dashboard URL from env, or 'not available' if unset/invalid.
 
@@ -2636,10 +2964,19 @@ class AgentManager:
         return "disabled (public access)"
 
     async def _handle_help_command(self, event: SquadronEvent) -> None:
-        """Handle @squadron-dev help — post markdown table of available agents."""
+        """Handle help command — post agent + slash command reference.
+
+        Responds to both ``@squadron-dev help`` and ``/squadron help`` (and
+        ``/squadron list``).  Lists available agents and configured slash commands.
+        """
         assert event.issue_number is not None
 
-        lines = ["📋 **Available Agents**", ""]
+        prefix = self.config.command_prefix
+
+        # ── Agents section ────────────────────────────────────────────────────
+        lines = ["📋 **Squadron Help**", ""]
+        lines.append("## Agents")
+        lines.append("")
         lines.append("| Agent | Description | Tools |")
         lines.append("|-------|-------------|-------|")
 
@@ -2659,9 +2996,27 @@ class AgentManager:
                 lines.append(f"| `{role_name}` | *(definition not found)* | — |")
 
         lines.append("")
-        lines.append("**Usage:** `@squadron-dev <agent>: <your message>`")
-        lines.append("")
-        lines.append("**Example:** `@squadron-dev pm: triage this issue`")
+        lines.append(f"**@mention usage:** `@squadron-dev <agent>: <your message>`")
+        lines.append(f"**Example:** `@squadron-dev pm: triage this issue`")
+
+        # ── Slash commands section ─────────────────────────────────────────────
+        slash_commands = {
+            name: cmd for name, cmd in self.config.commands.items() if cmd.enabled
+        }
+        if slash_commands:
+            lines.append("")
+            lines.append("## Slash Commands")
+            lines.append("")
+            lines.append("| Command | Description |")
+            lines.append("|---------|-------------|")
+            for cmd_name in sorted(slash_commands.keys()):
+                cmd = slash_commands[cmd_name]
+                desc = cmd.description or _slash_command_default_description(cmd)
+                lines.append(f"| `{prefix} {cmd_name}` | {desc} |")
+            lines.append("")
+            lines.append(f"**Usage:** `{prefix} <command> [args]`")
+            lines.append(f"**Example:** `{prefix} status`")
+
         lines.append("")
         lines.append(f"**Dashboard:** {self._get_dashboard_url()}")
         lines.append(f"**Auth:** {self._get_auth_status()}")

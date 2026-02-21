@@ -666,7 +666,7 @@ class TestCommandRouting:
         github.comment_on_issue.assert_called_once()
         call_args = github.comment_on_issue.call_args
         body = call_args[0][3] if len(call_args[0]) > 3 else call_args[1].get("body", "")
-        assert "Available Agents" in body
+        assert "Agents" in body  # "Squadron Help" header with "## Agents" section
         assert "pm" in body.lower()
         assert "feat-dev" in body.lower()
 

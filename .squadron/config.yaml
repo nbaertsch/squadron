@@ -163,6 +163,10 @@ circuit_breakers:
     max_turns: 50
     warning_threshold: 0.8
   roles:
+    infra-dev:
+      max_active_duration: 10800
+      max_tool_calls: 200
+      max_turns: 50
     pm:
       max_active_duration: 600
       max_tool_calls: 50
@@ -179,31 +183,49 @@ circuit_breakers:
       max_active_duration: 1800
       max_tool_calls: 100
       max_turns: 20
-    infra-dev:
-      max_active_duration: 10800  # 3 hours - infrastructure work can be complex
-      max_tool_calls: 200
-      max_turns: 50
+command_prefix: /squadron
 commands:
+  cancel:
+    action: cancel
+    args:
+    - role
+    description: Cancel an active agent (e.g. /squadron cancel feat-dev)
+    enabled: true
+    permissions:
+      require_human: true
+    type: action
   help:
+    description: Show available agents and commands
     enabled: true
-    invoke_agent: false
-    response: '## Squadron Commands
+    response: 'Use `@squadron-dev help` or `/squadron help` to see this message.
 
-
-      Available commands:
-
-      - `@squadron-dev help` - Show this help message
-
-      - `@squadron-dev status` - Show project status
-
-
-      For more information, see the Squadron documentation.
-
-      '
+      See agent list above for available agents.'
+    type: static
+  retry:
+    action: retry
+    args:
+    - role
+    description: Retry a failed/completed agent (e.g. /squadron retry feat-dev)
+    enabled: true
+    permissions:
+      require_human: true
+    type: action
+  review:
+    agent: pr-review
+    description: Request a code review from the PR review agent
+    enabled: true
+    type: agent
   status:
-    delegate_to: pm
+    action: status
+    description: Show active agents and their status for this issue
     enabled: true
-    invoke_agent: true
+    type: action
+  triage:
+    agent: pm
+    description: Auto-triage this issue with the PM agent
+    enabled: true
+    inject_message: Triage this issue and assign appropriate labels
+    type: agent
 escalation:
   default_notify: maintainers
   escalation_labels:
@@ -321,6 +343,37 @@ runtime:
   provider:
     type: copilot
   reconciliation_interval: 300
+sandbox:
+  block_sensitive_path_changes: true
+  cpu_quota_percent: 200
+  diff_inspection_enabled: true
+  disk_limit_mb: 5120
+  enabled: false
+  max_tool_calls_per_session: 200
+  memory_limit_mb: 2048
+  namespace_ipc: true
+  namespace_mount: true
+  namespace_net: true
+  namespace_pid: true
+  namespace_uts: true
+  output_inspection_enabled: true
+  retention_days: 1
+  retention_path: /mnt/squadron-data/forensics
+  seccomp_enabled: true
+  sensitive_paths:
+  - .github/**
+  - Makefile
+  - '*.sh'
+  - pyproject.toml
+  - Dockerfile
+  - docker-compose*.yml
+  - infra/**
+  - deploy/**
+  - .pre-commit-config.yaml
+  session_timeout: 7200
+  socket_dir: /tmp/squadron-sockets
+  timing_floor_ms: 50
+  use_overlayfs: true
 workflows:
   feature-dev-pipeline:
     context:
@@ -362,41 +415,3 @@ workflows:
       conditions:
         label: feature-pipeline
       event: issues.labeled
-
-sandbox:
-  enabled: false  # Set to true in production; requires Linux kernel >= 3.8
-  # Namespace isolation (native Linux kernel, no third-party deps)
-  namespace_mount: true
-  namespace_pid: true
-  namespace_net: true
-  namespace_ipc: true
-  namespace_uts: true
-  seccomp_enabled: true
-  # Worktree isolation
-  use_overlayfs: true
-  # Data retention -- Azure File Share mount point
-  retention_path: /mnt/squadron-data/forensics
-  retention_days: 1
-  # Resource limits (cgroups v2)
-  memory_limit_mb: 2048
-  cpu_quota_percent: 200
-  disk_limit_mb: 5120
-  session_timeout: 7200
-  # Tool proxy
-  socket_dir: /tmp/squadron-sockets
-  max_tool_calls_per_session: 200
-  timing_floor_ms: 50
-  # Inspection
-  output_inspection_enabled: true
-  diff_inspection_enabled: true
-  block_sensitive_path_changes: true
-  sensitive_paths:
-    - ".github/**"
-    - "Makefile"
-    - "*.sh"
-    - "pyproject.toml"
-    - "Dockerfile"
-    - "docker-compose*.yml"
-    - "infra/**"
-    - "deploy/**"
-    - ".pre-commit-config.yaml"

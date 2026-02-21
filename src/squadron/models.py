@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import re
+from typing import Literal
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
@@ -287,16 +288,127 @@ class ParsedCommand(BaseModel):
     """Result of parsing a comment for squadron commands."""
 
     is_help: bool = False
+    source: Literal["mention", "slash"] = "mention"
     agent_name: str | None = None
     message: str | None = None
+    command_name: str | None = None  # For slash commands (e.g. "review", "status")
+    args: list[str] = Field(default_factory=list)  # Slash command positional args
 
 
-def parse_command(text: str) -> ParsedCommand | None:
+class CommandParser:
+    """Config-driven command parser supporting both slash and @mention syntax.
+
+    Parses:
+    - /squadron <command> [args...] — slash syntax
+    - @squadron-dev <agent>: <message> — mention syntax (unchanged)
+    - @squadron-dev help — mention help (unchanged)
+
+    Code-span exemption applies to both syntaxes: mentions or slash commands
+    inside backtick-wrapped code are treated as literal text.
+
+    Attributes:
+        command_prefix: The slash command prefix (e.g. "/squadron").
+        known_agents: Agent roles from config (used for mention validation).
+        known_commands: Command names from config (used for slash validation).
+    """
+
+    def __init__(
+        self,
+        command_prefix: str = "/squadron",
+        known_agents: set[str] | None = None,
+        known_commands: set[str] | None = None,
+    ) -> None:
+        self.command_prefix = command_prefix
+        self.known_agents: set[str] = known_agents or set()
+        self.known_commands: set[str] = known_commands or set()
+
+        # Slash command regex: /squadron <command> [args...]
+        # Must appear at the start of a line (or start of comment)
+        escaped_prefix = re.escape(command_prefix)
+        self._slash_re = re.compile(
+            rf"(?:^|\n){escaped_prefix}\s+(\w[\w-]*)((?:\s+\w[\w-]*)*)",
+            re.IGNORECASE,
+        )
+
+    def parse(self, text: str) -> "ParsedCommand | None":
+        """Parse a comment for squadron command syntax.
+
+        Tries slash syntax first, then @mention syntax.  Code-span exemption
+        applies to both: mentions and commands inside backtick code spans or
+        fenced code blocks are **ignored** as literal text.
+
+        Returns None if no command syntax is found.
+        """
+        if not text:
+            return None
+
+        searchable = _strip_code_spans(text)
+
+        # Try slash syntax first
+        result = self._parse_slash(searchable)
+        if result is not None:
+            return result
+
+        # Fall back to @mention syntax
+        return self._parse_mention(searchable)
+
+    def _parse_slash(self, searchable: str) -> "ParsedCommand | None":
+        """Parse /squadron <command> [args...] syntax."""
+        match = self._slash_re.search(searchable)
+        if not match:
+            return None
+
+        command_name = match.group(1).lower()
+        args_str = match.group(2).strip()
+        args = args_str.split() if args_str else []
+
+        if command_name == "help":
+            return ParsedCommand(is_help=True, source="slash")
+
+        return ParsedCommand(
+            source="slash",
+            command_name=command_name,
+            args=args,
+        )
+
+    def _parse_mention(self, searchable: str) -> "ParsedCommand | None":
+        """Parse @squadron-dev <agent>: <message> / @squadron-dev help syntax."""
+        # Check for help command first
+        if _HELP_RE.search(searchable):
+            return ParsedCommand(is_help=True, source="mention")
+
+        # Check for agent command
+        match = _COMMAND_RE.search(searchable)
+        if match:
+            agent_name = match.group(1).lower()
+            message = match.group(2).strip()
+
+            match_text = searchable[match.start() : match.end()]
+            has_colon = ":" in match_text
+
+            if has_colon or agent_name in self.known_agents:
+                return ParsedCommand(
+                    source="mention",
+                    agent_name=agent_name,
+                    message=message,
+                )
+
+        return None
+
+
+def parse_command(text: str, known_agents: set[str] | None = None) -> ParsedCommand | None:
     """Parse a comment for squadron command syntax.
 
+    Backward-compatible wrapper around CommandParser.  Uses a default set of
+    known agent names when none are provided (for unit tests and legacy callers).
+
+    For production use, prefer constructing a CommandParser with the full set
+    of known agents and commands from config:
+    CommandParser(config.command_prefix, set(config.agent_roles), set(config.commands))
+
     Supports:
-    - ``@squadron-dev help`` — returns ParsedCommand(is_help=True)
-    - ``@squadron-dev <agent>: <message>`` — returns ParsedCommand with agent_name and message
+    - @squadron-dev help — returns ParsedCommand(is_help=True)
+    - @squadron-dev <agent>: <message> — returns ParsedCommand with agent_name and message
 
     Mentions that appear inside backtick-wrapped inline code or fenced code
     blocks are **ignored** — they are treated as literal text, not commands.
@@ -304,41 +416,16 @@ def parse_command(text: str) -> ParsedCommand | None:
 
     Returns None if the comment doesn't match any command syntax.
     """
-    if not text:
-        return None
-
-    # Strip code spans so that backtick-wrapped mentions are not matched.
-    # We operate on the stripped copy for all pattern searches.
-    searchable = _strip_code_spans(text)
-
-    # Check for help command first
-    if _HELP_RE.search(searchable):
-        return ParsedCommand(is_help=True)
-
-    # Check for agent command
-    match = _COMMAND_RE.search(searchable)
-    if match:
-        agent_name = match.group(1).lower()
-        message = match.group(2).strip()
-
-        # Define known agent names (from .squadron/config.yaml)
-        known_agents = {
-            "pm",
-            "bug-fix",
-            "feat-dev",
-            "docs-dev",
-            "infra-dev",
-            "security-review",
-            "test-coverage",
-            "pr-review",
-        }
-
-        # If there's a colon in the match, it's definitely a command
-        # If no colon, validate that it's a known agent name
-        match_text = searchable[match.start() : match.end()]
-        has_colon = ":" in match_text
-
-        if has_colon or agent_name in known_agents:
-            return ParsedCommand(agent_name=agent_name, message=message)
-
-    return None
+    _default_known_agents = {
+        "pm",
+        "bug-fix",
+        "feat-dev",
+        "docs-dev",
+        "infra-dev",
+        "security-review",
+        "test-coverage",
+        "pr-review",
+    }
+    effective_agents = known_agents if known_agents is not None else _default_known_agents
+    parser = CommandParser(known_agents=effective_agents)
+    return parser.parse(text)
