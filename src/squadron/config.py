@@ -445,6 +445,10 @@ class SquadronConfig(BaseModel):
 
     # DEPRECATED: kept for backward compatibility, use review_policy instead
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
+    command_prefix: str = "@squadron-dev"
+    """Bot mention prefix used to trigger commands (e.g. ``@squadron-dev help``).
+    Must start with ``@``. Defaults to ``@squadron-dev``.
+    """
     commands: dict[str, "CommandDefinition"] = Field(default_factory=dict)
 
     # Skills configuration — project-level skill definitions
@@ -1086,10 +1090,55 @@ def load_agent_definitions(squadron_dir: Path) -> dict[str, AgentDefinition]:
 # ── Command Configuration ─────────────────────────────────────────────────────
 
 
-class CommandDefinition(BaseModel):
-    """Configuration for a specific command."""
+class CommandPermissions(BaseModel):
+    """Permissions for a slash command."""
 
+    require_human: bool = False
+    """If True, only human senders can invoke this command (not bots/agents)."""
+
+
+class CommandDefinition(BaseModel):
+    """Configuration for a specific command.
+
+    Supports three command types:
+    - ``agent``: Routes to an agent role (implicit for @ mention routing)
+    - ``action``: Executes a built-in framework action (status, cancel, retry)
+    - ``static``: Returns a fixed response without invoking an agent
+
+    Backward compatibility: old ``invoke_agent`` / ``delegate_to`` fields are
+    accepted and migrated to the new ``type`` system by the model validator.
+    """
+
+    type: Literal["agent", "action", "static"] = "agent"
+    description: str = ""
+    args: list[str] = Field(default_factory=list)
+    permissions: CommandPermissions = Field(default_factory=CommandPermissions)
+
+    # Backward-compat fields (kept for existing config files)
     enabled: bool = True
     invoke_agent: bool = True
-    delegate_to: str | None = None  # Agent role to delegate to if invoke_agent is True
-    response: str | None = None  # Static response for commands with invoke_agent=False
+    delegate_to: str | None = None
+    response: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fields(cls, data: Any) -> Any:
+        """Migrate old invoke_agent/delegate_to/response fields to new type system.
+
+        This validator ensures old config files that use the deprecated fields
+        still load correctly, mapping them to the new ``type`` field.
+        """
+        if not isinstance(data, dict):
+            return data
+        if "type" in data:
+            return data  # New-style config — no migration needed
+
+        # Infer type from legacy fields
+        if not data.get("invoke_agent", True):
+            data.setdefault("type", "static")
+        elif data.get("delegate_to"):
+            data.setdefault("type", "agent")
+        else:
+            data.setdefault("type", "agent")
+
+        return data

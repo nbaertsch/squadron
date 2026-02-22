@@ -415,3 +415,127 @@ class TestSkillPathTraversalValidation:
 
         sc = SkillsConfig()
         assert sc.base_path == ".squadron/skills"
+
+
+# ── CommandPermissions & CommandDefinition ─────────────────────────────────────
+
+
+class TestCommandPermissions:
+    def test_default_require_human_false(self):
+        from squadron.config import CommandPermissions
+
+        perms = CommandPermissions()
+        assert perms.require_human is False
+
+    def test_require_human_true(self):
+        from squadron.config import CommandPermissions
+
+        perms = CommandPermissions(require_human=True)
+        assert perms.require_human is True
+
+
+class TestCommandDefinition:
+    def test_new_style_action(self):
+        from squadron.config import CommandDefinition
+
+        cmd = CommandDefinition(type="action", description="Show status")
+        assert cmd.type == "action"
+        assert cmd.description == "Show status"
+
+    def test_new_style_static(self):
+        from squadron.config import CommandDefinition
+
+        cmd = CommandDefinition(type="static", response="Hello!")
+        assert cmd.type == "static"
+        assert cmd.response == "Hello!"
+
+    def test_legacy_invoke_agent_false_migrates_to_static(self):
+        from squadron.config import CommandDefinition
+
+        cmd = CommandDefinition(invoke_agent=False, response="Hello!")
+        assert cmd.type == "static"
+
+    def test_legacy_delegate_to_migrates_to_agent(self):
+        from squadron.config import CommandDefinition
+
+        cmd = CommandDefinition(invoke_agent=True, delegate_to="pm")
+        assert cmd.type == "agent"
+        assert cmd.delegate_to == "pm"
+
+    def test_permissions_in_definition(self):
+        from squadron.config import CommandDefinition, CommandPermissions
+
+        cmd = CommandDefinition(
+            type="action",
+            permissions=CommandPermissions(require_human=True),
+        )
+        assert cmd.permissions.require_human is True
+
+    def test_args_field(self):
+        from squadron.config import CommandDefinition
+
+        cmd = CommandDefinition(type="action", args=["role"])
+        assert cmd.args == ["role"]
+
+    def test_enabled_field_default(self):
+        from squadron.config import CommandDefinition
+
+        cmd = CommandDefinition(type="action")
+        assert cmd.enabled is True
+
+
+class TestSquadronConfigCommandPrefix:
+    def test_default_command_prefix(self):
+        from squadron.config import SquadronConfig
+
+        config = SquadronConfig(project={"name": "test", "owner": "x", "repo": "y"})
+        assert config.command_prefix == "@squadron-dev"
+
+    def test_custom_command_prefix(self):
+        from squadron.config import SquadronConfig
+
+        config = SquadronConfig(
+            project={"name": "test", "owner": "x", "repo": "y"},
+            command_prefix="@my-custom-bot",
+        )
+        assert config.command_prefix == "@my-custom-bot"
+
+    def test_command_prefix_loaded_from_yaml(self, squadron_dir):
+        import yaml
+
+        config_file = squadron_dir / "config.yaml"
+        data = yaml.safe_load(config_file.read_text())
+        data["command_prefix"] = "@custom-bot"
+        config_file.write_text(yaml.dump(data))
+
+        config = load_config(squadron_dir)
+        assert config.command_prefix == "@custom-bot"
+
+    def test_commands_loaded_from_yaml(self, squadron_dir):
+        import yaml
+
+        config_file = squadron_dir / "config.yaml"
+        data = yaml.safe_load(config_file.read_text())
+        data["commands"] = {
+            "status": {"type": "action"},
+            "cancel": {"type": "action", "permissions": {"require_human": True}},
+        }
+        config_file.write_text(yaml.dump(data))
+
+        config = load_config(squadron_dir)
+        assert "status" in config.commands
+        assert "cancel" in config.commands
+        assert config.commands["cancel"].permissions.require_human is True
+
+    def test_commands_legacy_format_loaded(self, squadron_dir):
+        import yaml
+
+        config_file = squadron_dir / "config.yaml"
+        data = yaml.safe_load(config_file.read_text())
+        data["commands"] = {
+            "help": {"enabled": True, "invoke_agent": False, "response": "help text"},
+        }
+        config_file.write_text(yaml.dump(data))
+
+        config = load_config(squadron_dir)
+        assert config.commands["help"].type == "static"

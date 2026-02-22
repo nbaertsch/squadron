@@ -196,27 +196,43 @@ circuit_breakers:
       max_active_duration: 10800  # 3 hours - infrastructure work can be complex
       max_tool_calls: 200
       max_turns: 50
+command_prefix: "@squadron-dev"
+
 commands:
   help:
+    type: static
+    description: "Show available commands and agents"
     enabled: true
     invoke_agent: false
-    response: '## Squadron Commands
-
+    response: |
+      ## Squadron Commands
 
       Available commands:
-
       - `@squadron-dev help` - Show this help message
+      - `@squadron-dev status` - Show active agent status
+      - `@squadron-dev cancel <role>` - Cancel an active agent (human only)
+      - `@squadron-dev retry <role>` - Retry a failed agent (human only)
 
-      - `@squadron-dev status` - Show project status
-
+      **Agent invocation:** `@squadron-dev <agent>: <message>`
 
       For more information, see the Squadron documentation.
-
-      '
   status:
-    delegate_to: pm
-    enabled: true
-    invoke_agent: true
+    type: action
+    description: "Show status of all active agents"
+    permissions:
+      require_human: false
+  cancel:
+    type: action
+    description: "Cancel an active agent"
+    args: ["role"]
+    permissions:
+      require_human: true
+  retry:
+    type: action
+    description: "Retry a failed or cancelled agent"
+    args: ["role"]
+    permissions:
+      require_human: true
 escalation:
   default_notify: maintainers
   escalation_labels:
