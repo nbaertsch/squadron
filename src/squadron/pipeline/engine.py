@@ -25,6 +25,8 @@ from squadron.pipeline.models import (
     GateTimeoutConfig,
     HumanStageState,
     HumanWaitType,
+    JoinStrategy,
+    ParallelBranch,
     PipelineDefinition,
     PipelineRun,
     PipelineRunStatus,
@@ -358,6 +360,10 @@ class PipelineEngine:
             issue_number,
         )
 
+        # Auto-associate PR with pipeline (for cross-PR event routing)
+        if pr_number:
+            await self._registry.add_pr_association(run_id, pr_number, self._repo, role="primary")
+
         # Execute the first stage
         if definition.stages:
             await self._execute_stage(run, definition, definition.stages[0])
@@ -427,6 +433,10 @@ class PipelineEngine:
         # Execute on_error hooks
         await self._execute_pipeline_hooks(run, "on_error")
 
+        # If this is a sub-pipeline, notify the parent
+        if run.parent_run_id and run.parent_stage_id:
+            await self._on_sub_pipeline_complete(run)
+
     async def _escalate_pipeline(self, run: PipelineRun, reason: str) -> None:
         """Mark a pipeline run as escalated."""
         run.status = PipelineRunStatus.ESCALATED
@@ -440,8 +450,12 @@ class PipelineEngine:
             reason,
         )
 
+        # If this is a sub-pipeline, notify the parent
+        if run.parent_run_id and run.parent_stage_id:
+            await self._on_sub_pipeline_complete(run)
+
     async def cancel_pipeline(self, run_id: str) -> bool:
-        """Cancel a running pipeline. Returns True if cancelled."""
+        """Cancel a running pipeline and all child pipelines. Returns True if cancelled."""
         run = await self._registry.get_pipeline_run(run_id)
         if not run or run.status not in (
             PipelineRunStatus.PENDING,
@@ -457,6 +471,12 @@ class PipelineEngine:
         task = self._delay_tasks.pop(run_id, None)
         if task and not task.done():
             task.cancel()
+
+        # Cascade cancellation to child pipelines
+        children = await self._registry.get_child_pipelines(run_id)
+        for child in children:
+            if child.status in (PipelineRunStatus.PENDING, PipelineRunStatus.RUNNING):
+                await self.cancel_pipeline(child.run_id)
 
         logger.info("Pipeline '%s' run %s cancelled", run.pipeline_name, run_id)
         return True
@@ -738,7 +758,25 @@ class PipelineEngine:
         all_results: list[GateCheckResult] = []
         for cond in conditions:
             check = self._gate_registry.get(cond.check)
-            result = await check.evaluate(cond.get_config(), ctx)
+
+            # Cross-PR gate targeting: override context pr_number if condition has `pr`
+            eval_ctx = ctx
+            if cond.pr is not None:
+                target_pr = self._resolve_pr_target(cond.pr, run)
+                if target_pr is not None:
+                    eval_ctx = PipelineContext(
+                        pr_number=target_pr,
+                        issue_number=ctx.issue_number,
+                        owner=ctx.owner,
+                        repo=ctx.repo,
+                        pipeline_run_id=ctx.pipeline_run_id,
+                        context=ctx.context,
+                        github_client=ctx.github_client,
+                    )
+
+            config = cond.get_config()
+            config.pop("pr", None)  # Don't pass `pr` to the check itself
+            result = await check.evaluate(config, eval_ctx)
             all_results.append(result)
 
             # Record each check
@@ -1005,65 +1043,183 @@ class PipelineEngine:
         stage: StageDefinition,
         stage_run: StageRun,
     ) -> None:
-        """Execute a parallel stage — spawn multiple agent branches.
+        """Execute a parallel stage — spawn branches of various types.
 
-        Full parallel join semantics are Phase 3. For now, spawn all branches
-        as individual agent stages and track them.
+        Supported branch types:
+        - ``agent``: Spawn an agent (requires spawn callback).
+        - ``pipeline``: Start a sub-pipeline as a branch.
+        - ``action``: Execute a built-in action as a branch.
         """
-        if not self._spawn_agent:
-            msg = "No spawn agent callback configured"
-            raise RuntimeError(msg)
-
         stage_run.status = StageRunStatus.WAITING
         await self._registry.update_stage_run(stage_run)
 
         for branch in stage.branches:
-            # Check branch condition (simplified — full conditions in Phase 3)
+            # Check branch condition (simplified — full conditions in Phase 5)
             if branch.condition:
-                # For now, skip conditional branches
                 logger.info(
                     "Skipping conditional branch '%s' (conditions not yet evaluated)",
                     branch.id,
                 )
                 continue
 
+            branch_stage_id = f"{stage.id}/{branch.id}"
+
             if branch.type == StageType.AGENT and branch.agent:
-                branch_stage_run = StageRun(
-                    run_id=run.run_id,
-                    stage_id=f"{stage.id}/{branch.id}",
-                    status=StageRunStatus.RUNNING,
-                    branch_id=branch.id,
-                    parent_stage_id=stage.id,
-                    started_at=datetime.now(timezone.utc),
+                await self._execute_parallel_agent_branch(run, stage, branch, branch_stage_id)
+            elif branch.type == StageType.PIPELINE and branch.pipeline:
+                await self._execute_parallel_pipeline_branch(run, stage, branch, branch_stage_id)
+            elif branch.type == StageType.ACTION and branch.action:
+                await self._execute_parallel_action_branch(
+                    run, definition, stage, branch, branch_stage_id
                 )
-                branch_id = await self._registry.create_stage_run(branch_stage_run)
-                branch_stage_run.id = branch_id
-
-                agent_id = await self._spawn_agent(
-                    branch.agent,
-                    run.issue_number,
-                    pr_number=run.pr_number,
-                    pipeline_run_id=run.run_id,
-                    stage_id=f"{stage.id}/{branch.id}",
-                    action=branch.action,
-                    context=run.context,
+            else:
+                logger.warning(
+                    "Unsupported or misconfigured parallel branch '%s' (type=%s)",
+                    branch.id,
+                    branch.type.value,
                 )
-
-                if agent_id:
-                    branch_stage_run.agent_id = agent_id
-                    branch_stage_run.status = StageRunStatus.WAITING
-                    await self._registry.update_stage_run(branch_stage_run)
-                else:
-                    branch_stage_run.status = StageRunStatus.FAILED
-                    branch_stage_run.error_message = "Failed to spawn agent"
-                    branch_stage_run.completed_at = datetime.now(timezone.utc)
-                    await self._registry.update_stage_run(branch_stage_run)
 
         logger.info(
-            "Parallel stage '%s' spawned branches (pipeline %s)",
+            "Parallel stage '%s' launched branches (pipeline %s)",
             stage.id,
             run.run_id,
         )
+
+    async def _execute_parallel_agent_branch(
+        self,
+        run: PipelineRun,
+        stage: StageDefinition,
+        branch: ParallelBranch,
+        branch_stage_id: str,
+    ) -> None:
+        """Spawn an agent for a parallel branch."""
+        if not self._spawn_agent:
+            msg = "No spawn agent callback configured"
+            raise RuntimeError(msg)
+
+        branch_stage_run = StageRun(
+            run_id=run.run_id,
+            stage_id=branch_stage_id,
+            status=StageRunStatus.RUNNING,
+            branch_id=branch.id,
+            parent_stage_id=stage.id,
+            started_at=datetime.now(timezone.utc),
+        )
+        branch_id = await self._registry.create_stage_run(branch_stage_run)
+        branch_stage_run.id = branch_id
+
+        agent_id = await self._spawn_agent(
+            branch.agent,  # type: ignore[arg-type]
+            run.issue_number,
+            pr_number=run.pr_number,
+            pipeline_run_id=run.run_id,
+            stage_id=branch_stage_id,
+            action=branch.action,
+            context=run.context,
+        )
+
+        if agent_id:
+            branch_stage_run.agent_id = agent_id
+            branch_stage_run.status = StageRunStatus.WAITING
+        else:
+            branch_stage_run.status = StageRunStatus.FAILED
+            branch_stage_run.error_message = "Failed to spawn agent"
+            branch_stage_run.completed_at = datetime.now(timezone.utc)
+        await self._registry.update_stage_run(branch_stage_run)
+
+    async def _execute_parallel_pipeline_branch(
+        self,
+        run: PipelineRun,
+        stage: StageDefinition,
+        branch: ParallelBranch,
+        branch_stage_id: str,
+    ) -> None:
+        """Start a sub-pipeline for a parallel branch."""
+        pipeline_name = branch.pipeline
+        if not pipeline_name:
+            return
+
+        child_def = self._pipelines.get(pipeline_name)
+        if not child_def:
+            logger.error(
+                "Unknown sub-pipeline '%s' in parallel branch '%s'", pipeline_name, branch.id
+            )
+            return
+
+        if run.nesting_depth >= MAX_NESTING_DEPTH:
+            logger.error("Sub-pipeline nesting depth exceeded in parallel branch '%s'", branch.id)
+            return
+
+        branch_stage_run = StageRun(
+            run_id=run.run_id,
+            stage_id=branch_stage_id,
+            status=StageRunStatus.RUNNING,
+            branch_id=branch.id,
+            parent_stage_id=stage.id,
+            started_at=datetime.now(timezone.utc),
+        )
+        sr_id = await self._registry.create_stage_run(branch_stage_run)
+        branch_stage_run.id = sr_id
+
+        child_run = await self._start_pipeline(
+            pipeline_name,
+            child_def,
+            issue_number=run.issue_number,
+            pr_number=run.pr_number,
+            parent_run_id=run.run_id,
+            parent_stage_id=branch_stage_id,
+            nesting_depth=run.nesting_depth + 1,
+            extra_context=branch.context,
+        )
+
+        branch_stage_run.child_pipeline_run_id = child_run.run_id
+        branch_stage_run.status = StageRunStatus.WAITING
+        await self._registry.update_stage_run(branch_stage_run)
+
+    async def _execute_parallel_action_branch(
+        self,
+        run: PipelineRun,
+        definition: PipelineDefinition,
+        stage: StageDefinition,
+        branch: ParallelBranch,
+        branch_stage_id: str,
+    ) -> None:
+        """Execute an action for a parallel branch."""
+        branch_stage_run = StageRun(
+            run_id=run.run_id,
+            stage_id=branch_stage_id,
+            status=StageRunStatus.RUNNING,
+            branch_id=branch.id,
+            parent_stage_id=stage.id,
+            started_at=datetime.now(timezone.utc),
+        )
+        sr_id = await self._registry.create_stage_run(branch_stage_run)
+        branch_stage_run.id = sr_id
+
+        ctx = self._build_context(run)
+        if self._action_callback:
+            try:
+                result = await self._action_callback(branch.action, branch.config, ctx)  # type: ignore[arg-type]
+                success = result.get("success", False)
+            except Exception as exc:
+                result = {"error": str(exc)}
+                success = False
+        else:
+            logger.warning("No action callback for parallel branch '%s'", branch.id)
+            result = {}
+            success = True
+
+        branch_stage_run.outputs = result
+        if success:
+            branch_stage_run.status = StageRunStatus.COMPLETED
+        else:
+            branch_stage_run.status = StageRunStatus.FAILED
+            branch_stage_run.error_message = result.get("error", "Action failed")
+        branch_stage_run.completed_at = datetime.now(timezone.utc)
+        await self._registry.update_stage_run(branch_stage_run)
+
+        # Immediately check parallel completion since action branches complete synchronously
+        await self._check_parallel_completion(branch_stage_run)
 
     async def _execute_pipeline_stage(
         self,
@@ -1562,6 +1718,9 @@ class PipelineEngine:
             stage_run.outputs = outputs
         await self._registry.update_stage_run(stage_run)
 
+        # Track PR associations for multi-PR pipelines
+        await self._track_pr_from_outputs(stage_run, outputs)
+
         # Check if this is a parallel branch
         if stage_run.parent_stage_id:
             await self._check_parallel_completion(stage_run)
@@ -1597,6 +1756,11 @@ class PipelineEngine:
         stage_run.completed_at = datetime.now(timezone.utc)
         await self._registry.update_stage_run(stage_run)
 
+        # Check if this is a parallel branch
+        if stage_run.parent_stage_id:
+            await self._check_parallel_completion(stage_run)
+            return
+
         run = await self._registry.get_pipeline_run(stage_run.run_id)
         if not run or run.status != PipelineRunStatus.RUNNING:
             return
@@ -1611,7 +1775,12 @@ class PipelineEngine:
             await self._handle_stage_error(run, defn, stage, error)
 
     async def _check_parallel_completion(self, completed_branch: StageRun) -> None:
-        """Check if all branches of a parallel stage are done."""
+        """Check if a parallel stage should advance based on its join strategy.
+
+        Join strategies:
+        - ``all`` (default): Wait for all branches to finish.
+        - ``any``: Advance as soon as any branch succeeds.
+        """
         if not completed_branch.parent_stage_id:
             return
 
@@ -1619,19 +1788,21 @@ class PipelineEngine:
         all_stages = await self._registry.get_stage_runs_for_pipeline(completed_branch.run_id)
         branches = [s for s in all_stages if s.parent_stage_id == completed_branch.parent_stage_id]
 
-        # Check if all branches are done (join: all)
-        all_done = all(
-            s.status
-            in (
-                StageRunStatus.COMPLETED,
-                StageRunStatus.FAILED,
-                StageRunStatus.SKIPPED,
-            )
-            for s in branches
-        )
-
-        if not all_done:
+        # Load definition to determine join strategy
+        run = await self._registry.get_pipeline_run(completed_branch.run_id)
+        if not run or run.status != PipelineRunStatus.RUNNING:
             return
+
+        try:
+            defn = PipelineDefinition.model_validate_json(run.definition_snapshot)
+        except Exception:
+            return
+
+        stage = defn.get_stage(completed_branch.parent_stage_id)
+        if not stage:
+            return
+
+        join = stage.join or JoinStrategy.ALL
 
         # Find the parent stage run
         parent_runs = [
@@ -1643,30 +1814,56 @@ class PipelineEngine:
             return
         parent_stage_run = parent_runs[-1]
 
-        # Check if any branches failed
-        any_failed = any(s.status == StageRunStatus.FAILED for s in branches)
+        if join == JoinStrategy.ANY:
+            # Advance as soon as any branch completes successfully
+            any_succeeded = any(s.status == StageRunStatus.COMPLETED for s in branches)
+            if any_succeeded:
+                parent_stage_run.status = StageRunStatus.COMPLETED
+                parent_stage_run.completed_at = datetime.now(timezone.utc)
+                await self._registry.update_stage_run(parent_stage_run)
+                await self._advance_after_stage(run, defn, stage, "complete")
+                return
 
-        parent_stage_run.completed_at = datetime.now(timezone.utc)
-        if any_failed:
-            parent_stage_run.status = StageRunStatus.FAILED
-            parent_stage_run.error_message = "One or more parallel branches failed"
+            # If all branches are done and none succeeded, fail
+            all_done = all(
+                s.status
+                in (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.SKIPPED)
+                for s in branches
+            )
+            if all_done:
+                parent_stage_run.status = StageRunStatus.FAILED
+                parent_stage_run.error_message = "All parallel branches failed (join: any)"
+                parent_stage_run.completed_at = datetime.now(timezone.utc)
+                await self._registry.update_stage_run(parent_stage_run)
+                if stage.on_any_reject:
+                    target = stage.on_any_reject.get("goto")
+                    if target:
+                        await self._transition_to(run, defn, target)
+                        return
+                await self._handle_stage_error(
+                    run, defn, stage, "All parallel branches failed (join: any)"
+                )
         else:
-            parent_stage_run.status = StageRunStatus.COMPLETED
+            # join: all — wait for every branch to finish
+            all_done = all(
+                s.status
+                in (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.SKIPPED)
+                for s in branches
+            )
+            if not all_done:
+                return
 
-        await self._registry.update_stage_run(parent_stage_run)
+            any_failed = any(s.status == StageRunStatus.FAILED for s in branches)
 
-        # Advance the pipeline
-        run = await self._registry.get_pipeline_run(completed_branch.run_id)
-        if not run or run.status != PipelineRunStatus.RUNNING:
-            return
+            parent_stage_run.completed_at = datetime.now(timezone.utc)
+            if any_failed:
+                parent_stage_run.status = StageRunStatus.FAILED
+                parent_stage_run.error_message = "One or more parallel branches failed"
+            else:
+                parent_stage_run.status = StageRunStatus.COMPLETED
 
-        try:
-            defn = PipelineDefinition.model_validate_json(run.definition_snapshot)
-        except Exception:
-            return
+            await self._registry.update_stage_run(parent_stage_run)
 
-        stage = defn.get_stage(completed_branch.parent_stage_id)
-        if stage:
             if any_failed and stage.on_any_reject:
                 target = stage.on_any_reject.get("goto")
                 if target:
@@ -1675,13 +1872,33 @@ class PipelineEngine:
             await self._advance_after_stage(run, defn, stage, "complete")
 
     async def _on_sub_pipeline_complete(self, child_run: PipelineRun) -> None:
-        """Handle completion of a sub-pipeline — advance the parent."""
+        """Handle completion of a sub-pipeline — advance the parent.
+
+        Propagates child pipeline outputs into the parent run context under
+        ``stages.<parent_stage_id>.outputs`` so subsequent stages can reference them.
+        Also handles failure / escalation propagation.
+        """
         if not child_run.parent_run_id or not child_run.parent_stage_id:
             return
 
         parent_run = await self._registry.get_pipeline_run(child_run.parent_run_id)
         if not parent_run or parent_run.status != PipelineRunStatus.RUNNING:
             return
+
+        # Propagate child outputs into parent context
+        if child_run.context:
+            stages_data = parent_run.context.setdefault("stages", {})
+            stage_data = stages_data.setdefault(child_run.parent_stage_id, {})
+            # Collect outputs from child's completed stage runs
+            child_stages = await self._registry.get_stage_runs_for_pipeline(child_run.run_id)
+            child_outputs: dict[str, Any] = {}
+            for cs in child_stages:
+                if cs.outputs:
+                    child_outputs[cs.stage_id] = cs.outputs
+            stage_data["outputs"] = child_outputs
+            stage_data["child_run_id"] = child_run.run_id
+            stage_data["child_status"] = child_run.status.value
+            await self._registry.update_pipeline_run(parent_run)
 
         # Update the parent's stage run
         latest = await self._registry.get_latest_stage_run(
@@ -1903,6 +2120,54 @@ class PipelineEngine:
 
     # ── Context Builders ─────────────────────────────────────────────────────
 
+    async def _track_pr_from_outputs(
+        self,
+        stage_run: StageRun,
+        outputs: dict[str, Any] | None,
+    ) -> None:
+        """Track PR association if agent outputs contain a pr_number.
+
+        For multi-PR pipelines, new PRs created by agents are added to the
+        ``pipeline_pr_associations`` table and the run's ``context["prs"]`` list
+        so subsequent stages can reference them.
+        """
+        if not outputs:
+            return
+        pr_number = outputs.get("pr_number")
+        if not pr_number:
+            return
+        try:
+            pr_number = int(pr_number)
+        except (TypeError, ValueError):
+            return
+
+        run = await self._registry.get_pipeline_run(stage_run.run_id)
+        if not run:
+            return
+
+        # Add association
+        await self._registry.add_pr_association(
+            run.run_id,
+            pr_number,
+            self._repo,
+            stage_id=stage_run.stage_id,
+            role="created",
+        )
+
+        # Update context prs list
+        prs: list[int] = run.context.get("prs", [])
+        if pr_number not in prs:
+            prs.append(pr_number)
+            run.context["prs"] = prs
+            await self._registry.update_pipeline_run(run)
+
+        logger.info(
+            "Tracked PR #%d from agent outputs (pipeline %s, stage '%s')",
+            pr_number,
+            run.run_id,
+            stage_run.stage_id,
+        )
+
     def _build_context(self, run: PipelineRun) -> PipelineContext:
         """Build a PipelineContext from a pipeline run for gate evaluation."""
         return PipelineContext(
@@ -1914,6 +2179,35 @@ class PipelineEngine:
             context=run.context,
             github_client=self._github_client,
         )
+
+    @staticmethod
+    def _resolve_pr_target(pr_value: int | str, run: PipelineRun) -> int | None:
+        """Resolve a gate condition's ``pr`` field to an actual PR number.
+
+        Supports:
+        - Integer PR numbers directly
+        - Simple context references like ``context.prs[0]``
+        """
+        if isinstance(pr_value, int):
+            return pr_value
+        # Try parsing as int string
+        try:
+            return int(pr_value)
+        except (ValueError, TypeError):
+            pass
+        # Simple context.prs[N] resolution
+        pr_str = str(pr_value).strip()
+        if pr_str.startswith("context.prs[") and pr_str.endswith("]"):
+            idx_str = pr_str[len("context.prs[") : -1]
+            try:
+                idx = int(idx_str)
+                prs = run.context.get("prs", [])
+                if 0 <= idx < len(prs):
+                    return int(prs[idx])
+            except (ValueError, IndexError):
+                pass
+        logger.warning("Cannot resolve PR target '%s' for pipeline %s", pr_value, run.run_id)
+        return None
 
     # ── Recovery ─────────────────────────────────────────────────────────────
 

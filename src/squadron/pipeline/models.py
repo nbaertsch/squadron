@@ -149,11 +149,21 @@ class GateConditionConfig(BaseModel):
     paths: list[str] | None = None
     count: int | None = None
     run: str | None = None  # Command to run (for "command" check)
+    pr: int | str | None = None  # Target PR for cross-PR gate checks
 
     def get_config(self) -> dict[str, Any]:
         """Return all non-None check-specific fields as a config dict."""
         result: dict[str, Any] = {}
-        for field_name in ("scope", "workflows", "expect", "label", "paths", "count", "run"):
+        for field_name in (
+            "scope",
+            "workflows",
+            "expect",
+            "label",
+            "paths",
+            "count",
+            "run",
+            "pr",
+        ):
             val = getattr(self, field_name)
             if val is not None:
                 result[field_name] = val
@@ -205,6 +215,9 @@ class ParallelBranch(BaseModel):
     type: StageType = StageType.AGENT
     condition: dict[str, Any] | None = None
     timeout: str | None = None
+    pipeline: str | None = None  # For type: pipeline branches
+    config: dict[str, Any] = {}  # For type: action branches
+    context: dict[str, Any] = {}  # Extra context for sub-pipeline branches
 
     @model_validator(mode="after")
     def validate_branch(self) -> ParallelBranch:

@@ -138,6 +138,15 @@ class PipelineRegistry:
         rows = await cursor.fetchall()
         return [_row_to_pipeline_run(r) for r in rows]
 
+    async def get_child_pipelines(self, parent_run_id: str) -> list[PipelineRun]:
+        """Get all child pipeline runs for a given parent run."""
+        cursor = await self._db.execute(
+            "SELECT * FROM pipeline_runs WHERE parent_run_id = ? ORDER BY created_at",
+            (parent_run_id,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_pipeline_run(r) for r in rows]
+
     async def get_running_pipelines_for_pr(self, pr_number: int) -> list[PipelineRun]:
         """Get running pipelines for a specific PR (including via PR associations)."""
         # Direct match

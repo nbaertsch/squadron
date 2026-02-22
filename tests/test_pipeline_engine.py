@@ -20,6 +20,7 @@ from squadron.pipeline.models import (
     HumanNotifyConfig,
     HumanStageConfig,
     HumanWaitType,
+    JoinStrategy,
     ParallelBranch,
     PipelineDefinition,
     PipelineRunStatus,
@@ -27,6 +28,7 @@ from squadron.pipeline.models import (
     ReactiveEventConfig,
     StageDefinition,
     StageRunStatus,
+    StageType,
     TriggerDefinition,
 )
 from squadron.pipeline.registry import PipelineRegistry
@@ -1925,3 +1927,762 @@ class TestHelperFunctions:
         actor, action = _extract_human_action("unknown.event", {})
         assert actor == ""
         assert action == ""
+
+
+# ── Phase 4: Sub-Pipeline, Multi-PR, Join Strategy Tests ────────────────────
+
+
+def make_sub_pipeline_pair() -> tuple[PipelineDefinition, PipelineDefinition]:
+    """Parent pipeline with a sub-pipeline stage, and the child definition."""
+    child = PipelineDefinition(
+        description="Child pipeline",
+        stages=[
+            StageDefinition(id="child-work", type="agent", agent="worker"),
+        ],
+    )
+    parent = PipelineDefinition(
+        description="Parent pipeline",
+        stages=[
+            StageDefinition(id="sub", type="pipeline", pipeline="child-pipeline"),
+            StageDefinition(id="post-sub", type="action", action="merge_pr"),
+        ],
+    )
+    return parent, child
+
+
+def make_join_any_pipeline() -> PipelineDefinition:
+    """Parallel pipeline with join: any strategy."""
+    return PipelineDefinition(
+        description="Join-any pipeline",
+        trigger=TriggerDefinition(event="pull_request.opened"),
+        stages=[
+            StageDefinition(
+                id="parallel-any",
+                type="parallel",
+                join=JoinStrategy.ANY,
+                branches=[
+                    ParallelBranch(id="fast", agent="fast-reviewer"),
+                    ParallelBranch(id="slow", agent="slow-reviewer"),
+                ],
+            ),
+            StageDefinition(id="done", type="action", action="merge_pr"),
+        ],
+    )
+
+
+def make_parallel_pipeline_branch(branch: ParallelBranch) -> PipelineDefinition:
+    """Parallel pipeline with a single custom branch plus an agent branch."""
+    return PipelineDefinition(
+        description="Mixed-type parallel pipeline",
+        trigger=TriggerDefinition(event="pull_request.opened"),
+        stages=[
+            StageDefinition(
+                id="mixed-parallel",
+                type="parallel",
+                branches=[
+                    branch,
+                    ParallelBranch(id="code", agent="code-reviewer"),
+                ],
+            ),
+            StageDefinition(id="done", type="action", action="merge_pr"),
+        ],
+    )
+
+
+class CrossPRGateCheck(GateCheck):
+    """Gate check that records the pr_number it was called with."""
+
+    reactive_events: set[str] = set()
+
+    def __init__(self) -> None:
+        self.evaluated_prs: list[int | None] = []
+
+    async def evaluate(self, config: dict[str, Any], context: PipelineContext) -> GateCheckResult:
+        self.evaluated_prs.append(context.pr_number)
+        return GateCheckResult(passed=True, message="ok")
+
+
+class TestCancelCascade:
+    """P4.1: cancel_pipeline cascades to child pipelines."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-agent"
+            self._spawned.append({"role": role, "agent_id": agent_id})
+            return agent_id
+
+        async def mock_action(action, config, context):
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_cancel_cascades_to_child(self, engine, registry):
+        parent_def, child_def = make_sub_pipeline_pair()
+        engine.add_pipeline("parent-pipeline", parent_def)
+        engine.add_pipeline("child-pipeline", child_def)
+
+        run = await engine.start_pipeline("parent-pipeline", pr_number=10)
+        assert run is not None
+
+        # Child pipeline should have been started
+        children = await registry.get_child_pipelines(run.run_id)
+        assert len(children) == 1
+        child_run = children[0]
+        assert child_run.status == PipelineRunStatus.RUNNING
+
+        # Cancel the parent
+        result = await engine.cancel_pipeline(run.run_id)
+        assert result is True
+
+        # Both parent and child should be cancelled
+        updated_parent = await registry.get_pipeline_run(run.run_id)
+        assert updated_parent is not None
+        assert updated_parent.status == PipelineRunStatus.CANCELLED
+
+        updated_child = await registry.get_pipeline_run(child_run.run_id)
+        assert updated_child is not None
+        assert updated_child.status == PipelineRunStatus.CANCELLED
+
+
+class TestChildOutputPropagation:
+    """P4.2: Child pipeline outputs propagate to parent context."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-agent"
+            self._spawned.append({"role": role, "agent_id": agent_id, "run_id": pipeline_run_id})
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_child_outputs_in_parent_context(self, engine, registry):
+        parent_def, child_def = make_sub_pipeline_pair()
+        engine.add_pipeline("parent-pipeline", parent_def)
+        engine.add_pipeline("child-pipeline", child_def)
+
+        run = await engine.start_pipeline("parent-pipeline", pr_number=10)
+        assert run is not None
+
+        # Find the child's agent and complete it with outputs
+        child_spawned = [s for s in self._spawned if s["role"] == "worker"]
+        assert len(child_spawned) == 1
+
+        await engine.on_agent_complete(
+            child_spawned[0]["agent_id"],
+            outputs={"result": "success", "artifact": "build-123"},
+        )
+
+        # Parent should have advanced past the sub stage
+        updated_parent = await registry.get_pipeline_run(run.run_id)
+        assert updated_parent is not None
+        # Check child outputs are in parent context
+        stages_data = updated_parent.context.get("stages", {})
+        assert "sub" in stages_data
+        sub_data = stages_data["sub"]
+        assert "outputs" in sub_data
+        assert "child_run_id" in sub_data
+
+        # Post-sub action should have executed
+        assert len(self._actions) == 1
+
+
+class TestFailEscalatePropagation:
+    """P4.3: _fail_pipeline and _escalate_pipeline notify parent."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-agent"
+            self._spawned.append({"role": role, "agent_id": agent_id})
+            return agent_id
+
+        async def mock_action(action, config, context):
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_child_failure_propagates_to_parent(self, engine, registry):
+        parent_def, child_def = make_sub_pipeline_pair()
+        engine.add_pipeline("parent-pipeline", parent_def)
+        engine.add_pipeline("child-pipeline", child_def)
+
+        run = await engine.start_pipeline("parent-pipeline", pr_number=10)
+        assert run is not None
+
+        # Complete the child agent with an error
+        child_spawned = [s for s in self._spawned if s["role"] == "worker"]
+        assert len(child_spawned) == 1
+        await engine.on_agent_error(child_spawned[0]["agent_id"], "task failed")
+
+        # Parent pipeline should have failed because child propagated failure
+        updated_parent = await registry.get_pipeline_run(run.run_id)
+        assert updated_parent is not None
+        assert updated_parent.status == PipelineRunStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_escalated_child_propagates_to_parent(self, engine, registry):
+        """An escalated child pipeline should propagate failure to parent."""
+        parent_def, child_def = make_sub_pipeline_pair()
+        engine.add_pipeline("parent-pipeline", parent_def)
+        engine.add_pipeline("child-pipeline", child_def)
+
+        run = await engine.start_pipeline("parent-pipeline", pr_number=10)
+        assert run is not None
+
+        # Get child run and escalate it directly
+        children = await registry.get_child_pipelines(run.run_id)
+        assert len(children) == 1
+        child_run = children[0]
+
+        # Escalate the child via engine's internal method
+        await engine._escalate_pipeline(child_run, "needs human intervention")
+
+        # Parent's sub stage should be failed, parent should have handled the error
+        parent_sub_stage = await registry.get_latest_stage_run(run.run_id, "sub")
+        assert parent_sub_stage is not None
+        assert parent_sub_stage.status == StageRunStatus.FAILED
+
+
+class TestPRAssociationTracking:
+    """P4.4: Engine tracks PR associations for multi-PR pipelines."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-agent"
+            self._spawned.append({"role": role, "agent_id": agent_id})
+            return agent_id
+
+        async def mock_action(action, config, context):
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_pr_associated_on_pipeline_start(self, engine, registry):
+        defn = make_simple_pipeline()
+        engine.add_pipeline("review-flow", defn)
+        run = await engine.start_pipeline("review-flow", pr_number=42)
+        assert run is not None
+
+        # PR association should have been created
+        assocs = await registry.get_pr_associations(run.run_id)
+        assert len(assocs) == 1
+        assert assocs[0]["pr_number"] == 42
+        assert assocs[0]["role"] == "primary"
+
+    @pytest.mark.asyncio
+    async def test_pr_tracked_from_agent_outputs(self, engine, registry):
+        defn = make_simple_pipeline()
+        engine.add_pipeline("review-flow", defn)
+        run = await engine.start_pipeline("review-flow", issue_number=10)
+        assert run is not None
+
+        # Agent completes and reports a PR number in outputs
+        agent_spawned = [s for s in self._spawned if s["role"] == "reviewer"]
+        assert len(agent_spawned) == 1
+        await engine.on_agent_complete(
+            agent_spawned[0]["agent_id"],
+            outputs={"pr_number": 55},
+        )
+
+        # Association should be created, and context.prs should include it
+        assocs = await registry.get_pr_associations(run.run_id)
+        pr_numbers = [a["pr_number"] for a in assocs]
+        assert 55 in pr_numbers
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert 55 in updated_run.context.get("prs", [])
+
+    @pytest.mark.asyncio
+    async def test_cross_pr_event_routing_via_association(self, engine, registry):
+        """Events for associated PRs should route to the pipeline."""
+        defn = PipelineDefinition(
+            description="Multi-PR pipeline",
+            stages=[
+                StageDefinition(id="work", type="agent", agent="worker"),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("multi-pr", defn)
+        run = await engine.start_pipeline("multi-pr", issue_number=10)
+        assert run is not None
+
+        # Manually add a PR association
+        await registry.add_pr_association(run.run_id, 77, "test-repo")
+
+        # Query running pipelines for PR 77
+        running = await registry.get_running_pipelines_for_pr(77)
+        assert any(r.run_id == run.run_id for r in running)
+
+
+class TestCrossPRGateTargeting:
+    """P4.5: Gate conditions with `pr` field target a specific PR."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        self._cross_pr_check = CrossPRGateCheck()
+        gate_registry._checks["cross_pr_check"] = self._cross_pr_check
+
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            return f"{role}-agent"
+
+        async def mock_action(action, config, context):
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_gate_with_pr_override(self, engine, registry):
+        """Gate condition with `pr: 99` should evaluate against PR 99, not the run's PR."""
+        defn = PipelineDefinition(
+            description="Cross-PR gate test",
+            stages=[
+                StageDefinition(
+                    id="cross-gate",
+                    type="gate",
+                    conditions=[
+                        GateConditionConfig(check="cross_pr_check", pr=99),
+                    ],
+                ),
+                StageDefinition(id="done", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("cross-pr", defn)
+        run = await engine.start_pipeline("cross-pr", pr_number=42)
+        assert run is not None
+
+        # The check should have been called with PR 99, not 42
+        assert self._cross_pr_check.evaluated_prs == [99]
+
+    @pytest.mark.asyncio
+    async def test_gate_without_pr_uses_run_pr(self, engine, registry):
+        """Gate condition without `pr` should use the pipeline run's pr_number."""
+        defn = PipelineDefinition(
+            description="Normal gate test",
+            stages=[
+                StageDefinition(
+                    id="normal-gate",
+                    type="gate",
+                    conditions=[
+                        GateConditionConfig(check="cross_pr_check"),
+                    ],
+                ),
+                StageDefinition(id="done", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("normal", defn)
+        run = await engine.start_pipeline("normal", pr_number=42)
+        assert run is not None
+
+        # The check should have been called with the run's PR (42)
+        assert self._cross_pr_check.evaluated_prs == [42]
+
+    @pytest.mark.asyncio
+    async def test_gate_pr_context_reference(self, engine, registry):
+        """Gate condition with `pr: 'context.prs[0]'` resolves from context."""
+        defn = PipelineDefinition(
+            description="Context PR gate test",
+            context={"prs": [77]},
+            stages=[
+                StageDefinition(
+                    id="ctx-gate",
+                    type="gate",
+                    conditions=[
+                        GateConditionConfig(check="cross_pr_check", pr="context.prs[0]"),
+                    ],
+                ),
+                StageDefinition(id="done", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("ctx-pr", defn)
+        run = await engine.start_pipeline("ctx-pr", pr_number=42)
+        assert run is not None
+
+        # Should have resolved context.prs[0] = 77
+        assert self._cross_pr_check.evaluated_prs == [77]
+
+
+class TestJoinStrategyAny:
+    """P4.6: JoinStrategy.ANY advances when any branch succeeds."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned.append({"role": role, "stage_id": stage_id, "agent_id": agent_id})
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_join_any_advances_on_first_success(self, engine, registry):
+        engine.add_pipeline("join-any", make_join_any_pipeline())
+        run = await engine.start_pipeline("join-any", pr_number=20)
+        assert run is not None
+        assert len(self._spawned) == 2
+
+        # Complete only the first branch
+        await engine.on_agent_complete(self._spawned[0]["agent_id"])
+
+        # Pipeline should have advanced past the parallel stage
+        parent_sr = await registry.get_latest_stage_run(run.run_id, "parallel-any")
+        assert parent_sr is not None
+        assert parent_sr.status == StageRunStatus.COMPLETED
+
+        # Final action should have fired
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_join_any_waits_if_first_fails(self, engine, registry):
+        engine.add_pipeline("join-any", make_join_any_pipeline())
+        run = await engine.start_pipeline("join-any", pr_number=20)
+        assert run is not None
+
+        # Fail the first branch
+        await engine.on_agent_error(self._spawned[0]["agent_id"], "branch failed")
+
+        # Pipeline should still be waiting (other branch still running)
+        parent_sr = await registry.get_latest_stage_run(run.run_id, "parallel-any")
+        assert parent_sr is not None
+        assert parent_sr.status == StageRunStatus.WAITING
+
+        # Complete the second branch successfully
+        await engine.on_agent_complete(self._spawned[1]["agent_id"])
+
+        # Now should advance
+        parent_sr = await registry.get_latest_stage_run(run.run_id, "parallel-any")
+        assert parent_sr is not None
+        assert parent_sr.status == StageRunStatus.COMPLETED
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_join_any_fails_if_all_fail(self, engine, registry):
+        engine.add_pipeline("join-any", make_join_any_pipeline())
+        run = await engine.start_pipeline("join-any", pr_number=20)
+        assert run is not None
+
+        # Fail both branches
+        await engine.on_agent_error(self._spawned[0]["agent_id"], "branch 1 failed")
+        await engine.on_agent_error(self._spawned[1]["agent_id"], "branch 2 failed")
+
+        # Pipeline should have failed
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.FAILED
+
+
+class TestParallelBranchTypes:
+    """P4.7: Parallel stages support pipeline and action branch types."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned.append({"role": role, "stage_id": stage_id, "agent_id": agent_id})
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action, "config": config})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_parallel_action_branch(self, engine, registry):
+        """An action branch in a parallel stage executes immediately."""
+        defn = make_parallel_pipeline_branch(
+            ParallelBranch(
+                id="lint",
+                type=StageType.ACTION,
+                action="run_lint",
+                config={"strict": True},
+            )
+        )
+        engine.add_pipeline("mixed", defn)
+        run = await engine.start_pipeline("mixed", pr_number=20)
+        assert run is not None
+
+        # Action branch should have already executed
+        lint_actions = [a for a in self._actions if a["action"] == "run_lint"]
+        assert len(lint_actions) == 1
+        assert lint_actions[0]["config"] == {"strict": True}
+
+        # Agent branch should also have been spawned
+        assert len(self._spawned) == 1
+        assert self._spawned[0]["role"] == "code-reviewer"
+
+    @pytest.mark.asyncio
+    async def test_parallel_pipeline_branch(self, engine, registry):
+        """A pipeline branch in a parallel stage starts a sub-pipeline."""
+        child_def = PipelineDefinition(
+            description="Sub workflow",
+            stages=[StageDefinition(id="sub-work", type="agent", agent="sub-worker")],
+        )
+        engine.add_pipeline("sub-workflow", child_def)
+
+        defn = make_parallel_pipeline_branch(
+            ParallelBranch(
+                id="sub",
+                type=StageType.PIPELINE,
+                pipeline="sub-workflow",
+            )
+        )
+        engine.add_pipeline("mixed", defn)
+        run = await engine.start_pipeline("mixed", pr_number=20)
+        assert run is not None
+
+        # Should have spawned the code-reviewer agent AND the sub-pipeline's agent
+        assert len(self._spawned) == 2
+        roles = {s["role"] for s in self._spawned}
+        assert "code-reviewer" in roles
+        assert "sub-worker" in roles
+
+        # Child pipeline should exist
+        children = await registry.get_child_pipelines(run.run_id)
+        assert len(children) == 1
+
+
+class TestResolvePRTarget:
+    """P4.5 helper: _resolve_pr_target resolves different PR reference formats."""
+
+    def test_integer_pr(self):
+        from squadron.pipeline.engine import PipelineEngine
+        from squadron.pipeline.models import PipelineRun
+
+        run = PipelineRun(
+            run_id="pl-test",
+            pipeline_name="test",
+            definition_snapshot="{}",
+            status=PipelineRunStatus.RUNNING,
+            context={},
+        )
+        assert PipelineEngine._resolve_pr_target(42, run) == 42
+
+    def test_string_integer_pr(self):
+        from squadron.pipeline.engine import PipelineEngine
+        from squadron.pipeline.models import PipelineRun
+
+        run = PipelineRun(
+            run_id="pl-test",
+            pipeline_name="test",
+            definition_snapshot="{}",
+            status=PipelineRunStatus.RUNNING,
+            context={},
+        )
+        assert PipelineEngine._resolve_pr_target("99", run) == 99
+
+    def test_context_prs_reference(self):
+        from squadron.pipeline.engine import PipelineEngine
+        from squadron.pipeline.models import PipelineRun
+
+        run = PipelineRun(
+            run_id="pl-test",
+            pipeline_name="test",
+            definition_snapshot="{}",
+            status=PipelineRunStatus.RUNNING,
+            context={"prs": [10, 20, 30]},
+        )
+        assert PipelineEngine._resolve_pr_target("context.prs[0]", run) == 10
+        assert PipelineEngine._resolve_pr_target("context.prs[2]", run) == 30
+
+    def test_invalid_reference_returns_none(self):
+        from squadron.pipeline.engine import PipelineEngine
+        from squadron.pipeline.models import PipelineRun
+
+        run = PipelineRun(
+            run_id="pl-test",
+            pipeline_name="test",
+            definition_snapshot="{}",
+            status=PipelineRunStatus.RUNNING,
+            context={},
+        )
+        assert PipelineEngine._resolve_pr_target("invalid.ref", run) is None
+
+    def test_out_of_bounds_reference(self):
+        from squadron.pipeline.engine import PipelineEngine
+        from squadron.pipeline.models import PipelineRun
+
+        run = PipelineRun(
+            run_id="pl-test",
+            pipeline_name="test",
+            definition_snapshot="{}",
+            status=PipelineRunStatus.RUNNING,
+            context={"prs": [10]},
+        )
+        assert PipelineEngine._resolve_pr_target("context.prs[5]", run) is None
+
+
+class TestGateConditionPRField:
+    """P4.5 model: GateConditionConfig includes `pr` in get_config()."""
+
+    def test_pr_field_in_get_config(self):
+        cond = GateConditionConfig(check="ci_status", pr=42)
+        config = cond.get_config()
+        assert config["pr"] == 42
+
+    def test_pr_field_string_in_get_config(self):
+        cond = GateConditionConfig(check="ci_status", pr="context.prs[0]")
+        config = cond.get_config()
+        assert config["pr"] == "context.prs[0]"
+
+    def test_pr_field_absent_when_none(self):
+        cond = GateConditionConfig(check="ci_status")
+        config = cond.get_config()
+        assert "pr" not in config
