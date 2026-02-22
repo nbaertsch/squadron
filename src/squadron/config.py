@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,38 @@ class SkillDefinition(BaseModel):
     path: str  # Relative to skills.base_path
     description: str = ""
 
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        """Reject absolute paths and parent-directory traversal components."""
+        from pathlib import PurePosixPath
+
+        p = PurePosixPath(v)
+        if p.is_absolute():
+            raise ValueError(f"Skill path must be relative, got absolute path: {v!r}")
+        if ".." in p.parts:
+            raise ValueError(f"Skill path must not contain '..': {v!r}")
+        return v
+
 
 class SkillsConfig(BaseModel):
     """Top-level skills configuration for project-level skill definitions."""
 
     base_path: str = ".squadron/skills"
     definitions: dict[str, SkillDefinition] = Field(default_factory=dict)
+
+    @field_validator("base_path")
+    @classmethod
+    def _validate_base_path(cls, v: str) -> str:
+        """Reject absolute paths and parent-directory traversal components."""
+        from pathlib import PurePosixPath
+
+        p = PurePosixPath(v)
+        if p.is_absolute():
+            raise ValueError(f"Skills base_path must be relative, got absolute path: {v!r}")
+        if ".." in p.parts:
+            raise ValueError(f"Skills base_path must not contain '..': {v!r}")
+        return v
 
 
 class ProjectConfig(BaseModel):

@@ -156,12 +156,12 @@ class TestResolveSkillDirectories:
         assert "missing-skill" in caplog.text
 
     def test_custom_base_path(self, tmp_path: Path):
-        # Custom base path
+        # Custom relative base path (relative to repo root)
         custom_base = tmp_path / "custom" / "skills"
         (custom_base / "my-skill").mkdir(parents=True)
 
         skills_config = SkillsConfig(
-            base_path=str(custom_base),
+            base_path="custom/skills",
             definitions={"my-skill": SkillDefinition(path="my-skill")},
         )
         config = _make_config(tmp_path, skills_config)
@@ -241,3 +241,39 @@ class TestSkillFrontmatterIntegration:
         result = stub._resolve_skill_directories(agent_def)
         assert len(result) == 1
         assert str(base / "squadron-internals") in result
+
+
+class TestSkillPathContainmentCheck:
+    """Runtime defense-in-depth: symlink escapes are caught by resolve() check."""
+
+    def test_symlink_escape_rejected(self, tmp_path: Path, caplog):
+        """A skill directory that is a symlink pointing outside repo root is skipped."""
+        import logging
+        import os
+
+        # Create an "outside" directory to simulate escape target
+        outside = tmp_path / "outside-repo"
+        outside.mkdir()
+
+        # Create repo root and skill base
+        repo_root = tmp_path / "repo"
+        skill_base = repo_root / ".squadron" / "skills"
+        skill_base.mkdir(parents=True)
+
+        # Create a symlink inside the skill base that points outside repo root
+        symlink_target = skill_base / "evil-skill"
+        os.symlink(str(outside), str(symlink_target))
+
+        skills_config = SkillsConfig(
+            base_path=".squadron/skills",
+            definitions={"evil-skill": SkillDefinition(path="evil-skill")},
+        )
+        config = _make_config(repo_root, skills_config)
+        stub = _make_agent_manager_stub(config, repo_root)
+        agent_def = _make_agent_def("feat-dev", ["evil-skill"])
+
+        with caplog.at_level(logging.WARNING):
+            result = stub._resolve_skill_directories(agent_def)
+
+        assert result == []
+        assert "outside repo root" in caplog.text

@@ -277,8 +277,48 @@ class TestSkillsConfig:
     def test_custom_base_path(self):
         from squadron.config import SkillsConfig
 
-        sc = SkillsConfig(base_path="/custom/skills/dir")
-        assert sc.base_path == "/custom/skills/dir"
+        sc = SkillsConfig(base_path="custom/skills/dir")
+        assert sc.base_path == "custom/skills/dir"
+
+    def test_absolute_base_path_rejected(self):
+        import pytest
+
+        from squadron.config import SkillsConfig
+
+        with pytest.raises(ValueError, match="must be relative"):
+            SkillsConfig(base_path="/custom/skills/dir")
+
+    def test_base_path_with_dotdot_rejected(self):
+        import pytest
+
+        from squadron.config import SkillsConfig
+
+        with pytest.raises(ValueError, match="must not contain"):
+            SkillsConfig(base_path="../escape/skills")
+
+
+class TestSkillDefinitionPathValidation:
+    def test_absolute_skill_path_rejected(self):
+        import pytest
+
+        from squadron.config import SkillDefinition
+
+        with pytest.raises(ValueError, match="must be relative"):
+            SkillDefinition(path="/etc/secrets")
+
+    def test_dotdot_skill_path_rejected(self):
+        import pytest
+
+        from squadron.config import SkillDefinition
+
+        with pytest.raises(ValueError, match="must not contain"):
+            SkillDefinition(path="../../../etc/passwd")
+
+    def test_relative_skill_path_accepted(self):
+        from squadron.config import SkillDefinition
+
+        skill = SkillDefinition(path="my-skill/subdir")
+        assert skill.path == "my-skill/subdir"
 
 
 class TestAgentDefinitionSkills:

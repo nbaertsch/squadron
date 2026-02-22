@@ -744,6 +744,10 @@ class AgentManager:
         is resolved relative to config.skills.base_path under the repo root.
         Missing skill definitions or directories are logged as warnings so
         agents still start even if skills are unavailable.
+
+        Defense-in-depth: after resolution, each path is checked to ensure it
+        remains within the repo root (guards against symlink escapes or
+        constructed paths that bypass the pydantic validators).
         """
 
         skills_config = self.config.skills
@@ -760,6 +764,15 @@ class AgentManager:
                 continue
             skill_path = base / skill_def.path
             if skill_path.is_dir():
+                resolved = skill_path.resolve()
+                repo_resolved = self.repo_root.resolve()
+                if not resolved.is_relative_to(repo_resolved):
+                    logger.warning(
+                        "Skill '%s' resolved to path outside repo root: %s — skipping",
+                        skill_name,
+                        resolved,
+                    )
+                    continue
                 dirs.append(str(skill_path))
             else:
                 logger.warning(
@@ -1289,7 +1302,9 @@ class AgentManager:
             names=custom_tool_names,
         )
 
-        # Resolve skill directories for this agent's assigned skills
+        # Resolve skill directories for this agent's assigned skills.
+        # `or None` converts an empty list to None so the SDK omits the
+        # skill_directories key entirely rather than passing an empty list.
         skill_directories = self._resolve_skill_directories(agent_def) or None
 
         session_config = build_session_config(
