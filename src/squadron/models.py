@@ -21,6 +21,7 @@ class AgentStatus(str, enum.Enum):
     COMPLETED = "completed"
     ESCALATED = "escalated"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # Agent roles are plain strings — defined in .squadron/config.yaml, not in code.
@@ -306,16 +307,18 @@ class ParsedCommand(BaseModel):
 # This set mirrors the agent roles defined in .squadron/config.yaml and is
 # used only by the backward-compatible ``parse_command`` shim below.
 # Prefer ``CommandParser`` with config-driven agent list for new code.
-_DEFAULT_KNOWN_AGENTS: frozenset[str] = frozenset({
-    "pm",
-    "bug-fix",
-    "feat-dev",
-    "docs-dev",
-    "infra-dev",
-    "security-review",
-    "test-coverage",
-    "pr-review",
-})
+_DEFAULT_KNOWN_AGENTS: frozenset[str] = frozenset(
+    {
+        "pm",
+        "bug-fix",
+        "feat-dev",
+        "docs-dev",
+        "infra-dev",
+        "security-review",
+        "test-coverage",
+        "pr-review",
+    }
+)
 
 # Built-in action commands that are dispatched to the framework (not to agents)
 _BUILT_IN_ACTIONS: frozenset[str] = frozenset({"status", "cancel", "retry"})
@@ -356,7 +359,11 @@ class CommandParser:
         # Derive the set of action names from both built-in defaults and config
         config_actions: set[str] = set()
         for cmd_name, cmd_def in self.commands.items():
-            cmd_type = getattr(cmd_def, "type", None) if not isinstance(cmd_def, dict) else cmd_def.get("type")
+            cmd_type = (
+                getattr(cmd_def, "type", None)
+                if not isinstance(cmd_def, dict)
+                else cmd_def.get("type")
+            )
             if cmd_type == "action":
                 config_actions.add(cmd_name)
         self.action_names: frozenset[str] = _BUILT_IN_ACTIONS | frozenset(config_actions)
@@ -402,7 +409,7 @@ class CommandParser:
 
         token = match.group(1).lower()
         rest = match.group(2).strip()
-        match_text = searchable[match.start():match.end()]
+        match_text = searchable[match.start() : match.end()]
         has_colon = ":" in match_text
 
         # Action commands: status, cancel <role>, retry <role>

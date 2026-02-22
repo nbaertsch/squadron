@@ -34,7 +34,6 @@ from squadron.models import (
     ParsedCommand,
     SquadronEvent,
     SquadronEventType,
-    parse_command,
 )
 
 if TYPE_CHECKING:

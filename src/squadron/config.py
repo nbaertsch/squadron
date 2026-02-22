@@ -449,6 +449,14 @@ class SquadronConfig(BaseModel):
     """Bot mention prefix used to trigger commands (e.g. ``@squadron-dev help``).
     Must start with ``@``. Defaults to ``@squadron-dev``.
     """
+
+    @field_validator("command_prefix")
+    @classmethod
+    def _validate_command_prefix(cls, v: str) -> str:
+        if not v.startswith("@"):
+            raise ValueError(f"command_prefix must start with '@', got: {v!r}")
+        return v
+
     commands: dict[str, "CommandDefinition"] = Field(default_factory=dict)
 
     # Skills configuration — project-level skill definitions

@@ -154,6 +154,10 @@ agent_roles:
       event: pull_request.opened
     - action: wake
       event: pull_request.synchronize
+    - action: spawn
+      condition:
+        approval_flow: true
+      event: pull_request.synchronize
     - action: complete
       event: pull_request.closed
   test-coverage:

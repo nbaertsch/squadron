@@ -13,16 +13,15 @@ Covers:
 - inject_message action (via ParsedCommand action_name)
 - ParsedCommand.is_action property
 """
+
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
 
 from squadron.config import CommandDefinition, CommandPermissions, SquadronConfig
 from squadron.models import (
     CommandParser,
     ParsedCommand,
-    _BUILT_IN_ACTIONS,
     _DEFAULT_KNOWN_AGENTS,
     parse_command,
 )
@@ -54,12 +53,10 @@ def parser_with_commands() -> CommandParser:
     commands = {
         "status": CommandDefinition(type="action", description="Show status"),
         "cancel": CommandDefinition(
-            type="action", args=["role"],
-            permissions=CommandPermissions(require_human=True)
+            type="action", args=["role"], permissions=CommandPermissions(require_human=True)
         ),
         "retry": CommandDefinition(
-            type="action", args=["role"],
-            permissions=CommandPermissions(require_human=True)
+            type="action", args=["role"], permissions=CommandPermissions(require_human=True)
         ),
     }
     return CommandParser(
@@ -100,12 +97,14 @@ class TestCommandParserConstruction:
 
     def test_action_names_include_config_actions(self):
         from squadron.config import CommandDefinition
+
         cmds = {"custom-action": CommandDefinition(type="action")}
         parser = CommandParser(commands=cmds)
         assert "custom-action" in parser.action_names
 
     def test_agent_commands_not_in_action_names(self):
         from squadron.config import CommandDefinition
+
         cmds = {"pm": CommandDefinition(type="agent")}
         parser = CommandParser(commands=cmds)
         assert "pm" not in parser.action_names
@@ -434,8 +433,16 @@ class TestBackwardCompatibility:
 
     def test_parse_command_default_agents_still_work(self):
         """The hardcoded default agents should all still parse without colon."""
-        default_agents = ["pm", "bug-fix", "feat-dev", "docs-dev",
-                          "infra-dev", "security-review", "test-coverage", "pr-review"]
+        default_agents = [
+            "pm",
+            "bug-fix",
+            "feat-dev",
+            "docs-dev",
+            "infra-dev",
+            "security-review",
+            "test-coverage",
+            "pr-review",
+        ]
         for agent in default_agents:
             result = parse_command(f"@squadron-dev {agent} do work")
             assert result is not None, f"Expected {agent} to parse"
@@ -524,10 +531,7 @@ class TestCommandDefinitionMigration:
         assert cmd.permissions.require_human is False
 
     def test_permissions_require_human(self):
-        cmd = CommandDefinition(
-            type="action",
-            permissions=CommandPermissions(require_human=True)
-        )
+        cmd = CommandDefinition(type="action", permissions=CommandPermissions(require_human=True))
         assert cmd.permissions.require_human is True
 
     def test_args_field(self):
@@ -613,10 +617,11 @@ class TestInjectMessageAction:
 
     def test_inject_message_parsed_as_action(self):
         """inject_message is a built-in action and should parse correctly."""
-        from squadron.models import _BUILT_IN_ACTIONS
+
         # inject_message may not be in default built-ins (it's a framework-internal action)
         # but if configured, it should parse
         from squadron.config import CommandDefinition
+
         cmds = {"inject_message": CommandDefinition(type="action", args=["agent", "message"])}
         parser = CommandParser(known_agents={"pm"}, commands=cmds)
         result = parser.parse("@squadron-dev inject_message pm hello")
@@ -632,18 +637,11 @@ class TestInjectMessageAction:
 
     def test_inject_message_not_parsed_without_config(self, default_parser):
         """inject_message should NOT parse unless configured (not a default built-in)."""
-        # This validates that inject_message isn't accidentally exposed
+        # This validates that inject_message isn't accidentally exposed.
+        # inject_message is NOT in known_agents, has no colon, and is NOT a built-in
+        # action, so the parser should return None.
         result = default_parser.parse("@squadron-dev inject_message pm hello")
-        # It would match as an agent command with colon-less syntax, but only if
-        # inject_message is in known_agents or is a built-in action
-        # Since it's neither by default, it should return None
-        # (inject_message contains underscore which IS part of \w so it matches the regex)
-        # The critical check: it's NOT in known_agents, has no colon, and is NOT a built-in
-        # So it should return None
-        assert result is None or result.agent_name == "inject_message"
-        # If returned, it should NOT be an action
-        if result is not None:
-            assert result.is_action is False
+        assert result is None
 
 
 # ── Edge Cases ────────────────────────────────────────────────────────────────
@@ -652,9 +650,7 @@ class TestInjectMessageAction:
 class TestEdgeCases:
     def test_multiple_mentions_first_wins(self, default_parser):
         """First valid command in comment should be parsed."""
-        result = default_parser.parse(
-            "@squadron-dev pm: first\n@squadron-dev feat-dev: second"
-        )
+        result = default_parser.parse("@squadron-dev pm: first\n@squadron-dev feat-dev: second")
         assert result is not None
         assert result.agent_name == "pm"
 

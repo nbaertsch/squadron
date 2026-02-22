@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2576,8 +2577,6 @@ class AgentManager:
         then extracts role from the emoji + display_name signature format.
         Returns ``None`` for human senders.
         """
-        import re as _re
-
         payload = event.data.get("payload", {})
         comment_data = payload.get("comment", {})
         sender = comment_data.get("user", {})
@@ -2599,8 +2598,8 @@ class AgentManager:
             display_name = agent_def.display_name or role_name
             emoji = agent_def.emoji
             # Match pattern like "🎯 **Project Manager**" or just "**Project Manager**"
-            pattern = rf"^{_re.escape(emoji)}?\s*\*\*{_re.escape(display_name)}\*\*"
-            if _re.match(pattern, body, _re.IGNORECASE):
+            pattern = rf"^{re.escape(emoji)}?\s*\*\*{re.escape(display_name)}\*\*"
+            if re.match(pattern, body, re.IGNORECASE):
                 return role_name
 
         return None
@@ -2699,7 +2698,6 @@ class AgentManager:
             return "enabled (API key required)"
         return "disabled (public access)"
 
-
     async def _handle_action_command(self, event: SquadronEvent) -> None:
         """Dispatch built-in action commands (status, cancel, retry).
 
@@ -2715,27 +2713,39 @@ class AgentManager:
 
         action_name = command.action_name
         if action_name is None:  # guaranteed by is_action property, but checked defensively
-            raise ValueError("_handle_action_command: action_name is None despite is_action being True")
+            raise ValueError(
+                "_handle_action_command: action_name is None despite is_action being True"
+            )
 
-        # Check require_human permission from command config (if defined)
+        # Built-in actions that default to require_human when no config override
+        _BUILTIN_REQUIRE_HUMAN: dict[str, bool] = {
+            "cancel": True,
+            "retry": True,
+            "status": False,
+        }
+
+        # Check require_human: config override wins, then built-in defaults
         cmd_def = self.config.commands.get(action_name)
         if cmd_def is not None:
             require_human = cmd_def.permissions.require_human
-            if require_human:
-                sender_role = self._get_sender_agent_role(event)
-                if sender_role is not None:
-                    logger.info(
-                        "Action %r requires human sender — rejecting (sender_role=%s)",
-                        action_name,
-                        sender_role,
-                    )
-                    await self.github.comment_on_issue(
-                        self.config.project.owner,
-                        self.config.project.repo,
-                        event.issue_number,
-                        f"❌ **Permission denied:** `{action_name}` requires a human sender.",
-                    )
-                    return
+        else:
+            require_human = _BUILTIN_REQUIRE_HUMAN.get(action_name, False)
+
+        if require_human:
+            sender_role = self._get_sender_agent_role(event)
+            if sender_role is not None:
+                logger.info(
+                    "Action %r requires human sender — rejecting (sender_role=%s)",
+                    action_name,
+                    sender_role,
+                )
+                await self.github.comment_on_issue(
+                    self.config.project.owner,
+                    self.config.project.repo,
+                    event.issue_number,
+                    f"❌ **Permission denied:** `{action_name}` requires a human sender.",
+                )
+                return
 
         logger.info(
             "Action command %r (args=%s) on issue #%d",
@@ -2829,14 +2839,23 @@ class AgentManager:
         all_agents = await self.registry.list_agents()
         non_terminal = {AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING}
         candidates = [
-            a for a in all_agents
-            if a.role == role and a.status in non_terminal
-            and a.issue_number == event.issue_number
+            a
+            for a in all_agents
+            if a.role == role and a.status in non_terminal and a.issue_number == event.issue_number
         ]
 
         if not candidates:
             # Try any active agent with this role (not scoped to issue)
             candidates = [a for a in all_agents if a.role == role and a.status in non_terminal]
+            if candidates:
+                other_issues = {a.issue_number for a in candidates if a.issue_number}
+                await self.github.comment_on_issue(
+                    self.config.project.owner,
+                    self.config.project.repo,
+                    event.issue_number,
+                    f"⚠️ No `{role}` agent on issue #{event.issue_number}; "
+                    f"cancelling agent(s) assigned to: {other_issues}",
+                )
 
         if not candidates:
             await self.github.comment_on_issue(
@@ -2853,7 +2872,7 @@ class AgentManager:
             agent_task = self._agent_tasks.get(agent.agent_id)
             if agent_task and not agent_task.done():
                 agent_task.cancel()
-            agent.status = AgentStatus.FAILED
+            agent.status = AgentStatus.CANCELLED
             await self.registry.update_agent(agent)
             self._cancel_watchdog(agent.agent_id)
             cancelled.append(agent.agent_id)
