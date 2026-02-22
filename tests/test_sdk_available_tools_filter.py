@@ -1,21 +1,20 @@
-"""Regression tests for SDK tool filtering.
+"""Tests for SDK tool filtering via available_tools (allowlist).
 
-Issue #118: SDK available_tools must only contain SDK built-in tool names,
-not custom Squadron tool names.  The SDK validates available_tools against
-known builtins and rejects unknown entries, blocking all built-in tools.
+The frontmatter `tools:` list in each agent's .md file is the single source
+of truth for which tools that agent may use.  The full list (both custom
+Squadron tool names AND SDK built-in names) is passed as `available_tools`
+to the SDK, which forwards it as `availableTools` in session.create.
 
-Issue #118 regression (review-agent stall): Using available_tools as a
-whitelist hides custom Squadron tools from the model entirely.  The fix
-switches to excluded_tools (deny-list) so custom tools registered via
-tools= remain visible to the model while unwanted SDK builtins are blocked.
+Custom tools are also registered via `tools=` (their definitions) so the
+CLI knows how to dispatch them.
 
-Fix: Compute sdk_excluded_tools = SDK_BUILTIN_TOOLS - frontmatter_sdk_builtins,
-pass as excluded_tools instead of available_tools.
+This is an allowlist approach: only tools named in frontmatter are visible
+to the model.
 """
 
 from __future__ import annotations
 
-from squadron.tools.squadron_tools import ALL_TOOL_NAMES_SET, SDK_BUILTIN_TOOLS
+from squadron.tools.squadron_tools import ALL_TOOL_NAMES_SET
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -26,18 +25,15 @@ def _split_tools(
 ) -> tuple[list[str], list[str] | None]:
     """Replicate the tool-splitting logic from agent_manager._run_agent.
 
-    Returns (custom_tool_names, sdk_excluded_tools).
+    Returns (custom_tool_names, sdk_available_tools).
 
     The logic:
       1. custom_tool_names = names in ALL_TOOL_NAMES_SET → passed as tools=
-      2. frontmatter_sdk_builtins = names NOT in ALL_TOOL_NAMES_SET
-      3. sdk_excluded_tools = SDK_BUILTIN_TOOLS - frontmatter_sdk_builtins
-         (i.e. block SDK builtins the agent shouldn't have)
+      2. sdk_available_tools = full frontmatter list → passed as available_tools=
     """
     custom_tool_names = [t for t in frontmatter_tools if t in ALL_TOOL_NAMES_SET]
-    frontmatter_sdk_builtins = {t for t in frontmatter_tools if t not in ALL_TOOL_NAMES_SET}
-    sdk_excluded_tools = sorted(SDK_BUILTIN_TOOLS - frontmatter_sdk_builtins) or None
-    return custom_tool_names, sdk_excluded_tools
+    sdk_available_tools = list(frontmatter_tools) if frontmatter_tools else None
+    return custom_tool_names, sdk_available_tools
 
 
 # ── Test Data ─────────────────────────────────────────────────────────────────
@@ -91,10 +87,10 @@ PR_REVIEW_FRONTMATTER_TOOLS = [
     "report_complete",
 ]
 
-# The SDK built-in tools that should appear in available_tools
-EXPECTED_SDK_BUILTIN_TOOLS = ["read_file", "write_file", "grep", "bash", "git"]
+# Known SDK built-in tool names (for test assertions only)
+SDK_BUILTIN_NAMES = {"read_file", "write_file", "grep", "bash", "git"}
 
-# Custom Squadron tool names that must NOT appear in available_tools
+# Custom Squadron tool names that must appear in custom_tool_names
 CUSTOM_TOOL_NAMES = [
     "git_push",
     "read_issue",
@@ -116,7 +112,7 @@ CUSTOM_TOOL_NAMES = [
 ]
 
 
-# ── Issue #118 Core Tests (tool name classification) ─────────────────────────
+# ── Tool Name Classification Tests ──────────────────────────────────────────
 
 
 class TestToolNameClassification:
@@ -127,20 +123,16 @@ class TestToolNameClassification:
         for name in CUSTOM_TOOL_NAMES:
             assert name in ALL_TOOL_NAMES_SET, (
                 f"Tool '{name}' should be in ALL_TOOL_NAMES_SET so it gets routed "
-                f"to custom_tool_names. (Regression: issue #118)"
+                f"to custom_tool_names."
             )
 
     def test_sdk_builtin_tools_not_in_all_tool_names_set(self):
         """SDK built-in tools must NOT be in ALL_TOOL_NAMES_SET."""
-        for name in EXPECTED_SDK_BUILTIN_TOOLS:
+        for name in SDK_BUILTIN_NAMES:
             assert name not in ALL_TOOL_NAMES_SET, (
                 f"SDK built-in tool '{name}' must NOT be in ALL_TOOL_NAMES_SET. "
-                f"If it is, it would be treated as a custom tool. (Regression: issue #118)"
+                f"If it is, it would be treated as a custom tool."
             )
-
-    def test_sdk_builtin_tools_constant_matches_expected(self):
-        """SDK_BUILTIN_TOOLS constant must match expected set."""
-        assert SDK_BUILTIN_TOOLS == frozenset(EXPECTED_SDK_BUILTIN_TOOLS)
 
     def test_custom_tools_go_to_custom_tool_names(self):
         """Custom Squadron tools must appear in custom_tool_names."""
@@ -148,73 +140,74 @@ class TestToolNameClassification:
         for custom_name in CUSTOM_TOOL_NAMES:
             assert custom_name in custom_tool_names, (
                 f"Custom Squadron tool '{custom_name}' should be in custom_tool_names "
-                f"(passed via tools=). (Regression: issue #118)"
+                f"(passed via tools=)."
             )
 
 
-# ── Excluded Tools Tests (deny-list approach) ────────────────────────────────
+# ── Available Tools (Allowlist) Tests ────────────────────────────────────────
 
 
-class TestExcludedToolsLogic:
-    """Tests for the excluded_tools deny-list approach.
+class TestAvailableToolsAllowlist:
+    """Tests for the available_tools allowlist approach.
 
-    When an agent's frontmatter lists a subset of SDK builtins, the
-    complement (SDK builtins NOT in frontmatter) should be passed as
-    excluded_tools.  This blocks unwanted SDK builtins without hiding
-    custom tools from the model.
+    The frontmatter `tools:` list is passed in its entirety as
+    available_tools to the SDK.  This is the single source of truth.
     """
 
-    def test_all_sdk_builtins_listed_means_no_exclusions(self):
-        """When all 5 SDK builtins are in frontmatter, excluded_tools is None."""
-        _, sdk_excluded = _split_tools(BUG_FIX_FRONTMATTER_TOOLS)
-        assert sdk_excluded is None, (
-            "When all SDK builtins are in frontmatter, excluded_tools should be "
-            "None (no exclusions needed)."
+    def test_available_tools_equals_frontmatter(self):
+        """available_tools must be the full frontmatter list."""
+        _, available = _split_tools(BUG_FIX_FRONTMATTER_TOOLS)
+        assert available == BUG_FIX_FRONTMATTER_TOOLS, (
+            "available_tools must be the full frontmatter tools list."
         )
 
-    def test_partial_sdk_builtins_excludes_complement(self):
-        """When only read_file + grep are listed, bash/git/write_file are excluded."""
-        _, sdk_excluded = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
-        assert sdk_excluded is not None
-        assert set(sdk_excluded) == {"bash", "git", "write_file"}, (
-            f"pr-review lists only read_file + grep, so bash/git/write_file "
-            f"should be excluded. Got: {sdk_excluded}"
-        )
+    def test_pr_review_available_tools_equals_frontmatter(self):
+        """pr-review available_tools must be its full frontmatter list."""
+        _, available = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
+        assert available == PR_REVIEW_FRONTMATTER_TOOLS
 
-    def test_no_sdk_builtins_excludes_all(self):
-        """When only custom tools listed, all SDK builtins are excluded."""
-        only_custom = ["read_issue", "comment_on_pr", "check_for_events"]
-        _, sdk_excluded = _split_tools(only_custom)
-        assert sdk_excluded is not None
-        assert set(sdk_excluded) == SDK_BUILTIN_TOOLS, (
-            "When no SDK builtins in frontmatter, all should be excluded."
-        )
+    def test_available_tools_includes_custom_names(self):
+        """available_tools must include custom tool names (not filter them out)."""
+        _, available = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
+        assert available is not None
+        available_set = set(available)
+        for name in ["submit_pr_review", "report_complete", "list_pr_files"]:
+            assert name in available_set, (
+                f"Custom tool '{name}' must be in available_tools so the CLI "
+                f"includes it in the model's tool list."
+            )
 
-    def test_single_sdk_builtin_excludes_rest(self):
-        """When only 'bash' is listed, the other 4 SDK builtins are excluded."""
-        tools = ["bash", "report_complete"]
-        _, sdk_excluded = _split_tools(tools)
-        assert sdk_excluded is not None
-        assert set(sdk_excluded) == {"read_file", "write_file", "grep", "git"}
+    def test_available_tools_includes_sdk_builtins(self):
+        """available_tools must include SDK builtin names from frontmatter."""
+        _, available = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
+        assert available is not None
+        available_set = set(available)
+        assert "read_file" in available_set
+        assert "grep" in available_set
 
-    def test_excluded_tools_are_sorted(self):
-        """Excluded tools list should be deterministically sorted."""
-        _, sdk_excluded = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
-        assert sdk_excluded is not None
-        assert sdk_excluded == sorted(sdk_excluded), (
-            "excluded_tools should be sorted for deterministic config."
-        )
+    def test_available_tools_excludes_unlisted_builtins(self):
+        """SDK builtins NOT in frontmatter must NOT be in available_tools."""
+        _, available = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
+        assert available is not None
+        available_set = set(available)
+        # pr-review only lists read_file and grep — no bash/git/write_file
+        assert "bash" not in available_set
+        assert "git" not in available_set
+        assert "write_file" not in available_set
 
-    def test_none_tools_means_no_exclusions(self):
-        """When agent_def.tools is None, no exclusions (all visible)."""
-        # Simulates the None branch in agent_manager
+    def test_none_tools_means_no_filtering(self):
+        """When agent_def.tools is None, available_tools is None (all visible)."""
         agent_tools: list[str] | None = None
         if agent_tools is not None:
-            frontmatter_sdk = {t for t in agent_tools if t not in ALL_TOOL_NAMES_SET}
-            sdk_excluded = sorted(SDK_BUILTIN_TOOLS - frontmatter_sdk) or None
+            sdk_available = list(agent_tools) if agent_tools else None
         else:
-            sdk_excluded = None
-        assert sdk_excluded is None
+            sdk_available = None
+        assert sdk_available is None
+
+    def test_empty_tools_gives_none(self):
+        """Empty frontmatter tools list → available_tools is None."""
+        _, available = _split_tools([])
+        assert available is None, "Empty frontmatter should produce None (no filtering)."
 
 
 # ── Review Agent Stall Regression Tests ──────────────────────────────────────
@@ -223,23 +216,23 @@ class TestExcludedToolsLogic:
 class TestReviewAgentStallRegression:
     """Regression tests for the review agent stall bug.
 
-    Root cause: available_tools=["read_file","grep"] acted as a global
-    whitelist that hid all 15 custom Squadron tools from the model.
-    The model could only use grep and read_file, could not call
+    Root cause: the old available_tools=["read_file","grep"] (SDK builtins only)
+    acted as a global whitelist that hid all 15 custom Squadron tools from the
+    model.  The model could only use grep and read_file, could not call
     submit_pr_review or report_complete, and stalled as a zombie.
 
-    Fix: Use excluded_tools instead of available_tools so custom tools
-    registered via tools= remain visible.
+    Fix: Pass the FULL frontmatter list (including custom tool names) as
+    available_tools.  The CLI sees custom tools both in the tool definitions
+    (registered via tools=) and in availableTools, so they remain visible.
     """
 
-    def test_pr_review_custom_tools_not_hidden(self):
-        """pr-review agent's custom tools must not be blocked by SDK tool filtering.
+    def test_pr_review_custom_tools_in_available_tools(self):
+        """pr-review's custom tools must be in available_tools.
 
-        This is the PRIMARY regression test.  The old available_tools=["read_file","grep"]
-        approach hid all 15 custom tools.  The new excluded_tools approach must NOT
-        interfere with custom tools.
+        This is the PRIMARY regression test.  The old code filtered custom
+        names out of available_tools — the new code includes them.
         """
-        custom_tools, sdk_excluded = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
+        custom_tools, available = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
 
         # All 15 custom tools must be in custom_tool_names (registered via tools=)
         expected_custom = {
@@ -264,73 +257,59 @@ class TestReviewAgentStallRegression:
             f"Missing: {expected_custom - set(custom_tools)}"
         )
 
-        # Critical: excluded_tools must NOT contain any custom tool names
-        if sdk_excluded:
-            for tool in sdk_excluded:
-                assert tool not in ALL_TOOL_NAMES_SET, (
-                    f"excluded_tools contains custom tool '{tool}' — this would "
-                    f"break custom tools. excluded_tools must only contain SDK builtins."
-                )
+        # Critical: available_tools must also include custom tool names
+        assert available is not None
+        available_set = set(available)
+        for name in expected_custom:
+            assert name in available_set, (
+                f"Custom tool '{name}' must be in available_tools so the model "
+                f"can see it. (Regression: review agent stall)"
+            )
 
     def test_pr_review_gets_grep_and_read_file(self):
-        """pr-review must have grep and read_file available (not excluded)."""
-        _, sdk_excluded = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
-        excluded_set = set(sdk_excluded) if sdk_excluded else set()
-
-        assert "grep" not in excluded_set, "grep must be available to pr-review"
-        assert "read_file" not in excluded_set, "read_file must be available to pr-review"
+        """pr-review must have grep and read_file in available_tools."""
+        _, available = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
+        assert available is not None
+        available_set = set(available)
+        assert "grep" in available_set, "grep must be available to pr-review"
+        assert "read_file" in available_set, "read_file must be available to pr-review"
 
     def test_pr_review_no_bash_git_write(self):
         """pr-review must NOT have bash, git, or write_file (security constraint)."""
-        _, sdk_excluded = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
-        excluded_set = set(sdk_excluded) if sdk_excluded else set()
+        _, available = _split_tools(PR_REVIEW_FRONTMATTER_TOOLS)
+        assert available is not None
+        available_set = set(available)
+        assert "bash" not in available_set, "bash should not be available for pr-review"
+        assert "git" not in available_set, "git should not be available for pr-review"
+        assert "write_file" not in available_set, "write_file should not be available for pr-review"
 
-        assert "bash" in excluded_set, "bash should be excluded for pr-review"
-        assert "git" in excluded_set, "git should be excluded for pr-review"
-        assert "write_file" in excluded_set, "write_file should be excluded for pr-review"
-
-    def test_available_tools_not_used_in_agent_manager(self):
-        """agent_manager must NOT pass available_tools — it must use excluded_tools.
-
-        available_tools acts as a global whitelist that hides custom tools.
-        """
+    def test_available_tools_used_in_agent_manager(self):
+        """agent_manager must pass available_tools=sdk_available_tools."""
         import re
 
         with open("src/squadron/agent_manager.py") as f:
             source = f.read()
 
-        # Must NOT have available_tools=sdk_available_tools or similar
-        buggy_pattern = re.compile(r"available_tools\s*=\s*sdk_available_tools")
-        matches = buggy_pattern.findall(source)
-        assert not matches, (
-            "agent_manager.py still passes available_tools=sdk_available_tools. "
-            "This hides custom tools from the model. Use excluded_tools instead. "
-            "(Regression: review agent stall)"
-        )
-
-    def test_excluded_tools_used_in_agent_manager(self):
-        """agent_manager must pass excluded_tools=sdk_excluded_tools."""
-        import re
-
-        with open("src/squadron/agent_manager.py") as f:
-            source = f.read()
-
-        pattern = re.compile(r"excluded_tools\s*=\s*sdk_excluded_tools")
+        pattern = re.compile(r"available_tools\s*=\s*sdk_available_tools")
         matches = pattern.findall(source)
         assert len(matches) >= 1, (
-            "agent_manager.py must pass excluded_tools=sdk_excluded_tools to "
-            "build_session_config and/or build_resume_config. "
-            "(Regression: review agent stall)"
+            "agent_manager.py must pass available_tools=sdk_available_tools to "
+            "build_session_config and/or build_resume_config."
         )
 
-    def test_sdk_builtin_tools_constant_imported(self):
-        """agent_manager must import SDK_BUILTIN_TOOLS for deny-list computation."""
+    def test_excluded_tools_not_used_in_agent_manager(self):
+        """agent_manager must NOT pass excluded_tools (no deny-list pattern)."""
+        import re
+
         with open("src/squadron/agent_manager.py") as f:
             source = f.read()
 
-        assert "SDK_BUILTIN_TOOLS" in source, (
-            "agent_manager.py must import SDK_BUILTIN_TOOLS from squadron_tools "
-            "to compute the excluded_tools deny-list."
+        # Must NOT have excluded_tools=sdk_excluded_tools
+        buggy_pattern = re.compile(r"excluded_tools\s*=\s*sdk_excluded_tools")
+        matches = buggy_pattern.findall(source)
+        assert not matches, (
+            "agent_manager.py still passes excluded_tools=sdk_excluded_tools. "
+            "This is the deny-list approach — we must use available_tools instead."
         )
 
 
@@ -340,33 +319,78 @@ class TestReviewAgentStallRegression:
 class TestToolSplitUnit:
     """Unit test the tool-split logic in isolation."""
 
-    def test_empty_frontmatter_excludes_all_builtins(self):
-        """Empty frontmatter tools list → all SDK builtins excluded."""
-        _, sdk_excluded = _split_tools([])
-        assert sdk_excluded is not None
-        assert set(sdk_excluded) == SDK_BUILTIN_TOOLS
+    def test_empty_frontmatter_gives_none_available(self):
+        """Empty frontmatter tools list → available_tools is None."""
+        _, available = _split_tools([])
+        assert available is None
 
-    def test_unknown_tool_name_not_treated_as_custom(self):
-        """An unknown tool name (neither custom nor known SDK builtin) is treated
-        as an SDK builtin, so it goes to frontmatter_sdk_builtins and is NOT
-        excluded."""
+    def test_unknown_tool_name_included_in_available(self):
+        """An unknown tool name (neither custom nor known SDK builtin) should
+        still appear in available_tools — we pass through the full list."""
         tools = ["read_file", "some_future_sdk_tool", "report_complete"]
-        custom, sdk_excluded = _split_tools(tools)
+        custom, available = _split_tools(tools)
 
-        # "some_future_sdk_tool" is not in ALL_TOOL_NAMES_SET, so it's treated
-        # as an SDK builtin. It should not appear in custom_tool_names.
+        # "some_future_sdk_tool" is not in ALL_TOOL_NAMES_SET, so NOT custom
         assert "some_future_sdk_tool" not in custom
-        # It also should not appear in sdk_excluded (it's in frontmatter)
-        excluded_set = set(sdk_excluded) if sdk_excluded else set()
-        assert "some_future_sdk_tool" not in excluded_set
+        # But it IS in available_tools (full frontmatter list)
+        assert available is not None
+        assert "some_future_sdk_tool" in available
 
     def test_mixed_tools_split_correctly(self):
-        """Mixed tools list splits correctly into custom and excluded."""
+        """Mixed tools list splits correctly into custom and available."""
         agent_tools = ["bash", "read_file", "check_for_events", "report_complete", "grep"]
-        custom, sdk_excluded = _split_tools(agent_tools)
+        custom, available = _split_tools(agent_tools)
 
         assert set(custom) == {"check_for_events", "report_complete"}
-        # bash, read_file, grep are in frontmatter → not excluded
-        # write_file, git are NOT in frontmatter → excluded
-        assert sdk_excluded is not None
-        assert set(sdk_excluded) == {"write_file", "git"}
+        # available_tools is the full list
+        assert available is not None
+        assert set(available) == {
+            "bash",
+            "read_file",
+            "check_for_events",
+            "report_complete",
+            "grep",
+        }
+
+    def test_only_custom_tools(self):
+        """When only custom tools listed, available_tools still includes them."""
+        tools = ["read_issue", "comment_on_pr", "check_for_events"]
+        custom, available = _split_tools(tools)
+
+        assert set(custom) == {"read_issue", "comment_on_pr", "check_for_events"}
+        assert available is not None
+        assert set(available) == {"read_issue", "comment_on_pr", "check_for_events"}
+
+    def test_only_sdk_builtins(self):
+        """When only SDK builtins listed, custom_tool_names is empty."""
+        tools = ["read_file", "bash", "grep"]
+        custom, available = _split_tools(tools)
+
+        assert custom == []
+        assert available is not None
+        assert set(available) == {"read_file", "bash", "grep"}
+
+    def test_all_tools_listed(self):
+        """When all tools are listed, everything appears correctly."""
+        custom, available = _split_tools(BUG_FIX_FRONTMATTER_TOOLS)
+
+        # All custom tools present
+        for name in CUSTOM_TOOL_NAMES:
+            assert name in custom
+        # available_tools = full list
+        assert available is not None
+        assert set(available) == set(BUG_FIX_FRONTMATTER_TOOLS)
+
+    def test_single_custom_tool(self):
+        """Single custom tool in frontmatter."""
+        tools = ["report_complete"]
+        custom, available = _split_tools(tools)
+        assert custom == ["report_complete"]
+        assert available == ["report_complete"]
+
+    def test_single_sdk_builtin(self):
+        """Single SDK builtin in frontmatter."""
+        tools = ["bash"]
+        custom, available = _split_tools(tools)
+        assert custom == []
+        assert available == ["bash"]
