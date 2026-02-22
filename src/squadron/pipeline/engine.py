@@ -5,8 +5,9 @@ and review policy orchestration.
 
 Key exports:
     PipelineEngine — Main engine class with start_pipeline(), execute_stage(),
-        handle_reactive_event(), on_agent_complete/error, resume_gate().
+        handle_reactive_event(), on_agent_complete/error, complete_human_stage().
     SpawnAgentCallback — Protocol for the AgentManager integration point.
+    NotifyCallback — Protocol for notification delivery (PR comments, labels, etc.).
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ from typing import TYPE_CHECKING, Any, Protocol
 from squadron.pipeline.gates import GateCheckRegistry, GateCheckResult, PipelineContext
 from squadron.pipeline.models import (
     GateCheckRecord,
+    GateTimeoutConfig,
+    HumanStageState,
+    HumanWaitType,
     PipelineDefinition,
     PipelineRun,
     PipelineRunStatus,
@@ -41,6 +45,22 @@ logger = logging.getLogger("squadron.pipeline.engine")
 
 # Maximum sub-pipeline nesting depth
 MAX_NESTING_DEPTH = 3
+
+# Mapping from HumanWaitType to the set of valid completion action strings
+_HUMAN_WAIT_ACTIONS: dict[HumanWaitType, set[str]] = {
+    HumanWaitType.APPROVAL: {"approved", "approval"},
+    HumanWaitType.COMMENT: {"commented", "comment"},
+    HumanWaitType.LABEL: {"labeled", "label"},
+    HumanWaitType.DISMISS: {"dismissed", "dismiss"},
+}
+
+# Mapping from HumanWaitType to the GitHub event that satisfies it
+_HUMAN_WAIT_EVENT_MAP: dict[HumanWaitType, str] = {
+    HumanWaitType.APPROVAL: "pull_request_review.submitted",
+    HumanWaitType.COMMENT: "issue_comment.created",
+    HumanWaitType.LABEL: "pull_request.labeled",
+    HumanWaitType.DISMISS: "pull_request_review.dismissed",
+}
 
 
 # ── Callback Protocols ───────────────────────────────────────────────────────
@@ -75,6 +95,31 @@ class ActionCallback(Protocol):
         context: PipelineContext,
     ) -> dict[str, Any]:
         """Execute an action. Returns result dict with at least {"success": bool}."""
+        ...
+
+
+class NotifyCallback(Protocol):
+    """Called by the engine to deliver notifications (PR comments, labels, assignments).
+
+    The engine is transport-agnostic — all notification delivery is routed through
+    this callback. The ``target`` parameter selects the delivery mechanism:
+
+        - "pr_comment" — post a comment on the PR
+        - "label" — add a label to the PR/issue
+        - "assign" — request review / assign users
+        - "remove_label" — remove a label
+    """
+
+    async def __call__(
+        self,
+        target: str,
+        context: PipelineContext,
+        *,
+        message: str | None = None,
+        label: str | None = None,
+        users: list[str] | None = None,
+    ) -> None:
+        """Deliver a notification. Failures should be logged, not raised."""
         ...
 
 
@@ -120,9 +165,16 @@ class PipelineEngine:
         # Callbacks (set by AgentManager)
         self._spawn_agent: SpawnAgentCallback | None = None
         self._action_callback: ActionCallback | None = None
+        self._notify_callback: NotifyCallback | None = None
 
         # Track running async tasks for delay stages
         self._delay_tasks: dict[str, asyncio.Task] = {}
+
+        # Track timeout enforcement tasks (stage_run_id → Task)
+        self._timeout_tasks: dict[int, asyncio.Task] = {}
+
+        # Track reminder tasks for human stages (stage_run_id → Task)
+        self._reminder_tasks: dict[int, asyncio.Task] = {}
 
     # ── Configuration ────────────────────────────────────────────────────────
 
@@ -141,6 +193,10 @@ class PipelineEngine:
     def set_action_callback(self, callback: ActionCallback) -> None:
         """Set the callback for executing built-in actions."""
         self._action_callback = callback
+
+    def set_notify_callback(self, callback: NotifyCallback) -> None:
+        """Set the callback for delivering notifications (PR comments, labels, etc.)."""
+        self._notify_callback = callback
 
     def validate_all_pipelines(self) -> list[str]:
         """Validate all registered pipelines. Returns list of error messages."""
@@ -336,6 +392,9 @@ class PipelineEngine:
         await self._registry.update_pipeline_run(run)
         logger.info("Pipeline '%s' run %s completed", run.pipeline_name, run.run_id)
 
+        # Execute on_complete hooks
+        await self._execute_pipeline_hooks(run, "on_complete")
+
         # If this is a sub-pipeline, notify the parent
         if run.parent_run_id and run.parent_stage_id:
             await self._on_sub_pipeline_complete(run)
@@ -360,6 +419,9 @@ class PipelineEngine:
             error_stage_id,
             error_message,
         )
+
+        # Execute on_error hooks
+        await self._execute_pipeline_hooks(run, "on_error")
 
     async def _escalate_pipeline(self, run: PipelineRun, reason: str) -> None:
         """Mark a pipeline run as escalated."""
@@ -393,6 +455,141 @@ class PipelineEngine:
             task.cancel()
 
         logger.info("Pipeline '%s' run %s cancelled", run.pipeline_name, run_id)
+        return True
+
+    async def complete_human_stage(
+        self,
+        run_id: str,
+        stage_id: str,
+        *,
+        completed_by: str,
+        action: str = "approved",
+    ) -> bool:
+        """Signal that a human has completed their action on a human stage.
+
+        Args:
+            run_id: The pipeline run ID.
+            stage_id: The stage ID of the human stage.
+            completed_by: GitHub username of the person who acted.
+            action: The action taken (e.g. "approved", "commented", "labeled", "dismissed").
+
+        Returns:
+            True if the stage was successfully completed/advanced, False otherwise.
+        """
+        run = await self._registry.get_pipeline_run(run_id)
+        if not run or run.status != PipelineRunStatus.RUNNING:
+            logger.warning(
+                "complete_human_stage: pipeline %s not running (status=%s)",
+                run_id,
+                run.status if run else "not found",
+            )
+            return False
+
+        try:
+            defn = PipelineDefinition.model_validate_json(run.definition_snapshot)
+        except Exception:
+            logger.error("Failed to parse definition for pipeline %s", run_id)
+            return False
+
+        stage = defn.get_stage(stage_id)
+        if not stage or stage.type != StageType.HUMAN:
+            logger.warning(
+                "complete_human_stage: stage '%s' not found or not a human stage", stage_id
+            )
+            return False
+
+        latest = await self._registry.get_latest_stage_run(run_id, stage_id)
+        if not latest or latest.status != StageRunStatus.WAITING:
+            logger.warning(
+                "complete_human_stage: stage '%s' not in WAITING state (status=%s)",
+                stage_id,
+                latest.status if latest else "not found",
+            )
+            return False
+
+        # Validate action matches wait_for type
+        human_config = stage.human
+        if human_config:
+            expected_actions = _HUMAN_WAIT_ACTIONS.get(human_config.wait_for, set())
+            if expected_actions and action not in expected_actions:
+                logger.info(
+                    "complete_human_stage: action '%s' does not match wait_for '%s' "
+                    "(expected one of %s)",
+                    action,
+                    human_config.wait_for.value,
+                    expected_actions,
+                )
+                return False
+
+            # Validate from_group constraint
+            if human_config.from_group:
+                # from_group is a team/org name — the integration layer should validate
+                # membership. Here we just record the actor.
+                pass
+
+        # Track completion in HumanStageState
+        human_state = await self._registry.get_human_stage_state(
+            latest.id  # type: ignore[arg-type]
+        )
+        if human_state:
+            # Multi-approval support: check if count threshold is met
+            required_count = human_config.count if human_config else 1
+            current_approvers = human_state.assigned_users or []
+
+            if completed_by not in current_approvers:
+                current_approvers.append(completed_by)
+                human_state.assigned_users = current_approvers
+
+            # Count unique completions — we track actors in assigned_users
+            completion_count = len(current_approvers)
+
+            if completion_count < required_count:
+                # Not enough approvals yet — stay in WAITING
+                human_state.completed_by = None
+                human_state.completed_action = action
+                await self._registry.update_human_stage_state(human_state)
+                logger.info(
+                    "Human stage '%s' has %d/%d approvals (pipeline %s)",
+                    stage_id,
+                    completion_count,
+                    required_count,
+                    run_id,
+                )
+                return True
+
+            # Enough completions — mark done
+            human_state.completed_by = completed_by
+            human_state.completed_action = action
+            await self._registry.update_human_stage_state(human_state)
+
+        # Cancel reminder task if running
+        if latest.id is not None:
+            reminder_task = self._reminder_tasks.pop(latest.id, None)
+            if reminder_task and not reminder_task.done():
+                reminder_task.cancel()
+
+        # Cancel timeout task if running
+        if latest.id is not None:
+            timeout_task = self._timeout_tasks.pop(latest.id, None)
+            if timeout_task and not timeout_task.done():
+                timeout_task.cancel()
+
+        # Complete the stage
+        latest.status = StageRunStatus.COMPLETED
+        latest.completed_at = datetime.now(timezone.utc)
+        latest.outputs = {"completed_by": completed_by, "action": action}
+        await self._registry.update_stage_run(latest)
+
+        logger.info(
+            "Human stage '%s' completed by %s (action=%s, pipeline %s)",
+            stage_id,
+            completed_by,
+            action,
+            run_id,
+        )
+
+        # Advance pipeline
+        await self._advance_after_stage(run, defn, stage, "complete")
         return True
 
     # ── Stage Execution ──────────────────────────────────────────────────────
@@ -562,12 +759,19 @@ class PipelineEngine:
             stage_run.status = StageRunStatus.COMPLETED
             stage_run.completed_at = datetime.now(timezone.utc)
             await self._registry.update_stage_run(stage_run)
+            # Cancel timeout if one was scheduled
+            if stage_run.id is not None:
+                timeout_task = self._timeout_tasks.pop(stage_run.id, None)
+                if timeout_task and not timeout_task.done():
+                    timeout_task.cancel()
             logger.info("Gate '%s' passed (pipeline %s)", stage.id, run.run_id)
             await self._advance_after_stage(run, definition, stage, "pass")
         else:
             # Gate not yet passing — enter WAITING state for reactive re-eval
             stage_run.status = StageRunStatus.WAITING
             await self._registry.update_stage_run(stage_run)
+            # Schedule timeout if configured
+            self._schedule_stage_timeout(run, definition, stage, stage_run, ctx)
             logger.info(
                 "Gate '%s' waiting — conditions not met (pipeline %s)",
                 stage.id,
@@ -670,10 +874,14 @@ class PipelineEngine:
     ) -> None:
         """Execute a human stage — enter WAITING state for human action.
 
-        Full notification/reminder lifecycle is Phase 2. For now, just
-        enter waiting state and record the human stage state.
+        Full lifecycle:
+            1. Enter WAITING state and create HumanStageState record
+            2. Auto-assign reviewers from ``human.from_group`` (via notify callback)
+            3. Send entry notification (via notify callback)
+            4. Schedule reminder task if ``human.notify.reminder`` is configured
         """
-        from squadron.pipeline.models import HumanStageState
+        human_config = stage.human
+        ctx = self._build_context(run)
 
         stage_run.status = StageRunStatus.WAITING
         await self._registry.update_stage_run(stage_run)
@@ -682,12 +890,108 @@ class PipelineEngine:
         human_state = HumanStageState(
             stage_run_id=stage_run.id,  # type: ignore[arg-type]
         )
+
+        # Auto-assign reviewers
+        assigned_users: list[str] = []
+        if human_config and human_config.auto_assign and human_config.from_group:
+            assigned_users = [human_config.from_group]
+            human_state.assigned_users = assigned_users
+            if self._notify_callback:
+                try:
+                    await self._notify_callback(
+                        "assign",
+                        ctx,
+                        users=assigned_users,
+                        message=human_config.description
+                        or f"Review requested for stage '{stage.id}'",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to auto-assign reviewers for human stage '%s' (pipeline %s)",
+                        stage.id,
+                        run.run_id,
+                    )
+
         await self._registry.create_human_stage_state(human_state)
 
+        # Send entry notification
+        if human_config and human_config.notify and human_config.notify.on_enter:
+            if self._notify_callback:
+                try:
+                    await self._notify_callback(
+                        "pr_comment",
+                        ctx,
+                        message=human_config.notify.on_enter,
+                    )
+                    # Update notification timestamp
+                    human_state.entry_notified_at = datetime.now(timezone.utc)
+                    await self._registry.update_human_stage_state(human_state)
+                except Exception:
+                    logger.exception(
+                        "Failed to send entry notification for human stage '%s' (pipeline %s)",
+                        stage.id,
+                        run.run_id,
+                    )
+
+        # Schedule reminder task
+        if (
+            human_config
+            and human_config.notify
+            and human_config.notify.reminder
+            and stage_run.id is not None
+        ):
+            reminder_cfg = human_config.notify.reminder
+            interval_str = reminder_cfg.get("interval", "24h")
+            interval_secs = _parse_duration_seconds(interval_str)
+            max_reminders = reminder_cfg.get("max_reminders", 3)
+            reminder_message = reminder_cfg.get(
+                "message",
+                f"Reminder: human action required on stage '{stage.id}'",
+            )
+
+            async def _reminder_loop(
+                sr_id: int,
+                interval: int,
+                max_count: int,
+                msg: str,
+            ) -> None:
+                count = 0
+                try:
+                    while count < max_count:
+                        await asyncio.sleep(interval)
+                        count += 1
+                        if self._notify_callback:
+                            try:
+                                await self._notify_callback(
+                                    "pr_comment",
+                                    ctx,
+                                    message=f"[Reminder {count}/{max_count}] {msg}",
+                                )
+                            except Exception:
+                                logger.exception("Failed to send reminder %d", count)
+                        # Update reminder tracking
+                        state = await self._registry.get_human_stage_state(sr_id)
+                        if state:
+                            state.reminder_count = count
+                            state.last_reminder_at = datetime.now(timezone.utc)
+                            await self._registry.update_human_stage_state(state)
+                except asyncio.CancelledError:
+                    pass
+
+            task = asyncio.create_task(
+                _reminder_loop(stage_run.id, interval_secs, max_reminders, reminder_message)
+            )
+            self._reminder_tasks[stage_run.id] = task
+
+        # Schedule timeout if configured
+        self._schedule_stage_timeout(run, definition, stage, stage_run, ctx)
+
         logger.info(
-            "Human stage '%s' waiting for action (pipeline %s)",
+            "Human stage '%s' waiting for %s action (pipeline %s, assigned=%s)",
             stage.id,
+            human_config.wait_for.value if human_config else "approval",
             run.run_id,
+            assigned_users or "none",
         )
 
     async def _execute_parallel_stage(
@@ -919,7 +1223,11 @@ class PipelineEngine:
                             pass
                     return
                 except Exception:
-                    pass  # Fall through to error handling
+                    logger.exception(
+                        "Retry of stage '%s' also failed (pipeline %s)",
+                        stage.id,
+                        run.run_id,
+                    )
 
         # Follow on_error transition
         if then:
@@ -1015,7 +1323,7 @@ class PipelineEngine:
                 await self._handle_reactive_action(run, defn, reactive_config)
 
             # Always re-evaluate gates/human stages on relevant events
-            await self._reevaluate_waiting_stages(run, defn, event_type)
+            await self._reevaluate_waiting_stages(run, defn, event_type, payload)
 
     async def _handle_reactive_action(
         self,
@@ -1034,9 +1342,82 @@ class PipelineEngine:
         elif action == ReactiveAction.INVALIDATE_AND_RESTART:
             await self._invalidate_and_restart(run, definition, config)
         elif action == ReactiveAction.NOTIFY:
-            # Notification is Phase 2
+            await self._handle_reactive_notify(run, config)
+        elif action == ReactiveAction.WAKE_AGENT:
+            await self._handle_reactive_wake_agent(run, definition)
+
+    async def _handle_reactive_notify(
+        self,
+        run: PipelineRun,
+        config: Any,  # ReactiveEventConfig
+    ) -> None:
+        """Handle NOTIFY reactive action — send a notification via the notify callback."""
+        if not self._notify_callback:
             logger.info(
-                "Reactive notify event on pipeline %s (not yet implemented)",
+                "Reactive NOTIFY on pipeline %s — no notify callback configured",
+                run.run_id,
+            )
+            return
+
+        ctx = self._build_context(run)
+        notify_cfg = config.notify or {}
+        message = notify_cfg.get(
+            "message", f"Reactive event notification for pipeline {run.run_id}"
+        )
+        label = notify_cfg.get("label")
+        target = notify_cfg.get("target", "pr_comment")
+
+        try:
+            await self._notify_callback(target, ctx, message=message, label=label)
+            logger.info("Reactive NOTIFY sent for pipeline %s", run.run_id)
+        except Exception:
+            logger.exception("Failed to send reactive NOTIFY for pipeline %s", run.run_id)
+
+    async def _handle_reactive_wake_agent(
+        self,
+        run: PipelineRun,
+        definition: PipelineDefinition,
+    ) -> None:
+        """Handle WAKE_AGENT reactive action — wake the agent for the current stage."""
+        if not run.current_stage_id:
+            return
+
+        current_stage = definition.get_stage(run.current_stage_id)
+        if not current_stage:
+            return
+
+        latest = await self._registry.get_latest_stage_run(run.run_id, current_stage.id)
+        if not latest or not latest.agent_id:
+            logger.info(
+                "WAKE_AGENT: no agent found for stage '%s' (pipeline %s)",
+                run.current_stage_id,
+                run.run_id,
+            )
+            return
+
+        if not self._spawn_agent:
+            logger.warning("WAKE_AGENT: no spawn callback configured")
+            return
+
+        try:
+            await self._spawn_agent(
+                current_stage.agent or "",
+                run.issue_number,
+                pr_number=run.pr_number,
+                pipeline_run_id=run.run_id,
+                stage_id=current_stage.id,
+                continue_session=True,
+                context=run.context,
+            )
+            logger.info(
+                "WAKE_AGENT: woke agent for stage '%s' (pipeline %s)",
+                current_stage.id,
+                run.run_id,
+            )
+        except Exception:
+            logger.exception(
+                "WAKE_AGENT: failed to wake agent for stage '%s' (pipeline %s)",
+                current_stage.id,
                 run.run_id,
             )
 
@@ -1085,6 +1466,7 @@ class PipelineEngine:
         run: PipelineRun,
         definition: PipelineDefinition,
         event_type: str,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         """Re-evaluate any gate/human stages that are currently WAITING."""
         if not run.current_stage_id:
@@ -1114,6 +1496,47 @@ class PipelineEngine:
                     )
                     # Re-run gate evaluation
                     await self._execute_gate_stage(run, definition, current_stage, latest)
+
+        elif current_stage.type == StageType.HUMAN:
+            # Check if this event is relevant for the human stage's wait_for type
+            human_config = current_stage.human
+            if not human_config:
+                return
+
+            expected_event = _HUMAN_WAIT_EVENT_MAP.get(human_config.wait_for)
+            if expected_event != event_type:
+                return
+
+            latest = await self._registry.get_latest_stage_run(run.run_id, current_stage.id)
+            if not latest or latest.status != StageRunStatus.WAITING:
+                return
+
+            # Extract the actor and action from the payload
+            actor, action = _extract_human_action(event_type, payload or {})
+            if not actor:
+                return
+
+            logger.info(
+                "Human stage '%s' received matching event '%s' from '%s' (pipeline %s)",
+                current_stage.id,
+                event_type,
+                actor,
+                run.run_id,
+            )
+
+            # For approvals, check that the review state is "approved"
+            if human_config.wait_for == HumanWaitType.APPROVAL:
+                review = (payload or {}).get("review", {})
+                if review.get("state", "").lower() != "approved":
+                    return
+
+            # Delegate to complete_human_stage for validation + count tracking
+            await self.complete_human_stage(
+                run.run_id,
+                current_stage.id,
+                completed_by=actor,
+                action=action,
+            )
 
     # ── Agent Completion Callbacks ───────────────────────────────────────────
 
@@ -1286,6 +1709,194 @@ class PipelineEngine:
                     child_run.error_message or "Sub-pipeline failed",
                 )
 
+    # ── Pipeline Hooks ────────────────────────────────────────────────────────
+
+    async def _execute_pipeline_hooks(
+        self,
+        run: PipelineRun,
+        hook_name: str,
+    ) -> None:
+        """Execute pipeline-level hooks (on_complete or on_error).
+
+        Hooks are a list of action dicts, e.g.:
+            on_complete:
+              - notify: "Pipeline completed successfully"
+              - label: "pipeline-done"
+        """
+        try:
+            defn = PipelineDefinition.model_validate_json(run.definition_snapshot)
+        except Exception:
+            return
+
+        hooks: list[dict[str, Any]] = []
+        if hook_name == "on_complete":
+            hooks = defn.on_complete
+        elif hook_name == "on_error":
+            hooks = defn.on_error
+
+        if not hooks:
+            return
+
+        ctx = self._build_context(run)
+
+        for hook_action in hooks:
+            # notify: send a notification
+            if "notify" in hook_action and self._notify_callback:
+                try:
+                    await self._notify_callback(
+                        "pr_comment",
+                        ctx,
+                        message=hook_action["notify"],
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to execute %s notify hook for pipeline %s",
+                        hook_name,
+                        run.run_id,
+                    )
+
+            # label: add a label
+            if "label" in hook_action and self._notify_callback:
+                try:
+                    await self._notify_callback(
+                        "label",
+                        ctx,
+                        label=hook_action["label"],
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to execute %s label hook for pipeline %s",
+                        hook_name,
+                        run.run_id,
+                    )
+
+            # action: execute a built-in action
+            if "action" in hook_action and self._action_callback:
+                try:
+                    await self._action_callback(
+                        hook_action["action"],
+                        hook_action.get("config", {}),
+                        ctx,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to execute %s action hook for pipeline %s",
+                        hook_name,
+                        run.run_id,
+                    )
+
+    # ── Timeout Enforcement ────────────────────────────────────────────────────
+
+    def _schedule_stage_timeout(
+        self,
+        run: PipelineRun,
+        definition: PipelineDefinition,
+        stage: StageDefinition,
+        stage_run: StageRun,
+        ctx: PipelineContext,
+    ) -> None:
+        """Schedule a timeout timer for a stage if ``stage.timeout`` is configured.
+
+        When the timeout fires, the engine executes ``stage.on_timeout`` config:
+            - notify: send a notification
+            - label: add a label to the PR
+            - then: "fail" | "escalate" | "cancel"
+            - extend: reset the timer with a new duration (up to max_extensions)
+        """
+        timeout_secs = stage.parse_timeout_seconds()
+        if timeout_secs is None or stage_run.id is None:
+            return
+
+        on_timeout = stage.on_timeout
+        if isinstance(on_timeout, dict):
+            timeout_cfg = GateTimeoutConfig(**on_timeout)
+        elif isinstance(on_timeout, GateTimeoutConfig):
+            timeout_cfg = on_timeout
+        else:
+            # No on_timeout config — default to fail
+            timeout_cfg = GateTimeoutConfig(then="fail")
+
+        async def _timeout_handler(
+            sr_id: int,
+            secs: int,
+            cfg: GateTimeoutConfig,
+            extension_count: int = 0,
+        ) -> None:
+            try:
+                await asyncio.sleep(secs)
+            except asyncio.CancelledError:
+                return
+
+            logger.warning(
+                "Stage '%s' timed out after %ds (pipeline %s, extension=%d)",
+                stage.id,
+                secs,
+                run.run_id,
+                extension_count,
+            )
+
+            # Send timeout notification
+            if cfg.notify and self._notify_callback:
+                notify_msg = cfg.notify.get("message", f"Stage '{stage.id}' has timed out")
+                try:
+                    await self._notify_callback("pr_comment", ctx, message=notify_msg)
+                except Exception:
+                    logger.exception("Failed to send timeout notification")
+
+                # Add label if specified
+                timeout_label = cfg.notify.get("label")
+                if timeout_label:
+                    try:
+                        await self._notify_callback("label", ctx, label=timeout_label)
+                    except Exception:
+                        logger.exception("Failed to add timeout label")
+
+            # Handle extend
+            if cfg.extend and extension_count < cfg.max_extensions:
+                extend_secs = _parse_duration_seconds(cfg.extend)
+                logger.info(
+                    "Extending timeout for stage '%s' by %ds (extension %d/%d)",
+                    stage.id,
+                    extend_secs,
+                    extension_count + 1,
+                    cfg.max_extensions,
+                )
+                new_task = asyncio.create_task(
+                    _timeout_handler(sr_id, extend_secs, cfg, extension_count + 1)
+                )
+                self._timeout_tasks[sr_id] = new_task
+                return
+
+            # Execute terminal action
+            then_action = cfg.then or "fail"
+            if then_action == "fail":
+                # Fail the stage
+                sr = await self._registry.get_stage_run(sr_id)
+                if sr and sr.status == StageRunStatus.WAITING:
+                    sr.status = StageRunStatus.FAILED
+                    sr.error_message = f"Timed out after {secs}s"
+                    sr.completed_at = datetime.now(timezone.utc)
+                    await self._registry.update_stage_run(sr)
+                    await self._handle_stage_error(
+                        run, definition, stage, f"Timed out after {secs}s"
+                    )
+            elif then_action == "escalate":
+                await self._escalate_pipeline(run, f"Stage '{stage.id}' timed out after {secs}s")
+            elif then_action == "cancel":
+                await self.cancel_pipeline(run.run_id)
+
+            # Clean up
+            self._timeout_tasks.pop(sr_id, None)
+
+        task = asyncio.create_task(_timeout_handler(stage_run.id, timeout_secs, timeout_cfg))
+        self._timeout_tasks[stage_run.id] = task
+        logger.info(
+            "Scheduled %ds timeout for stage '%s' (pipeline %s)",
+            timeout_secs,
+            stage.id,
+            run.run_id,
+        )
+
     # ── Context Builders ─────────────────────────────────────────────────────
 
     def _build_context(self, run: PipelineRun) -> PipelineContext:
@@ -1359,8 +1970,8 @@ def _extract_pr_number(payload: dict[str, Any]) -> int | None:
     pr = payload.get("pull_request")
     if pr:
         return pr.get("number")
-    # Some events have it at top level
-    return payload.get("number") if payload.get("pull_request") else None
+    # Some events (e.g. pull_request_target) carry the number at top level
+    return payload.get("number")
 
 
 def _extract_issue_number(payload: dict[str, Any]) -> int | None:
@@ -1369,3 +1980,34 @@ def _extract_issue_number(payload: dict[str, Any]) -> int | None:
     if issue:
         return issue.get("number")
     return None
+
+
+def _extract_human_action(event_type: str, payload: dict[str, Any]) -> tuple[str, str]:
+    """Extract the actor username and action string from a GitHub event payload.
+
+    Returns:
+        (username, action) tuple. Returns ("", "") if the event can't be parsed.
+    """
+    sender = (payload.get("sender") or {}).get("login", "")
+
+    if event_type == "pull_request_review.submitted":
+        review = payload.get("review", {})
+        state = review.get("state", "").lower()
+        actor = (review.get("user") or {}).get("login", "") or sender
+        return (actor, state)  # e.g. ("octocat", "approved")
+
+    if event_type == "issue_comment.created":
+        comment = payload.get("comment", {})
+        actor = (comment.get("user") or {}).get("login", "") or sender
+        return (actor, "commented")
+
+    if event_type == "pull_request.labeled":
+        label = (payload.get("label") or {}).get("name", "")
+        return (sender, f"labeled:{label}")
+
+    if event_type == "pull_request_review.dismissed":
+        review = payload.get("review", {})
+        actor = (review.get("user") or {}).get("login", "") or sender
+        return (actor, "dismissed")
+
+    return ("", "")

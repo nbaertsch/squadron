@@ -17,6 +17,9 @@ from squadron.pipeline.gates import (
 )
 from squadron.pipeline.models import (
     GateConditionConfig,
+    HumanNotifyConfig,
+    HumanStageConfig,
+    HumanWaitType,
     ParallelBranch,
     PipelineDefinition,
     PipelineRunStatus,
@@ -1122,3 +1125,803 @@ class TestContextAndEdgeCases:
     async def test_cancel_nonexistent_returns_false(self, engine):
         result = await engine.cancel_pipeline("nonexistent-run-id")
         assert result is False
+
+
+# ── Class 10: Human Stage Lifecycle (Phase 2) ───────────────────────────────
+
+
+def make_human_pipeline(
+    *,
+    wait_for: HumanWaitType = HumanWaitType.APPROVAL,
+    from_group: str | None = None,
+    count: int = 1,
+    auto_assign: bool = True,
+    notify: HumanNotifyConfig | None = None,
+) -> PipelineDefinition:
+    """Pipeline with a human stage followed by an action."""
+    return PipelineDefinition(
+        description="Human pipeline",
+        trigger=TriggerDefinition(event="pull_request.opened"),
+        stages=[
+            StageDefinition(
+                id="human-review",
+                type="human",
+                human=HumanStageConfig(
+                    description="Review required",
+                    wait_for=wait_for,
+                    count=count,
+                    auto_assign=auto_assign,
+                    notify=notify,
+                    **{"from": from_group} if from_group else {},
+                ),
+            ),
+            StageDefinition(id="merge", type="action", action="merge_pr"),
+        ],
+    )
+
+
+class TestHumanStageLifecycle:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+        self._notifications: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append({"role": role, "stage_id": stage_id, "agent_id": agent_id})
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        async def mock_notify(target, context, *, message=None, label=None, users=None):
+            self._notifications.append(
+                {"target": target, "message": message, "label": label, "users": users}
+            )
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        eng.set_notify_callback(mock_notify)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_human_stage_enters_waiting(self, engine, registry):
+        """Human stage enters WAITING state."""
+        defn = make_human_pipeline()
+        engine.add_pipeline("human", defn)
+        run = await engine.start_pipeline("human", pr_number=42)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+
+    @pytest.mark.asyncio
+    async def test_human_stage_creates_state_record(self, engine, registry):
+        """Human stage creates a HumanStageState tracking record."""
+        defn = make_human_pipeline()
+        engine.add_pipeline("human", defn)
+        run = await engine.start_pipeline("human", pr_number=42)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        state = await registry.get_human_stage_state(stage_run.id)
+        assert state is not None
+        assert state.stage_run_id == stage_run.id
+
+    @pytest.mark.asyncio
+    async def test_human_stage_auto_assign(self, engine, registry):
+        """Human stage auto-assigns reviewers via notify callback."""
+        defn = make_human_pipeline(from_group="security-team")
+        engine.add_pipeline("human", defn)
+        run = await engine.start_pipeline("human", pr_number=42)
+        assert run is not None
+
+        # Should have sent an assign notification
+        assign_notifs = [n for n in self._notifications if n["target"] == "assign"]
+        assert len(assign_notifs) == 1
+        assert assign_notifs[0]["users"] == ["security-team"]
+
+    @pytest.mark.asyncio
+    async def test_human_stage_no_auto_assign_when_disabled(self, engine, registry):
+        """No auto-assign notification when auto_assign=False."""
+        defn = make_human_pipeline(from_group="security-team", auto_assign=False)
+        engine.add_pipeline("human", defn)
+        await engine.start_pipeline("human", pr_number=42)
+
+        assign_notifs = [n for n in self._notifications if n["target"] == "assign"]
+        assert len(assign_notifs) == 0
+
+    @pytest.mark.asyncio
+    async def test_human_stage_entry_notification(self, engine, registry):
+        """Human stage sends entry notification when configured."""
+        defn = make_human_pipeline(notify=HumanNotifyConfig(on_enter="Please review this PR"))
+        engine.add_pipeline("human", defn)
+        await engine.start_pipeline("human", pr_number=42)
+
+        pr_notifs = [n for n in self._notifications if n["target"] == "pr_comment"]
+        assert len(pr_notifs) == 1
+        assert pr_notifs[0]["message"] == "Please review this PR"
+
+    @pytest.mark.asyncio
+    async def test_complete_human_stage(self, engine, registry):
+        """complete_human_stage advances the pipeline."""
+        defn = make_human_pipeline()
+        engine.add_pipeline("human", defn)
+        run = await engine.start_pipeline("human", pr_number=42)
+        assert run is not None
+
+        result = await engine.complete_human_stage(
+            run.run_id, "human-review", completed_by="octocat", action="approved"
+        )
+        assert result is True
+
+        # Stage should be completed
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+        assert stage_run.outputs["completed_by"] == "octocat"
+
+        # Action should have fired
+        assert len(self._actions) == 1
+        assert self._actions[0]["action"] == "merge_pr"
+
+        # Pipeline should complete
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_complete_human_stage_wrong_action_type(self, engine, registry):
+        """complete_human_stage rejects actions that don't match wait_for."""
+        defn = make_human_pipeline(wait_for=HumanWaitType.APPROVAL)
+        engine.add_pipeline("human", defn)
+        run = await engine.start_pipeline("human", pr_number=42)
+        assert run is not None
+
+        result = await engine.complete_human_stage(
+            run.run_id, "human-review", completed_by="octocat", action="commented"
+        )
+        assert result is False
+
+        # Stage should still be WAITING
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+
+    @pytest.mark.asyncio
+    async def test_complete_human_stage_multi_approval(self, engine, registry):
+        """Human stage with count=2 requires two completions."""
+        defn = make_human_pipeline(count=2)
+        engine.add_pipeline("human", defn)
+        run = await engine.start_pipeline("human", pr_number=42)
+        assert run is not None
+
+        # First approval — should stay WAITING
+        result1 = await engine.complete_human_stage(
+            run.run_id, "human-review", completed_by="alice", action="approved"
+        )
+        assert result1 is True
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+        assert len(self._actions) == 0
+
+        # Second approval — should complete
+        result2 = await engine.complete_human_stage(
+            run.run_id, "human-review", completed_by="bob", action="approved"
+        )
+        assert result2 is True
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_complete_human_stage_not_running(self, engine, registry):
+        """complete_human_stage returns False for non-running pipeline."""
+        result = await engine.complete_human_stage(
+            "nonexistent-run", "some-stage", completed_by="octocat", action="approved"
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_complete_human_stage_wrong_stage_type(self, engine, registry):
+        """complete_human_stage returns False for non-human stage."""
+        defn = PipelineDefinition(
+            description="Agent only",
+            stages=[StageDefinition(id="review", type="agent", agent="reviewer")],
+        )
+        engine.add_pipeline("agent", defn)
+        run = await engine.start_pipeline("agent", pr_number=42)
+        assert run is not None
+
+        result = await engine.complete_human_stage(
+            run.run_id, "review", completed_by="octocat", action="approved"
+        )
+        assert result is False
+
+
+# ── Class 11: Human Stage Reactive Events (Phase 2) ─────────────────────────
+
+
+class TestHumanStageReactiveEvents:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._actions: list[dict[str, Any]] = []
+        self._notifications: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            return f"{role}-{stage_id}-agent"
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        async def mock_notify(target, context, *, message=None, label=None, users=None):
+            self._notifications.append(
+                {"target": target, "message": message, "label": label, "users": users}
+            )
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        eng.set_notify_callback(mock_notify)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_approval_event_completes_human_stage(self, engine, registry):
+        """PR review approval event completes a human stage waiting for approval."""
+        defn = PipelineDefinition(
+            description="Human reactive",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            on_events={
+                "pull_request_review.submitted": ReactiveEventConfig(
+                    action=ReactiveAction.REEVALUATE_GATES,
+                ),
+            },
+            stages=[
+                StageDefinition(
+                    id="human-review",
+                    type="human",
+                    human=HumanStageConfig(
+                        description="Approval needed",
+                        wait_for=HumanWaitType.APPROVAL,
+                    ),
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("human-reactive", defn)
+
+        # Start the pipeline
+        payload = {"pull_request": {"number": 42}}
+        run = await engine.evaluate_event("pull_request.opened", payload)
+        assert run is not None
+
+        # Human stage should be WAITING
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+
+        # Fire approval event
+        review_payload = {
+            "pull_request": {"number": 42},
+            "review": {"state": "approved", "user": {"login": "reviewer1"}},
+            "sender": {"login": "reviewer1"},
+        }
+        await engine.evaluate_event("pull_request_review.submitted", review_payload)
+
+        # Human stage should now be completed
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+
+        # Action should have fired
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_approval_review_does_not_complete(self, engine, registry):
+        """A 'changes_requested' review does not complete an approval human stage."""
+        defn = PipelineDefinition(
+            description="Human reactive",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="human-review",
+                    type="human",
+                    human=HumanStageConfig(
+                        wait_for=HumanWaitType.APPROVAL,
+                    ),
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("human-reactive", defn)
+
+        payload = {"pull_request": {"number": 42}}
+        run = await engine.evaluate_event("pull_request.opened", payload)
+        assert run is not None
+
+        # Fire changes_requested review event
+        review_payload = {
+            "pull_request": {"number": 42},
+            "review": {"state": "changes_requested", "user": {"login": "reviewer1"}},
+            "sender": {"login": "reviewer1"},
+        }
+        await engine.evaluate_event("pull_request_review.submitted", review_payload)
+
+        # Human stage should still be WAITING
+        stage_run = await registry.get_latest_stage_run(run.run_id, "human-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+        assert len(self._actions) == 0
+
+
+# ── Class 12: NOTIFY + WAKE_AGENT Reactive Actions (Phase 2) ────────────────
+
+
+class TestReactiveNotifyWakeAgent:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+        self._notifications: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                    "continue_session": continue_session,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        async def mock_notify(target, context, *, message=None, label=None, users=None):
+            self._notifications.append(
+                {"target": target, "message": message, "label": label, "users": users}
+            )
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        eng.set_notify_callback(mock_notify)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_reactive_notify_sends_notification(self, engine, registry):
+        """NOTIFY reactive action sends a notification via the callback."""
+        defn = PipelineDefinition(
+            description="Notify reactive",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            on_events={
+                "push": ReactiveEventConfig(
+                    action=ReactiveAction.NOTIFY,
+                    notify={"message": "New push detected!", "target": "pr_comment"},
+                ),
+            },
+            stages=[
+                StageDefinition(id="review", type="agent", agent="reviewer"),
+            ],
+        )
+        engine.add_pipeline("notify-reactive", defn)
+
+        payload = {"pull_request": {"number": 42}}
+        run = await engine.evaluate_event("pull_request.opened", payload)
+        assert run is not None
+
+        # Fire reactive event
+        push_payload = {"pull_request": {"number": 42}}
+        await engine.evaluate_event("push", push_payload)
+
+        # Should have a notification
+        comment_notifs = [n for n in self._notifications if n["target"] == "pr_comment"]
+        assert len(comment_notifs) >= 1
+        assert any("New push detected!" in (n["message"] or "") for n in comment_notifs)
+
+    @pytest.mark.asyncio
+    async def test_reactive_wake_agent(self, engine, registry):
+        """WAKE_AGENT reactive action wakes the current stage's agent."""
+        defn = PipelineDefinition(
+            description="Wake agent reactive",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            on_events={
+                "issue_comment.created": ReactiveEventConfig(
+                    action=ReactiveAction.WAKE_AGENT,
+                ),
+            },
+            stages=[
+                StageDefinition(id="review", type="agent", agent="reviewer"),
+            ],
+        )
+        engine.add_pipeline("wake-reactive", defn)
+
+        payload = {"pull_request": {"number": 42}}
+        run = await engine.evaluate_event("pull_request.opened", payload)
+        assert run is not None
+
+        # Initial spawn
+        assert len(self._spawned_agents) == 1
+        assert self._spawned_agents[0]["continue_session"] is False
+
+        # Fire reactive event
+        comment_payload = {
+            "pull_request": {"number": 42},
+            "comment": {"user": {"login": "someone"}},
+            "sender": {"login": "someone"},
+        }
+        await engine.evaluate_event("issue_comment.created", comment_payload)
+
+        # Should have woken the agent (second spawn with continue_session=True)
+        assert len(self._spawned_agents) == 2
+        assert self._spawned_agents[1]["continue_session"] is True
+
+
+# ── Class 13: Pipeline Hooks (Phase 2) ──────────────────────────────────────
+
+
+class TestPipelineHooks:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._actions: list[dict[str, Any]] = []
+        self._notifications: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            return f"{role}-{stage_id}-agent"
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action, "config": config})
+            return {"success": True}
+
+        async def mock_notify(target, context, *, message=None, label=None, users=None):
+            self._notifications.append(
+                {"target": target, "message": message, "label": label, "users": users}
+            )
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        eng.set_notify_callback(mock_notify)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_on_complete_hook_notify(self, engine, registry):
+        """on_complete hook sends a notification when pipeline completes."""
+        defn = PipelineDefinition(
+            description="Hook test",
+            on_complete=[{"notify": "Pipeline completed!"}],
+            stages=[StageDefinition(id="act", type="action", action="merge_pr")],
+        )
+        engine.add_pipeline("hooked", defn)
+        run = await engine.start_pipeline("hooked", pr_number=1)
+        assert run is not None
+
+        # Pipeline should be completed (single action stage)
+        updated = await registry.get_pipeline_run(run.run_id)
+        assert updated is not None
+        assert updated.status == PipelineRunStatus.COMPLETED
+
+        # on_complete hook should have sent a notification
+        comment_notifs = [n for n in self._notifications if n["target"] == "pr_comment"]
+        assert len(comment_notifs) == 1
+        assert comment_notifs[0]["message"] == "Pipeline completed!"
+
+    @pytest.mark.asyncio
+    async def test_on_complete_hook_label(self, engine, registry):
+        """on_complete hook adds a label when pipeline completes."""
+        defn = PipelineDefinition(
+            description="Hook test",
+            on_complete=[{"label": "pipeline-done"}],
+            stages=[StageDefinition(id="act", type="action", action="merge_pr")],
+        )
+        engine.add_pipeline("hooked", defn)
+        await engine.start_pipeline("hooked", pr_number=1)
+
+        label_notifs = [n for n in self._notifications if n["target"] == "label"]
+        assert len(label_notifs) == 1
+        assert label_notifs[0]["label"] == "pipeline-done"
+
+    @pytest.mark.asyncio
+    async def test_on_error_hook_notify(self, engine, registry):
+        """on_error hook sends a notification when pipeline fails."""
+
+        async def failing_action(action, config, context):
+            return {"success": False, "error": "merge conflict"}
+
+        engine.set_action_callback(failing_action)
+
+        defn = PipelineDefinition(
+            description="Error hook test",
+            on_error=[{"notify": "Pipeline failed!"}],
+            stages=[StageDefinition(id="act", type="action", action="merge_pr")],
+        )
+        engine.add_pipeline("error-hooked", defn)
+        run = await engine.start_pipeline("error-hooked", pr_number=1)
+        assert run is not None
+
+        updated = await registry.get_pipeline_run(run.run_id)
+        assert updated is not None
+        assert updated.status == PipelineRunStatus.FAILED
+
+        comment_notifs = [n for n in self._notifications if n["target"] == "pr_comment"]
+        assert len(comment_notifs) == 1
+        assert comment_notifs[0]["message"] == "Pipeline failed!"
+
+    @pytest.mark.asyncio
+    async def test_on_complete_hook_action(self, engine, registry):
+        """on_complete hook can execute a built-in action."""
+        defn = PipelineDefinition(
+            description="Action hook test",
+            on_complete=[{"action": "cleanup", "config": {"dry_run": True}}],
+            stages=[StageDefinition(id="act", type="action", action="merge_pr")],
+        )
+        engine.add_pipeline("action-hooked", defn)
+        await engine.start_pipeline("action-hooked", pr_number=1)
+
+        # Should have 2 actions: the stage action + the hook action
+        assert len(self._actions) == 2
+        assert self._actions[0]["action"] == "merge_pr"
+        assert self._actions[1]["action"] == "cleanup"
+        assert self._actions[1]["config"] == {"dry_run": True}
+
+
+# ── Class 14: Timeout Enforcement (Phase 2) ─────────────────────────────────
+
+
+class TestTimeoutEnforcement:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._actions: list[dict[str, Any]] = []
+        self._notifications: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            return f"{role}-{stage_id}-agent"
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        async def mock_notify(target, context, *, message=None, label=None, users=None):
+            self._notifications.append(
+                {"target": target, "message": message, "label": label, "users": users}
+            )
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        eng.set_notify_callback(mock_notify)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_timeout_schedules_task(self, engine, registry):
+        """A human stage with timeout schedules an asyncio task."""
+        defn = PipelineDefinition(
+            description="Timeout test",
+            stages=[
+                StageDefinition(
+                    id="human-review",
+                    type="human",
+                    human=HumanStageConfig(description="Review"),
+                    timeout="30m",
+                    on_timeout={"then": "fail"},
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("timeout", defn)
+        run = await engine.start_pipeline("timeout", pr_number=42)
+        assert run is not None
+
+        # A timeout task should be scheduled
+        assert len(engine._timeout_tasks) == 1
+
+        # Clean up
+        for task in engine._timeout_tasks.values():
+            task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_timeout_cancelled_on_stage_complete(self, engine, registry):
+        """Timeout task is cancelled when the stage completes normally."""
+        defn = PipelineDefinition(
+            description="Timeout cancel test",
+            stages=[
+                StageDefinition(
+                    id="human-review",
+                    type="human",
+                    human=HumanStageConfig(description="Review"),
+                    timeout="30m",
+                    on_timeout={"then": "fail"},
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("timeout", defn)
+        run = await engine.start_pipeline("timeout", pr_number=42)
+        assert run is not None
+
+        # Complete the human stage
+        await engine.complete_human_stage(
+            run.run_id, "human-review", completed_by="octocat", action="approved"
+        )
+
+        # Timeout task should have been cleaned up
+        assert len(engine._timeout_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_gate_timeout_schedules_task(self, engine, registry, gate_registry):
+        """A gate stage with timeout schedules an asyncio task."""
+        gate_registry._checks["always_fail"] = AlwaysFailCheck()
+
+        defn = PipelineDefinition(
+            description="Gate timeout",
+            stages=[
+                StageDefinition(
+                    id="gate-check",
+                    type="gate",
+                    conditions=[GateConditionConfig(check="always_fail")],
+                    timeout="1h",
+                    on_timeout={"then": "escalate"},
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("gate-timeout", defn)
+        run = await engine.start_pipeline("gate-timeout", pr_number=42)
+        assert run is not None
+
+        # Timeout task should be scheduled (gate entered WAITING)
+        assert len(engine._timeout_tasks) == 1
+
+        # Clean up
+        for task in engine._timeout_tasks.values():
+            task.cancel()
+
+
+# ── Class 15: Helper Functions (Phase 2) ─────────────────────────────────────
+
+
+class TestHelperFunctions:
+    def test_extract_pr_number_from_pull_request(self):
+        from squadron.pipeline.engine import _extract_pr_number
+
+        payload = {"pull_request": {"number": 42}}
+        assert _extract_pr_number(payload) == 42
+
+    def test_extract_pr_number_from_top_level(self):
+        from squadron.pipeline.engine import _extract_pr_number
+
+        payload = {"number": 99}
+        assert _extract_pr_number(payload) == 99
+
+    def test_extract_pr_number_empty(self):
+        from squadron.pipeline.engine import _extract_pr_number
+
+        assert _extract_pr_number({}) is None
+
+    def test_extract_human_action_approval(self):
+        from squadron.pipeline.engine import _extract_human_action
+
+        payload = {
+            "review": {"state": "approved", "user": {"login": "alice"}},
+            "sender": {"login": "alice"},
+        }
+        actor, action = _extract_human_action("pull_request_review.submitted", payload)
+        assert actor == "alice"
+        assert action == "approved"
+
+    def test_extract_human_action_comment(self):
+        from squadron.pipeline.engine import _extract_human_action
+
+        payload = {
+            "comment": {"user": {"login": "bob"}},
+            "sender": {"login": "bob"},
+        }
+        actor, action = _extract_human_action("issue_comment.created", payload)
+        assert actor == "bob"
+        assert action == "commented"
+
+    def test_extract_human_action_label(self):
+        from squadron.pipeline.engine import _extract_human_action
+
+        payload = {
+            "label": {"name": "approved"},
+            "sender": {"login": "charlie"},
+        }
+        actor, action = _extract_human_action("pull_request.labeled", payload)
+        assert actor == "charlie"
+        assert action == "labeled:approved"
+
+    def test_extract_human_action_unknown_event(self):
+        from squadron.pipeline.engine import _extract_human_action
+
+        actor, action = _extract_human_action("unknown.event", {})
+        assert actor == ""
+        assert action == ""

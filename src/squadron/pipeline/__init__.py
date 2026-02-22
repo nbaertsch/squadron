@@ -11,7 +11,12 @@ Key exports:
     PipelineRun, StageRun — Runtime state models
 """
 
-from squadron.pipeline.engine import ActionCallback, PipelineEngine, SpawnAgentCallback
+from squadron.pipeline.engine import (
+    ActionCallback,
+    NotifyCallback,
+    PipelineEngine,
+    SpawnAgentCallback,
+)
 from squadron.pipeline.gates import (
     BranchUpToDateCheck,
     CiStatusCheck,
@@ -27,8 +32,11 @@ from squadron.pipeline.gates import (
     PrApprovalsMetCheck,
 )
 from squadron.pipeline.models import (
+    ErrorConfig,
     GateCheckRecord,
     GateConditionConfig,
+    GateTimeoutConfig,
+    HumanNotifyConfig,
     HumanStageConfig,
     HumanStageState,
     HumanWaitType,
@@ -45,6 +53,7 @@ from squadron.pipeline.models import (
     StageRunStatus,
     StageType,
     TriggerDefinition,
+    WebhookRequestConfig,
 )
 from squadron.pipeline.registry import PipelineRegistry
 
@@ -53,6 +62,7 @@ __all__ = [
     "PipelineEngine",
     "SpawnAgentCallback",
     "ActionCallback",
+    "NotifyCallback",
     # Registry
     "PipelineRegistry",
     # Gates
@@ -74,8 +84,12 @@ __all__ = [
     "TriggerDefinition",
     "ReactiveEventConfig",
     "GateConditionConfig",
+    "GateTimeoutConfig",
+    "ErrorConfig",
     "HumanStageConfig",
+    "HumanNotifyConfig",
     "ParallelBranch",
+    "WebhookRequestConfig",
     # Runtime state models
     "PipelineRun",
     "PipelineRunStatus",
