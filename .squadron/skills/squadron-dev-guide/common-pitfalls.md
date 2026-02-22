@@ -1,6 +1,10 @@
 # Common Pitfalls
 
+> **AD-019 MIGRATION NOTE:** The unified pipeline system (see `docs/design/unified-pipeline-system.md`) replaces ALL legacy orchestration: `triggers`, `review_policy`, `workflows`, and the Workflow Engine v2. When implementing AD-019, **delete all legacy code entirely** — no backward-compatibility shims, no auto-conversion, no deprecation period. Clean replacement is the required pattern for all refactors in this project.
+
 ## 1. Dual Routing Systems
+
+> **LEGACY — will be removed by AD-019.** After the pipeline refactor, `agent_roles.<role>.triggers` no longer exists. All orchestration is via `pipelines:` config. The EventRouter dispatches to the PipelineEngine, not AgentManager trigger handlers.
 
 Squadron has **two routing systems** that work together but are easily confused:
 

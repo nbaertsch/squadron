@@ -1,5 +1,7 @@
 # Event Pipeline
 
+> **AD-019 MIGRATION NOTE:** The unified pipeline system (see `docs/design/unified-pipeline-system.md`) replaces the current trigger-based dispatch. After the refactor, the flow changes to: **GitHub Webhook → FastAPI Server → EventRouter → PipelineEngine → AgentManager**. The EventRouter will emit events to the PipelineEngine, which evaluates pipeline trigger conditions and advances pipeline stages. Direct `AgentManager._handle_*` trigger-matching methods will be deleted. The `AgentManager` becomes a pure agent lifecycle manager (create/wake/complete/sleep) invoked by pipeline stage execution, not by event dispatch.
+
 ## Overview
 
 Squadron's event pipeline routes GitHub webhook events to the appropriate agents.
@@ -57,6 +59,8 @@ Key event types the router emits:
 - `COMMAND` (from `@squadron-dev <command>` mentions)
 
 ## AgentManager Dispatch (`src/squadron/agent_manager.py`)
+
+> **LEGACY — will be removed by AD-019.** The trigger-matching dispatch below is replaced by the PipelineEngine. After the refactor, `AgentManager` no longer reads triggers from config or has `_handle_*` event methods. Instead, the PipelineEngine calls `AgentManager.create_agent()` / `wake_agent()` / etc. directly when pipeline stages execute.
 
 The `AgentManager` handles events by:
 1. Looking up matching `AgentRoleConfig` entries from `config.agent_roles`
