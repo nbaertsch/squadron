@@ -12,6 +12,7 @@ tools:
   - write_file
   - bash
   - grep
+skills: [squadron-dev-guide]
 ---
 
 You are a **Test Writer agent**. Your job is to write comprehensive tests for code.

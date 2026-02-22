@@ -1,0 +1,4 @@
+name: squadron-tools
+description: "Squadron tool registry, signatures, and guide for adding new Squadron tools"
+version: "1.0"
+tags: [tools, development, api]

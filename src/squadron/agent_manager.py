@@ -740,6 +740,56 @@ class AgentManager:
 
     # ── Agent Creation ───────────────────────────────────────────────────
 
+    def _resolve_skill_directories(self, agent_def: "AgentDefinition") -> list[str]:
+        """Resolve agent's skill names to absolute directory paths.
+
+        Each skill name is looked up in config.skills.definitions, then the path
+        is resolved relative to config.skills.base_path under the repo root.
+        Missing skill definitions or directories are logged as warnings so
+        agents still start even if skills are unavailable.
+
+        A containment check using Path.resolve() verifies that every resolved
+        skill path stays within repo_root, providing defence-in-depth against
+        path traversal even if config-level validators are somehow bypassed
+        (e.g. via symlinks pointing outside the repository).
+        """
+
+        skills_config = self.config.skills
+        base = self.repo_root / skills_config.base_path
+        repo_root_resolved = self.repo_root.resolve()
+        dirs: list[str] = []
+        for skill_name in agent_def.skills:
+            skill_def = skills_config.definitions.get(skill_name)
+            if skill_def is None:
+                logger.warning(
+                    "Unknown skill '%s' referenced by agent '%s' — skipping",
+                    skill_name,
+                    agent_def.role,
+                )
+                continue
+            skill_path = base / skill_def.path
+            if not skill_path.is_dir():
+                logger.warning(
+                    "Skill directory not found for '%s': %s — skipping",
+                    skill_name,
+                    skill_path,
+                )
+                continue
+            # Defence-in-depth: verify the resolved path is within repo_root.
+            # This catches symlinks or other filesystem tricks that could escape
+            # the repository even after config-level validation.
+            resolved = skill_path.resolve()
+            if not resolved.is_relative_to(repo_root_resolved):
+                logger.warning(
+                    "Skill '%s' path %s resolves outside repository root %s — skipping",
+                    skill_name,
+                    resolved,
+                    repo_root_resolved,
+                )
+                continue
+            dirs.append(str(skill_path))
+        return dirs
+
     async def create_agent(
         self,
         role: str,
@@ -1253,10 +1303,15 @@ class AgentManager:
 
         if agent_def.tools is not None:
             custom_tool_names = [t for t in agent_def.tools if t in ALL_TOOL_NAMES_SET]
-            # SDK available_tools must include both builtins AND custom tool names
-            # so the model can see them all.  If the .md lists tools, use the
-            # full list as the allowlist; otherwise leave it open (None).
-            sdk_available_tools = agent_def.tools
+            # SDK available_tools must ONLY include SDK built-in tool names (not custom
+            # Squadron tool names like `read_issue` or `check_for_events`).
+            # If custom tool names are passed here, the SDK rejects the entire allowlist
+            # and blocks all built-in tools including bash and grep.
+            # Custom Squadron tools are already registered via tools= above.
+            # (Fix for issue #118: bash/grep tools non-functional)
+            sdk_available_tools = [
+                t for t in agent_def.tools if t not in ALL_TOOL_NAMES_SET
+            ] or None
         else:
             custom_tool_names = None  # → no Squadron tools (must be in frontmatter)
             sdk_available_tools = None  # → all SDK tools visible
@@ -1265,6 +1320,11 @@ class AgentManager:
             record.agent_id,
             names=custom_tool_names,
         )
+
+        # Resolve skill directories for this agent's assigned skills.
+        # `or None` converts an empty list to None so the SDK omits the
+        # skill_directories key entirely rather than passing an empty list.
+        skill_directories = self._resolve_skill_directories(agent_def) or None
 
         session_config = build_session_config(
             role=record.role,
@@ -1276,6 +1336,7 @@ class AgentManager:
             hooks=hooks,
             custom_agents=custom_agents,
             mcp_servers=mcp_servers,
+            skill_directories=skill_directories,
             available_tools=sdk_available_tools,
         )
 
@@ -1300,6 +1361,7 @@ class AgentManager:
                     hooks=hooks,
                     custom_agents=custom_agents,
                     mcp_servers=mcp_servers,
+                    skill_directories=skill_directories,
                     available_tools=sdk_available_tools,
                 )
                 session = await copilot.resume_session(

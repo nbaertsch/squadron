@@ -232,3 +232,186 @@ class TestParseAgentDefinition:
         assert "You review code." in config["prompt"]
         assert "github" in config["mcp_servers"]
         assert config["mcp_servers"]["github"]["type"] == "http"
+
+
+class TestSkillDefinition:
+    def test_basic_skill_definition(self):
+        from squadron.config import SkillDefinition
+
+        skill = SkillDefinition(path="squadron-internals", description="Framework architecture")
+        assert skill.path == "squadron-internals"
+        assert skill.description == "Framework architecture"
+
+    def test_skill_definition_default_description(self):
+        from squadron.config import SkillDefinition
+
+        skill = SkillDefinition(path="some-skill")
+        assert skill.path == "some-skill"
+        assert skill.description == ""
+
+
+class TestSkillsConfig:
+    def test_default_base_path(self):
+        from squadron.config import SkillsConfig
+
+        sc = SkillsConfig()
+        assert sc.base_path == ".squadron/skills"
+        assert sc.definitions == {}
+
+    def test_with_definitions(self):
+        from squadron.config import SkillDefinition, SkillsConfig
+
+        sc = SkillsConfig(
+            base_path=".squadron/skills",
+            definitions={
+                "squadron-internals": SkillDefinition(
+                    path="squadron-internals", description="Framework arch"
+                ),
+                "squadron-dev-guide": SkillDefinition(path="squadron-dev-guide"),
+            },
+        )
+        assert "squadron-internals" in sc.definitions
+        assert "squadron-dev-guide" in sc.definitions
+        assert sc.definitions["squadron-internals"].path == "squadron-internals"
+
+    def test_custom_base_path(self):
+        from squadron.config import SkillsConfig
+
+        # base_path must be a relative path — absolute paths are rejected
+        sc = SkillsConfig(base_path="custom/skills/dir")
+        assert sc.base_path == "custom/skills/dir"
+
+
+class TestAgentDefinitionSkills:
+    def test_skills_field_default(self):
+        defn = parse_agent_definition("test", "---\nname: test\n---\nBody.")
+        assert defn.skills == []
+
+    def test_skills_parsed_from_frontmatter(self):
+        content = (
+            "---\n"
+            "name: feat-dev\n"
+            "skills: [squadron-internals, squadron-dev-guide]\n"
+            "---\n\nYou are a feature developer.\n"
+        )
+        defn = parse_agent_definition("feat-dev", content)
+        assert defn.skills == ["squadron-internals", "squadron-dev-guide"]
+
+    def test_single_skill_parsed(self):
+        content = "---\nname: pm\nskills:\n  - squadron-internals\n---\nYou are PM.\n"
+        defn = parse_agent_definition("pm", content)
+        assert defn.skills == ["squadron-internals"]
+
+    def test_empty_skills_list(self):
+        content = "---\nname: code-search\nskills: []\n---\nSearch code.\n"
+        defn = parse_agent_definition("code-search", content)
+        assert defn.skills == []
+
+    def test_skills_null_frontmatter_defaults_to_empty(self):
+        content = "---\nname: agent\nskills:\n---\nBody.\n"
+        defn = parse_agent_definition("agent", content)
+        assert defn.skills == []
+
+
+class TestSquadronConfigSkills:
+    def test_skills_field_defaults(self, squadron_dir: Path):
+        config = load_config(squadron_dir)
+        assert hasattr(config, "skills")
+        assert config.skills.base_path == ".squadron/skills"
+        assert config.skills.definitions == {}
+
+    def test_skills_config_loaded_from_yaml(self, squadron_dir: Path):
+        import yaml
+
+        from squadron.config import load_config
+
+        # Add skills section to config
+        config_path = squadron_dir / "config.yaml"
+        existing = yaml.safe_load(config_path.read_text())
+        existing["skills"] = {
+            "base_path": ".squadron/skills",
+            "definitions": {
+                "my-skill": {"path": "my-skill", "description": "A test skill"},
+                "another-skill": {"path": "another-skill"},
+            },
+        }
+        config_path.write_text(yaml.dump(existing))
+
+        config = load_config(squadron_dir)
+        assert "my-skill" in config.skills.definitions
+        assert config.skills.definitions["my-skill"].path == "my-skill"
+        assert config.skills.definitions["my-skill"].description == "A test skill"
+        assert "another-skill" in config.skills.definitions
+        assert config.skills.definitions["another-skill"].description == ""
+
+
+class TestSkillPathTraversalValidation:
+    """Regression tests for path traversal prevention in skill config models.
+
+    These tests verify that SkillDefinition.path and SkillsConfig.base_path
+    reject absolute paths and directory traversal components (../).
+    """
+
+    def test_skill_definition_rejects_absolute_path(self):
+        from pydantic import ValidationError
+
+        from squadron.config import SkillDefinition
+
+        with pytest.raises(ValidationError, match="absolute"):
+            SkillDefinition(path="/etc/ssh")
+
+    def test_skill_definition_rejects_dotdot_path(self):
+        from pydantic import ValidationError
+
+        from squadron.config import SkillDefinition
+
+        with pytest.raises(ValidationError, match="traversal"):
+            SkillDefinition(path="../outside-repo")
+
+    def test_skill_definition_rejects_nested_dotdot(self):
+        from pydantic import ValidationError
+
+        from squadron.config import SkillDefinition
+
+        with pytest.raises(ValidationError, match="traversal"):
+            SkillDefinition(path="skills/../../etc/passwd")
+
+    def test_skill_definition_accepts_relative_path(self):
+        from squadron.config import SkillDefinition
+
+        skill = SkillDefinition(path="squadron-internals")
+        assert skill.path == "squadron-internals"
+
+    def test_skill_definition_accepts_nested_relative_path(self):
+        from squadron.config import SkillDefinition
+
+        skill = SkillDefinition(path="subdir/my-skill")
+        assert skill.path == "subdir/my-skill"
+
+    def test_skills_config_rejects_absolute_base_path(self):
+        from pydantic import ValidationError
+
+        from squadron.config import SkillsConfig
+
+        with pytest.raises(ValidationError, match="absolute"):
+            SkillsConfig(base_path="/custom/skills/dir")
+
+    def test_skills_config_rejects_dotdot_base_path(self):
+        from pydantic import ValidationError
+
+        from squadron.config import SkillsConfig
+
+        with pytest.raises(ValidationError, match="traversal"):
+            SkillsConfig(base_path="../outside")
+
+    def test_skills_config_accepts_relative_base_path(self):
+        from squadron.config import SkillsConfig
+
+        sc = SkillsConfig(base_path="custom/skills")
+        assert sc.base_path == "custom/skills"
+
+    def test_skills_config_accepts_default_base_path(self):
+        from squadron.config import SkillsConfig
+
+        sc = SkillsConfig()
+        assert sc.base_path == ".squadron/skills"

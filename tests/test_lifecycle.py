@@ -332,6 +332,7 @@ class TestPostTurnStateMachine:
             LabelsConfig,
             ProjectConfig,
             RuntimeConfig,
+            SkillsConfig,
             SquadronConfig,
         )
 
@@ -341,6 +342,7 @@ class TestPostTurnStateMachine:
         config.circuit_breakers = CircuitBreakerConfig()
         config.agent_roles = {}
         config.labels = LabelsConfig()
+        config.skills = SkillsConfig()
 
         github = _make_github_mock()
         router = MagicMock()
@@ -745,6 +747,8 @@ class TestWipCommitAndPush:
         """Create an AgentManager with mocks sufficient for WIP commit tests."""
         from squadron.config import SquadronConfig, ProjectConfig, RuntimeConfig
 
+        from squadron.config import SkillsConfig as _SkillsConfig
+
         config = MagicMock(spec=SquadronConfig)
         config.project = MagicMock(spec=ProjectConfig)
         config.project.owner = "testowner"
@@ -753,6 +757,7 @@ class TestWipCommitAndPush:
         config.runtime = MagicMock(spec=RuntimeConfig)
         config.runtime.max_concurrent_agents = 5
         config.runtime.worktree_dir = None
+        config.skills = _SkillsConfig()
 
         registry_mock = AsyncMock(spec=AgentRegistry)
         github = _make_github_mock()
