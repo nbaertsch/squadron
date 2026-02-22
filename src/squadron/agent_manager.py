@@ -737,6 +737,38 @@ class AgentManager:
 
     # ── Agent Creation ───────────────────────────────────────────────────
 
+    def _resolve_skill_directories(self, agent_def: "AgentDefinition") -> list[str]:
+        """Resolve agent's skill names to absolute directory paths.
+
+        Each skill name is looked up in config.skills.definitions, then the path
+        is resolved relative to config.skills.base_path under the repo root.
+        Missing skill definitions or directories are logged as warnings so
+        agents still start even if skills are unavailable.
+        """
+
+        skills_config = self.config.skills
+        base = self.repo_root / skills_config.base_path
+        dirs: list[str] = []
+        for skill_name in agent_def.skills:
+            skill_def = skills_config.definitions.get(skill_name)
+            if skill_def is None:
+                logger.warning(
+                    "Unknown skill '%s' referenced by agent '%s' — skipping",
+                    skill_name,
+                    agent_def.role,
+                )
+                continue
+            skill_path = base / skill_def.path
+            if skill_path.is_dir():
+                dirs.append(str(skill_path))
+            else:
+                logger.warning(
+                    "Skill directory not found for '%s': %s — skipping",
+                    skill_name,
+                    skill_path,
+                )
+        return dirs
+
     async def create_agent(
         self,
         role: str,
@@ -1245,7 +1277,9 @@ class AgentManager:
             # and blocks all built-in tools including bash and grep.
             # Custom Squadron tools are already registered via tools= above.
             # (Fix for issue #118: bash/grep tools non-functional)
-            sdk_available_tools = [t for t in agent_def.tools if t not in ALL_TOOL_NAMES_SET] or None
+            sdk_available_tools = [
+                t for t in agent_def.tools if t not in ALL_TOOL_NAMES_SET
+            ] or None
         else:
             custom_tool_names = None  # → no Squadron tools (must be in frontmatter)
             sdk_available_tools = None  # → all SDK tools visible
@@ -1254,6 +1288,9 @@ class AgentManager:
             record.agent_id,
             names=custom_tool_names,
         )
+
+        # Resolve skill directories for this agent's assigned skills
+        skill_directories = self._resolve_skill_directories(agent_def) or None
 
         session_config = build_session_config(
             role=record.role,
@@ -1265,6 +1302,7 @@ class AgentManager:
             hooks=hooks,
             custom_agents=custom_agents,
             mcp_servers=mcp_servers,
+            skill_directories=skill_directories,
             available_tools=sdk_available_tools,
         )
 
@@ -1285,6 +1323,7 @@ class AgentManager:
                     hooks=hooks,
                     custom_agents=custom_agents,
                     mcp_servers=mcp_servers,
+                    skill_directories=skill_directories,
                     available_tools=sdk_available_tools,
                 )
                 session = await copilot.resume_session(record.session_id, resume_config)
@@ -2397,8 +2436,7 @@ class AgentManager:
             await self.agent_inboxes[agent.agent_id].put(review_event)
 
             logger.info(
-                "PR review queued to inbox of PR-owning agent %s "
-                "(pr=#%d, state=%s, reviewer=%s)",
+                "PR review queued to inbox of PR-owning agent %s (pr=#%d, state=%s, reviewer=%s)",
                 agent.agent_id,
                 event.pr_number,
                 review_state,

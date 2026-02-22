@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 # ── Config Models (match config-schema.md) ───────────────────────────────────
 
 
+class SkillDefinition(BaseModel):
+    """A named skill (knowledge bundle) available to agents.
+
+    Skills are directories of markdown/text files containing domain knowledge
+    (architecture docs, coding standards, API schemas, workflow guides) that
+    the Copilot SDK can index and inject as context.
+    """
+
+    path: str  # Relative to skills.base_path
+    description: str = ""
+
+
+class SkillsConfig(BaseModel):
+    """Top-level skills configuration for project-level skill definitions."""
+
+    base_path: str = ".squadron/skills"
+    definitions: dict[str, SkillDefinition] = Field(default_factory=dict)
+
+
 class ProjectConfig(BaseModel):
     name: str
     owner: str = ""  # GitHub org/user, e.g. "noahbaertsch"
@@ -388,6 +407,9 @@ class SquadronConfig(BaseModel):
     # DEPRECATED: kept for backward compatibility, use review_policy instead
     approval_flows: ApprovalFlowConfig = Field(default_factory=ApprovalFlowConfig)
     commands: dict[str, "CommandDefinition"] = Field(default_factory=dict)
+
+    # Skills configuration — project-level skill definitions
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
 
     # Workflows - deterministic multi-agent orchestration (inline in config)
     workflows: dict[str, "WorkflowConfig"] = Field(default_factory=dict)
@@ -852,6 +874,7 @@ class AgentDefinition(BaseModel):
     tools: list[str] | None = None  # Allowlist of tool names (built-in aliases + custom).
     #                                  None = all tools available; list = only listed tools.
     mcp_servers: dict[str, MCPServerDefinition] = Field(default_factory=dict)
+    skills: list[str] = Field(default_factory=list)  # Skill names from frontmatter
 
     def to_custom_agent_config(self) -> dict[str, Any]:
         """Convert to SDK CustomAgentConfig dict.
@@ -948,6 +971,7 @@ def parse_agent_definition(role: str, content: str) -> AgentDefinition:
         infer=fm.get("infer", True),
         tools=fm.get("tools") or None,
         mcp_servers=mcp_servers,
+        skills=fm.get("skills") or [],
     )
 
 
