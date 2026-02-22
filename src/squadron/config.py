@@ -465,6 +465,11 @@ class SquadronConfig(BaseModel):
     # Workflows - deterministic multi-agent orchestration (inline in config)
     workflows: dict[str, "WorkflowConfig"] = Field(default_factory=dict)
 
+    # Pipelines — unified orchestration primitive (AD-019)
+    # These replace/supplement the combination of triggers + workflows + review_policy.
+    # Backward-compatible: existing triggers and review_policy continue to work.
+    pipelines: dict[str, "PipelineConfig"] = Field(default_factory=dict)
+
     def get_sandbox_config(self):
         """Return a typed SandboxConfig, lazily importing to avoid circular deps."""
         from squadron.sandbox.config import SandboxConfig
@@ -841,6 +846,203 @@ class GateCheckResult(BaseModel):
     error_message: str | None = Field(default=None)
     checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+
+
+
+# ── Pipeline Definitions (AD-019: Unified Pipeline System) ──────────────────
+
+
+class PipelineGateCheck(BaseModel):
+    """A single gate check condition in a pipeline stage.
+
+    Unlike the legacy ``GateCondition`` (which has hard-coded fields per check
+    type), ``PipelineGateCheck`` uses a generic ``params`` dict, enabling
+    pluggable check types without schema changes.
+
+    Examples::
+
+        check: pr_approvals_met
+        params:
+          count: 2
+
+        check: ci_status
+        params:
+          contexts: [ci/test, ci/lint]
+
+        check: command
+        params:
+          run: pytest tests/
+          expect: exit_code == 0
+    """
+
+    check: str = Field(..., description="Registered gate check name")
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Check-specific parameters passed to the gate function",
+    )
+
+
+class PipelineEventSubscription(BaseModel):
+    """Defines an event that causes a waiting pipeline to re-evaluate gates.
+
+    Example::
+
+        event: pull_request_review.submitted
+        re_evaluate_gate: quality-gate
+    """
+
+    event: str = Field(
+        ...,
+        description="GitHub event type that triggers re-evaluation "
+        "(e.g. 'pull_request_review.submitted', 'check_suite.completed')",
+    )
+    re_evaluate_stage: str | None = Field(
+        default=None,
+        description="Stage ID whose gate conditions should be re-evaluated. "
+        "If omitted, all waiting gate stages in the pipeline are re-evaluated.",
+    )
+
+
+class PipelineStageConfig(BaseModel):
+    """A single stage in a pipeline definition.
+
+    Supports all the stage types from ``StageType`` plus reactive gate
+    re-evaluation via ``event_subscriptions``.
+    """
+
+    id: str = Field(..., description="Unique stage identifier within the pipeline")
+    name: str | None = Field(default=None, description="Human-readable stage name")
+    type: "StageType" = Field(default="agent", description="Stage type")
+
+    # Agent stage config
+    agent: str | None = Field(default=None, description="Agent role to execute")
+    action: str | None = Field(default=None, description="Action hint for agent")
+
+    # Gate stage config — uses pluggable gate checks (replaces GateCondition)
+    gate_checks: list[PipelineGateCheck] = Field(
+        default_factory=list,
+        description="Gate check conditions (all must pass for gate to open)",
+    )
+
+    # Backward-compat: accept legacy ``conditions`` key (list of GateCondition-style dicts)
+    conditions: list[Any] = Field(
+        default_factory=list,
+        description="Legacy gate conditions (deprecated — use gate_checks instead)",
+    )
+
+    # Delay stage config
+    duration: str | None = Field(default=None, description="Delay duration, e.g. '30s', '5m'")
+
+    # Transitions
+    on_complete: str | None = Field(default=None)
+    on_pass: str | None = Field(default=None)
+    on_fail: str | None = Field(default=None)
+    on_error: str | None = Field(default=None)
+
+    # Reactive event subscriptions — when waiting on a gate, these events
+    # will trigger gate re-evaluation rather than waiting indefinitely.
+    event_subscriptions: list[PipelineEventSubscription] = Field(
+        default_factory=list,
+        description="Events that cause this gate stage to be re-evaluated",
+    )
+
+    # Iteration limit for loops
+    max_iterations: int | None = Field(
+        default=None,
+        description="Maximum times this stage can be reached (prevents infinite loops)",
+    )
+
+
+class PipelineConfig(BaseModel):
+    """Top-level definition of a pipeline.
+
+    Pipelines are the unified orchestration primitive for AD-019.
+    They replace the combination of ``triggers`` + ``workflows`` + ``review_policy``
+    with a single, composable, event-reactive definition.
+
+    Example YAML::
+
+        pipelines:
+          feature-review:
+            trigger:
+              event: pull_request.opened
+            event_subscriptions:
+              - event: pull_request_review.submitted
+              - event: check_suite.completed
+            stages:
+              - id: code-review
+                type: agent
+                agent: pr-review
+                on_complete: quality-gate
+              - id: quality-gate
+                type: gate
+                gate_checks:
+                  - check: pr_approvals_met
+                    params: {count: 1}
+                  - check: ci_status
+                  - check: no_changes_requested
+                on_pass: auto-merge
+                on_fail: code-review
+                event_subscriptions:
+                  - event: pull_request_review.submitted
+                  - event: check_suite.completed
+              - id: auto-merge
+                type: action
+                action: merge_pr
+    """
+
+    trigger: "WorkflowTrigger" = Field(
+        ..., description="Event that starts this pipeline"
+    )
+    stages: list[PipelineStageConfig] = Field(
+        default_factory=list,
+        description="Ordered list of pipeline stages",
+    )
+    context: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Initial context values propagated to all stages",
+    )
+    # Pipeline-level event subscriptions (apply to all gate stages)
+    event_subscriptions: list[PipelineEventSubscription] = Field(
+        default_factory=list,
+        description="Events that trigger gate re-evaluation across all stages",
+    )
+    # Gate plugin modules to load for this pipeline
+    gate_plugins: list[str] = Field(
+        default_factory=list,
+        description="Python module paths providing additional gate checks",
+    )
+
+    def get_stage(self, stage_id: str) -> "PipelineStageConfig | None":
+        """Get a stage by its ID."""
+        for stage in self.stages:
+            if stage.id == stage_id:
+                return stage
+        return None
+
+    def get_stage_index(self, stage_id: str) -> int | None:
+        """Get the zero-based index of a stage by ID."""
+        for i, stage in enumerate(self.stages):
+            if stage.id == stage_id:
+                return i
+        return None
+
+    def get_next_stage_id(self, current_stage_id: str) -> str | None:
+        """Get the next stage ID in sequence after the given stage."""
+        idx = self.get_stage_index(current_stage_id)
+        if idx is None or idx + 1 >= len(self.stages):
+            return None
+        return self.stages[idx + 1].id
+
+    def collect_subscribed_events(self) -> list[str]:
+        """Collect all unique event types subscribed to across all stages."""
+        events: set[str] = set()
+        for sub in self.event_subscriptions:
+            events.add(sub.event)
+        for stage in self.stages:
+            for sub in stage.event_subscriptions:
+                events.add(sub.event)
+        return sorted(events)
 
 # ── Agent Definition Loading ─────────────────────────────────────────────────
 

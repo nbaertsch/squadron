@@ -97,6 +97,9 @@ class WorkflowEngine:
         self._spawn_agent: SpawnAgentCallback | None = None
         self._run_command: RunCommandCallback | None = None
 
+        # Agent registry for approval-based gate checks (AD-019 gap #2 fix)
+        self._agent_registry: Any | None = None
+
         # Active workflow tasks (run_id -> task)
         self._workflow_tasks: dict[str, asyncio.Task] = {}
 
@@ -451,24 +454,64 @@ class WorkflowEngine:
                 run.run_id, "fail", {"passed": False, "failed_checks": failed_checks}
             )
 
+    def set_agent_registry(self, registry: Any) -> None:
+        """Register the agent registry for approval-based gate checks."""
+        self._agent_registry = registry
+
     async def _evaluate_condition(
         self,
         condition: GateCondition,
         run: WorkflowRun,
         workflow: WorkflowConfig,
     ) -> GateCheckResult:
-        """Evaluate a single gate condition."""
+        """Evaluate a single gate condition.
+
+        Supported check types:
+            - ``command``     — run a shell command
+            - ``file_exists`` — check file paths exist
+            - ``pr_approval`` — check PR has required approvals (AD-019 gap #2 fix)
+        """
         check_type = condition.check
 
         if check_type == "command":
             return await self._check_command(condition, run)
         elif check_type == "file_exists":
             return await self._check_file_exists(condition, run)
+        elif check_type == "pr_approval":
+            return await self._check_pr_approval(condition, run)
         else:
+            # Delegate to pipeline gate registry for pluggable checks (AD-019)
+            try:
+                from squadron.pipeline.gates import GateCheckContext, default_gate_registry
+                ctx = GateCheckContext(
+                    params={},
+                    pr_number=run.pr_number,
+                    issue_number=run.issue_number,
+                    run_context=run.context,
+                    registry=getattr(self, "_agent_registry", None),
+                    run_command=self._run_command,
+                )
+                # Build params from legacy condition fields
+                if condition.run:
+                    ctx.params["run"] = condition.run
+                if condition.expect:
+                    ctx.params["expect"] = condition.expect
+                if condition.paths:
+                    ctx.params["paths"] = condition.paths
+                if condition.count is not None:
+                    ctx.params["count"] = condition.count
+                check_fn = default_gate_registry.get(check_type)
+                if check_fn:
+                    return await default_gate_registry.evaluate(check_type, ctx)
+            except ImportError:
+                pass
             return GateCheckResult(
                 check_type=check_type,
                 passed=False,
-                error_message=f"Unknown check type: {check_type}",
+                error_message=f"Unknown check type: '{check_type}'. "
+                "Available built-in checks: command, file_exists, pr_approval, "
+                "pr_approvals_met, no_changes_requested, human_approved, "
+                "label_present, ci_status, branch_up_to_date",
             )
 
     async def _check_command(
@@ -537,6 +580,69 @@ class WorkflowEngine:
             result_data={"missing": missing},
             error_message=f"Missing files: {missing}" if missing else None,
         )
+
+    async def _check_pr_approval(
+        self,
+        condition: GateCondition,
+        run: WorkflowRun,
+    ) -> GateCheckResult:
+        """Check that a PR has the required number of approvals (AD-019 gap #2 fix).
+
+        This implements the ``pr_approval`` check type that was declared in the
+        schema (``GateCondition.check``) but was never wired up.
+
+        Args:
+            condition.count: Required number of approvals (default: 1).
+
+        Requires the agent registry to be set via ``set_agent_registry()``.
+        Human approvals (recorded by the framework's ``_handle_pr_review_submitted``
+        fix) are counted alongside agent approvals.
+        """
+        if not self._agent_registry:
+            return GateCheckResult(
+                check_type="pr_approval",
+                passed=False,
+                error_message="No agent registry registered for pr_approval check",
+            )
+
+        pr_number = run.pr_number
+        if not pr_number:
+            return GateCheckResult(
+                check_type="pr_approval",
+                passed=False,
+                error_message="No PR number in workflow run context",
+            )
+
+        required_count = condition.count if condition.count is not None else 1
+
+        try:
+            approvals = await self._agent_registry.get_pr_approvals(
+                pr_number, state="approved"
+            )
+            count = len(approvals)
+            passed = count >= required_count
+            return GateCheckResult(
+                check_type="pr_approval",
+                passed=passed,
+                result_data={
+                    "required": required_count,
+                    "actual": count,
+                    "approvers": [
+                        {"role": a.get("agent_role"), "id": a.get("agent_id")}
+                        for a in approvals
+                    ],
+                },
+                error_message=(
+                    None if passed
+                    else f"PR #{pr_number} has {count}/{required_count} approvals"
+                ),
+            )
+        except Exception as exc:
+            return GateCheckResult(
+                check_type="pr_approval",
+                passed=False,
+                error_message=f"Approval check error: {exc}",
+            )
 
     async def _execute_delay_stage(
         self,

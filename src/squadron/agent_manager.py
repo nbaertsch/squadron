@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from squadron.github_client import GitHubClient
     from squadron.registry import AgentRegistry
     from squadron.workflow import WorkflowEngine
+    from squadron.pipeline.engine import PipelineEngine
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,9 @@ class AgentManager:
         # Workflow engine (optional — set via set_workflow_engine)
         self._workflow_engine: WorkflowEngine | None = None
 
+        # Pipeline engine (AD-019) — optional, set via set_pipeline_engine
+        self._pipeline_engine: "PipelineEngine | None" = None
+
         # Agent concurrency limiter
         max_concurrent = config.runtime.max_concurrent_agents
         self._agent_semaphore: asyncio.Semaphore | None = (
@@ -137,6 +141,10 @@ class AgentManager:
     def set_workflow_engine(self, engine: WorkflowEngine) -> None:
         """Attach the workflow engine for event-driven pipeline triggers."""
         self._workflow_engine = engine
+
+    def set_pipeline_engine(self, engine: "PipelineEngine") -> None:
+        """Attach the pipeline engine (AD-019) for unified pipeline orchestration."""
+        self._pipeline_engine = engine
 
     async def _log_activity(
         self,
@@ -2406,19 +2414,22 @@ class AgentManager:
         # which are already registered via _register_trigger_handlers
 
     async def _handle_pr_review_submitted(self, event: SquadronEvent) -> None:
-        """Handle PR review submission — deliver review context to the PR-owning agent.
+        """Handle PR review submission — record human reviews and deliver inbox notification.
 
-        This is a framework-level supplement to config-trigger based waking (issue #112).
-        When a review is submitted on a PR, we find all sleeping agents that own that PR
-        (identified by agent.pr_number) and queue a rich review notification into their
-        inbox.  The config trigger system remains responsible for actually waking the agent;
-        this handler enriches the inbox so the agent sees full review details when it calls
-        check_for_events after waking.
+        This method has two responsibilities:
 
-        Design rationale: config triggers may match and call _trigger_wake independently,
-        but they don't populate the inbox — the inbox delivery here is additive.  Using the
-        message-passing system (agent_inboxes) ensures the review context is available to
-        the agent regardless of how it was woken (config trigger, command mention, etc.).
+        1. **Framework-level human review tracking** (AD-019 gap #1 fix):
+           Human (non-bot) reviews are now recorded in the ``pr_approvals`` table
+           with ``agent_role="human"``.  This enables gate checks like
+           ``human_approved`` and ``pr_approvals_met`` (with include_humans=True)
+           to work correctly.
+
+        2. **Inbox delivery** (issue #112): Sleeping agents that own the PR
+           receive a rich review notification in their inbox so they see full
+           review details on wake.
+
+        The bot username is read from ``config.project.bot_username`` so we
+        can distinguish human reviewers from Squadron bot reviews.
         """
         if not event.pr_number:
             return
@@ -2426,8 +2437,55 @@ class AgentManager:
         payload = event.data.get("payload", {})
         review = payload.get("review", {})
         review_state = review.get("state", "").upper()
+        reviewer_login = review.get("user", {}).get("login", "")
+        review_id = str(review.get("id", ""))
+        review_body = review.get("body") or ""
 
-        # Find sleeping agents that own this PR
+        # ── Human review tracking (AD-019 gap #1) ────────────────────────────
+        # Record human reviews in the pr_approvals table so gate checks can
+        # evaluate human_approved and pr_approvals_met conditions.
+        bot_username = self.config.project.bot_username
+        is_bot = (
+            reviewer_login == bot_username
+            or reviewer_login.endswith("[bot]")
+        )
+
+        if not is_bot and reviewer_login and review_state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            approval_state_map = {
+                "APPROVED": "approved",
+                "CHANGES_REQUESTED": "changes_requested",
+                "DISMISSED": "pending",  # treat dismissed as pending
+            }
+            human_state = approval_state_map.get(review_state, "pending")
+            try:
+                await self.registry.record_pr_approval(
+                    pr_number=event.pr_number,
+                    agent_role="human",
+                    agent_id=reviewer_login,
+                    state=human_state,
+                    review_body=review_body or None,
+                )
+                logger.info(
+                    "Recorded human review for PR #%d: %s → %s",
+                    event.pr_number, reviewer_login, human_state,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to record human review for PR #%d", event.pr_number
+                )
+
+        # ── Pipeline event routing (AD-019) ───────────────────────────────────
+        # Notify the pipeline engine so waiting gate stages can be re-evaluated.
+        if self._pipeline_engine is not None:
+            try:
+                await self._pipeline_engine.on_event(
+                    "pull_request_review.submitted", event
+                )
+            except Exception:
+                logger.exception("Pipeline engine error on PR review event")
+
+        # ── Inbox delivery (issue #112) ───────────────────────────────────────
+        # Find sleeping agents that own this PR and enqueue the review event.
         all_agents = await self.registry.get_all_active_agents()
         pr_owners = [
             a
@@ -2461,7 +2519,7 @@ class AgentManager:
                 agent.agent_id,
                 event.pr_number,
                 review_state,
-                review.get("user", {}).get("login", "unknown"),
+                reviewer_login,
             )
 
     async def _handle_pr_review_comment(self, event: SquadronEvent) -> None:
