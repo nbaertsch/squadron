@@ -21,6 +21,7 @@ class AgentStatus(str, enum.Enum):
     COMPLETED = "completed"
     ESCALATED = "escalated"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # Agent roles are plain strings — defined in .squadron/config.yaml, not in code.
@@ -290,13 +291,152 @@ class ParsedCommand(BaseModel):
     agent_name: str | None = None
     message: str | None = None
 
+    # Action command fields (status, cancel, retry)
+    action_name: str | None = None
+    """Built-in action name (e.g. 'status', 'cancel', 'retry')."""
+    action_args: list[str] = Field(default_factory=list)
+    """Positional arguments to the action (e.g. role name for cancel/retry)."""
+
+    @property
+    def is_action(self) -> bool:
+        """True when this parsed command is a built-in action, not an agent route."""
+        return self.action_name is not None
+
+
+# ── Default known agents (used as fallback when no config is available) ─────
+# This set mirrors the agent roles defined in .squadron/config.yaml and is
+# used only by the backward-compatible ``parse_command`` shim below.
+# Prefer ``CommandParser`` with config-driven agent list for new code.
+_DEFAULT_KNOWN_AGENTS: frozenset[str] = frozenset(
+    {
+        "pm",
+        "bug-fix",
+        "feat-dev",
+        "docs-dev",
+        "infra-dev",
+        "security-review",
+        "test-coverage",
+        "pr-review",
+    }
+)
+
+# Built-in action commands that are dispatched to the framework (not to agents)
+_BUILT_IN_ACTIONS: frozenset[str] = frozenset({"status", "cancel", "retry"})
+
+
+class CommandParser:
+    """Config-driven parser for ``@<prefix>`` commands in GitHub comments.
+
+    Replaces the module-level ``parse_command`` function with a parser that
+    knows about the active agent roster (from ``config.agent_roles``) and
+    the configured command prefix (from ``config.command_prefix``).
+
+    Usage::
+
+        parser = CommandParser(
+            command_prefix=config.command_prefix,
+            known_agents=set(config.agent_roles.keys()),
+            commands=config.commands,
+        )
+        result = parser.parse(comment_body)
+
+    The parser handles three command classes:
+    - ``<prefix> help`` — returns ``ParsedCommand(is_help=True)``
+    - ``<prefix> status|cancel|retry [args]`` — action commands
+    - ``<prefix> <agent>: <message>`` — agent routing commands
+    """
+
+    def __init__(
+        self,
+        command_prefix: str = "@squadron-dev",
+        known_agents: set[str] | None = None,
+        commands: dict | None = None,
+    ) -> None:
+        self.command_prefix = command_prefix
+        self.known_agents: frozenset[str] = frozenset(known_agents or _DEFAULT_KNOWN_AGENTS)
+        self.commands: dict = commands or {}
+
+        # Derive the set of action names from both built-in defaults and config
+        config_actions: set[str] = set()
+        for cmd_name, cmd_def in self.commands.items():
+            cmd_type = (
+                getattr(cmd_def, "type", None)
+                if not isinstance(cmd_def, dict)
+                else cmd_def.get("type")
+            )
+            if cmd_type == "action":
+                config_actions.add(cmd_name)
+        self.action_names: frozenset[str] = _BUILT_IN_ACTIONS | frozenset(config_actions)
+
+        # Build regex patterns from command_prefix
+        escaped = re.escape(command_prefix)
+        self._command_re = re.compile(
+            rf"{escaped}\s+([\w][\w-]*):?\s*(.*)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        self._help_re = re.compile(
+            rf"{escaped}\s+help\b",
+            re.IGNORECASE,
+        )
+
+    def parse(self, text: str) -> ParsedCommand | None:
+        """Parse ``text`` for a squadron command.
+
+        Returns a ``ParsedCommand`` if the text contains a valid command, or
+        ``None`` if no command was found.  Mentions inside backtick-wrapped
+        code spans or fenced code blocks are intentionally ignored.
+
+        Args:
+            text: Raw comment body from GitHub.
+
+        Returns:
+            Parsed command or None.
+        """
+        if not text:
+            return None
+
+        # Strip code spans so that backtick-wrapped mentions are not matched
+        searchable = _strip_code_spans(text)
+
+        # Check for help command first (higher priority than action/agent checks)
+        if self._help_re.search(searchable):
+            return ParsedCommand(is_help=True)
+
+        # Match the general @prefix <word> pattern
+        match = self._command_re.search(searchable)
+        if not match:
+            return None
+
+        token = match.group(1).lower()
+        rest = match.group(2).strip()
+        match_text = searchable[match.start() : match.end()]
+        has_colon = ":" in match_text
+
+        # Action commands: status, cancel <role>, retry <role>
+        if token in self.action_names:
+            args = rest.split() if rest else []
+            return ParsedCommand(action_name=token, action_args=args)
+
+        # Agent routing commands
+        if has_colon or token in self.known_agents:
+            return ParsedCommand(agent_name=token, message=rest)
+
+        return None
+
 
 def parse_command(text: str) -> ParsedCommand | None:
     """Parse a comment for squadron command syntax.
 
+    .. deprecated::
+        Use ``CommandParser`` with config-driven agent list for new code.
+        This function uses the default (hardcoded) known-agents list as a
+        backward-compatible fallback.
+
     Supports:
     - ``@squadron-dev help`` — returns ParsedCommand(is_help=True)
-    - ``@squadron-dev <agent>: <message>`` — returns ParsedCommand with agent_name and message
+    - ``@squadron-dev status`` — returns ParsedCommand(action_name="status")
+    - ``@squadron-dev cancel <role>`` — returns ParsedCommand with action/args
+    - ``@squadron-dev <agent>: <message>`` — returns ParsedCommand with agent_name
 
     Mentions that appear inside backtick-wrapped inline code or fenced code
     blocks are **ignored** — they are treated as literal text, not commands.
@@ -304,41 +444,8 @@ def parse_command(text: str) -> ParsedCommand | None:
 
     Returns None if the comment doesn't match any command syntax.
     """
-    if not text:
-        return None
+    return _DEFAULT_PARSER.parse(text)
 
-    # Strip code spans so that backtick-wrapped mentions are not matched.
-    # We operate on the stripped copy for all pattern searches.
-    searchable = _strip_code_spans(text)
 
-    # Check for help command first
-    if _HELP_RE.search(searchable):
-        return ParsedCommand(is_help=True)
-
-    # Check for agent command
-    match = _COMMAND_RE.search(searchable)
-    if match:
-        agent_name = match.group(1).lower()
-        message = match.group(2).strip()
-
-        # Define known agent names (from .squadron/config.yaml)
-        known_agents = {
-            "pm",
-            "bug-fix",
-            "feat-dev",
-            "docs-dev",
-            "infra-dev",
-            "security-review",
-            "test-coverage",
-            "pr-review",
-        }
-
-        # If there's a colon in the match, it's definitely a command
-        # If no colon, validate that it's a known agent name
-        match_text = searchable[match.start() : match.end()]
-        has_colon = ":" in match_text
-
-        if has_colon or agent_name in known_agents:
-            return ParsedCommand(agent_name=agent_name, message=message)
-
-    return None
+# Module-level default parser (backward compat — uses hardcoded known_agents)
+_DEFAULT_PARSER = CommandParser(known_agents=set(_DEFAULT_KNOWN_AGENTS))

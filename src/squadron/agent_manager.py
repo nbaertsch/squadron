@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2576,8 +2577,6 @@ class AgentManager:
         then extracts role from the emoji + display_name signature format.
         Returns ``None`` for human senders.
         """
-        import re as _re
-
         payload = event.data.get("payload", {})
         comment_data = payload.get("comment", {})
         sender = comment_data.get("user", {})
@@ -2599,8 +2598,8 @@ class AgentManager:
             display_name = agent_def.display_name or role_name
             emoji = agent_def.emoji
             # Match pattern like "🎯 **Project Manager**" or just "**Project Manager**"
-            pattern = rf"^{_re.escape(emoji)}?\s*\*\*{_re.escape(display_name)}\*\*"
-            if _re.match(pattern, body, _re.IGNORECASE):
+            pattern = rf"^{re.escape(emoji)}?\s*\*\*{re.escape(display_name)}\*\*"
+            if re.match(pattern, body, re.IGNORECASE):
                 return role_name
 
         return None
@@ -2613,8 +2612,9 @@ class AgentManager:
         1. Parse ``@squadron-dev <agent>: <message>`` or ``@squadron-dev help``
            from the comment body (already populated on ``event.command``).
         2. Handle help command: post markdown table of available agents.
-        3. Handle agent command: validate agent exists and route accordingly.
-        4. Apply self-loop guard: if the comment was posted by a squadron
+        3. Handle action command: dispatch status/cancel/retry to built-in handlers.
+        4. Handle agent command: validate agent exists and route accordingly.
+        5. Apply self-loop guard: if the comment was posted by a squadron
            agent of role X, don't let it re-trigger itself.
 
         Comments without @squadron-dev commands are silently ignored.
@@ -2633,6 +2633,11 @@ class AgentManager:
         # Handle help command
         if event.command.is_help:
             await self._handle_help_command(event)
+            return
+
+        # Handle built-in action commands (status, cancel, retry)
+        if event.command.is_action:
+            await self._handle_action_command(event)
             return
 
         # Handle agent routing command
@@ -2693,9 +2698,256 @@ class AgentManager:
             return "enabled (API key required)"
         return "disabled (public access)"
 
+    async def _handle_action_command(self, event: SquadronEvent) -> None:
+        """Dispatch built-in action commands (status, cancel, retry).
+
+        Routes to the appropriate handler based on ``event.command.action_name``.
+        Enforces ``require_human`` permission from the command's config definition.
+        """
+        if event.issue_number is None:
+            raise ValueError("Cannot handle action command: event has no issue_number")
+
+        command = event.command
+        if command is None or not command.is_action:
+            raise ValueError("_handle_action_command called with non-action command")
+
+        action_name = command.action_name
+        if action_name is None:  # guaranteed by is_action property, but checked defensively
+            raise ValueError(
+                "_handle_action_command: action_name is None despite is_action being True"
+            )
+
+        # Built-in actions that default to require_human when no config override
+        _BUILTIN_REQUIRE_HUMAN: dict[str, bool] = {
+            "cancel": True,
+            "retry": True,
+            "status": False,
+        }
+
+        # Check require_human: config override wins, then built-in defaults
+        cmd_def = self.config.commands.get(action_name)
+        if cmd_def is not None:
+            require_human = cmd_def.permissions.require_human
+        else:
+            require_human = _BUILTIN_REQUIRE_HUMAN.get(action_name, False)
+
+        if require_human:
+            sender_role = self._get_sender_agent_role(event)
+            if sender_role is not None:
+                logger.info(
+                    "Action %r requires human sender — rejecting (sender_role=%s)",
+                    action_name,
+                    sender_role,
+                )
+                await self.github.comment_on_issue(
+                    self.config.project.owner,
+                    self.config.project.repo,
+                    event.issue_number,
+                    f"❌ **Permission denied:** `{action_name}` requires a human sender.",
+                )
+                return
+
+        logger.info(
+            "Action command %r (args=%s) on issue #%d",
+            action_name,
+            command.action_args,
+            event.issue_number,
+        )
+
+        if action_name == "status":
+            await self._handle_status_command(event)
+        elif action_name == "cancel":
+            await self._handle_cancel_command(event)
+        elif action_name == "retry":
+            await self._handle_retry_command(event)
+        else:
+            logger.warning("Unknown action command: %r", action_name)
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"❌ **Unknown action:** `{action_name}`\n\nAvailable actions: `status`, `cancel <role>`, `retry <role>`",
+            )
+
+    async def _handle_status_command(self, event: SquadronEvent) -> None:
+        """Handle ``@squadron-dev status`` — post active agent summary.
+
+        Lists all agents currently in CREATED, ACTIVE, or SLEEPING state,
+        with their role, status, and associated issue number.
+        """
+        if event.issue_number is None:
+            raise ValueError("Cannot handle status command: event has no issue_number")
+
+        non_terminal = {AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING}
+        all_agents = await self.registry.list_agents()
+        active_agents = [a for a in all_agents if a.status in non_terminal]
+
+        if not active_agents:
+            body = "📊 **Squadron Status**\n\nNo agents are currently active."
+        else:
+            lines = ["📊 **Squadron Status**", ""]
+            lines.append("| Agent ID | Role | Status | Issue |")
+            lines.append("|----------|------|--------|-------|")
+            for agent in sorted(active_agents, key=lambda a: a.agent_id):
+                issue_ref = f"#{agent.issue_number}" if agent.issue_number else "—"
+                lines.append(
+                    f"| `{agent.agent_id}` | `{agent.role}` | {agent.status.value} | {issue_ref} |"
+                )
+            body = "\n".join(lines)
+
+        await self.github.comment_on_issue(
+            self.config.project.owner,
+            self.config.project.repo,
+            event.issue_number,
+            body,
+        )
+        logger.info(
+            "Posted status response on issue #%d (%d active agents)",
+            event.issue_number,
+            len(active_agents),
+        )
+
+    async def _handle_cancel_command(self, event: SquadronEvent) -> None:
+        """Handle ``@squadron-dev cancel <role>`` — terminate an active agent.
+
+        Cancels the most recently active agent with the given role on the
+        current issue.  Requires a human sender (enforced via command config
+        ``permissions.require_human: true``).
+
+        Args:
+            event: The command event carrying ``action_args[0]`` = role name.
+        """
+        if event.issue_number is None:
+            raise ValueError("Cannot handle cancel command: event has no issue_number")
+
+        command = event.command
+        if command is None:
+            raise ValueError("_handle_cancel_command called with no command")
+
+        if not command.action_args:
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                "❌ **Usage:** `@squadron-dev cancel <role>`\n\nExample: `@squadron-dev cancel feat-dev`",
+            )
+            return
+
+        role = command.action_args[0].lower()
+
+        # Find active agents for this role on this issue
+        all_agents = await self.registry.list_agents()
+        non_terminal = {AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING}
+        candidates = [
+            a
+            for a in all_agents
+            if a.role == role and a.status in non_terminal and a.issue_number == event.issue_number
+        ]
+
+        if not candidates:
+            # Try any active agent with this role (not scoped to issue)
+            candidates = [a for a in all_agents if a.role == role and a.status in non_terminal]
+            if candidates:
+                other_issues = {a.issue_number for a in candidates if a.issue_number}
+                await self.github.comment_on_issue(
+                    self.config.project.owner,
+                    self.config.project.repo,
+                    event.issue_number,
+                    f"⚠️ No `{role}` agent on issue #{event.issue_number}; "
+                    f"cancelling agent(s) assigned to: {other_issues}",
+                )
+
+        if not candidates:
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"❌ **No active agent** found with role `{role}`.",
+            )
+            return
+
+        # Cancel the agent(s)
+        cancelled = []
+        for agent in candidates:
+            agent_task = self._agent_tasks.get(agent.agent_id)
+            if agent_task and not agent_task.done():
+                agent_task.cancel()
+            agent.status = AgentStatus.CANCELLED
+            await self.registry.update_agent(agent)
+            self._cancel_watchdog(agent.agent_id)
+            cancelled.append(agent.agent_id)
+            logger.info(
+                "Agent %s cancelled by human command on issue #%d",
+                agent.agent_id,
+                event.issue_number,
+            )
+
+        cancelled_str = ", ".join(f"`{aid}`" for aid in cancelled)
+        await self.github.comment_on_issue(
+            self.config.project.owner,
+            self.config.project.repo,
+            event.issue_number,
+            f"✅ **Cancelled:** {cancelled_str}",
+        )
+
+    async def _handle_retry_command(self, event: SquadronEvent) -> None:
+        """Handle ``@squadron-dev retry <role>`` — re-spawn a failed/cancelled agent.
+
+        Creates a new agent session for the given role on the current issue.
+        Requires a human sender (enforced via command config ``permissions.require_human: true``).
+
+        Args:
+            event: The command event carrying ``action_args[0]`` = role name.
+        """
+        if event.issue_number is None:
+            raise ValueError("Cannot handle retry command: event has no issue_number")
+
+        command = event.command
+        if command is None:
+            raise ValueError("_handle_retry_command called with no command")
+
+        if not command.action_args:
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                "❌ **Usage:** `@squadron-dev retry <role>`\n\nExample: `@squadron-dev retry feat-dev`",
+            )
+            return
+
+        role = command.action_args[0].lower()
+        role_config = self.config.agent_roles.get(role)
+        if not role_config:
+            available = sorted(self.config.agent_roles.keys())
+            available_str = ", ".join(f"`{r}`" for r in available)
+            await self.github.comment_on_issue(
+                self.config.project.owner,
+                self.config.project.repo,
+                event.issue_number,
+                f"❌ **Unknown role:** `{role}`\n\n**Available roles:** {available_str}",
+            )
+            return
+
+        logger.info(
+            "Retry command: spawning %s for issue #%d",
+            role,
+            event.issue_number,
+        )
+
+        # Route as if a spawn command was received
+        await self._command_spawn(role, role_config, event)
+
+        await self.github.comment_on_issue(
+            self.config.project.owner,
+            self.config.project.repo,
+            event.issue_number,
+            f"🔄 **Retrying:** `{role}` for issue #{event.issue_number}",
+        )
+
     async def _handle_help_command(self, event: SquadronEvent) -> None:
         """Handle @squadron-dev help — post markdown table of available agents."""
-        assert event.issue_number is not None
+        if event.issue_number is None:
+            raise ValueError("Cannot handle help command: event has no issue_number")
 
         lines = ["📋 **Available Agents**", ""]
         lines.append("| Agent | Description | Tools |")
@@ -2734,7 +2986,8 @@ class AgentManager:
 
     async def _post_unknown_agent_error(self, event: SquadronEvent, agent_name: str) -> None:
         """Post error message when unknown agent is requested."""
-        assert event.issue_number is not None
+        if event.issue_number is None:
+            raise ValueError("Cannot post unknown agent error: event has no issue_number")
 
         available = sorted(self.config.agent_roles.keys())
         available_str = ", ".join(f"`{a}`" for a in available)
@@ -2799,7 +3052,9 @@ class AgentManager:
                         )
                 return
 
-        assert event.issue_number is not None
+        if event.issue_number is None:
+            logger.warning("Command spawn: event has no issue_number — skipping")
+            return
         logger.info(
             "Command spawn: creating %s for issue #%d",
             role_name,
@@ -2816,7 +3071,9 @@ class AgentManager:
         event: SquadronEvent,
     ) -> None:
         """Handle command to a persistent role: wake if sleeping, deliver if active, spawn if new."""
-        assert event.issue_number is not None
+        if event.issue_number is None:
+            logger.warning("Command wake-or-spawn: event has no issue_number — skipping")
+            return
 
         # Look for existing agents of this role for this issue
         # Use get_all_agents_for_issue to find terminal agents too (issue #13)
@@ -2891,7 +3148,9 @@ class AgentManager:
         event: SquadronEvent,
     ) -> None:
         """Spawn a new persistent agent via command routing."""
-        assert event.issue_number is not None
+        if event.issue_number is None:
+            logger.warning("Command spawn persistent: event has no issue_number — skipping")
+            return
         logger.info(
             "Command spawn (persistent): creating %s for issue #%d",
             role_name,

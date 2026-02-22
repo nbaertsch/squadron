@@ -29,11 +29,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 
 from squadron.models import (
+    CommandParser,
     GitHubEvent,
     ParsedCommand,
     SquadronEvent,
     SquadronEventType,
-    parse_command,
 )
 
 if TYPE_CHECKING:
@@ -75,6 +75,13 @@ class EventRouter:
         self.event_queue = event_queue
         self.registry = registry
         self.config = config
+
+        # Command parser — initialized from config for config-driven agent lookup
+        self._command_parser = CommandParser(
+            command_prefix=config.command_prefix,
+            known_agents=set(config.agent_roles.keys()),
+            commands=config.commands,
+        )
 
         # Handler callbacks, registered by the Agent Manager
         self._handlers: dict[
@@ -174,10 +181,11 @@ class EventRouter:
             pr_number = event.payload["issue"]["number"]
 
         # Parse @squadron-dev command syntax from comment body
+        # Use config-driven CommandParser for accurate agent roster lookup
         command: ParsedCommand | None = None
         if event_type == SquadronEventType.ISSUE_COMMENT:
             comment_body = (event.comment or {}).get("body", "")
-            command = parse_command(comment_body)
+            command = self._command_parser.parse(comment_body)
 
         # Build event data
         data = {
