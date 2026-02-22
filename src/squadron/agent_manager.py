@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -118,8 +119,10 @@ class AgentManager:
             repo=config.project.repo,
         )
 
-        # Per-agent heartbeat tasks (emit AGENT_HEARTBEAT every 60s during send_and_wait)
-        self._heartbeat_tasks: dict[str, asyncio.Task] = {}
+        # Per-agent heartbeat threads (emit AGENT_HEARTBEAT every 60s during send_and_wait).
+        # Uses threading.Event rather than asyncio.Task so heartbeats fire even when
+        # the event loop is blocked by send_and_wait (Bug #1 fix).
+        self._heartbeat_stops: dict[str, "threading.Event"] = {}
 
         # Track watchdog success/failure for monitoring (fix for issue #51)
         self._watchdog_enforced: set[str] = set()
@@ -170,8 +173,11 @@ class AgentManager:
             )
             await self.activity_logger.log(event)
         except Exception:
-            # Activity logging should never break agent execution
-            logger.debug("Failed to log activity event", exc_info=True)
+            # Activity logging should never break agent execution, but log at
+            # WARNING so failures are visible in remote log diagnostics.
+            logger.warning(
+                "Failed to log activity event %s for %s", event_type, agent_id, exc_info=True
+            )
 
     async def start(self) -> None:
         """Start the agent manager — register config-driven event handlers."""
@@ -1273,6 +1279,10 @@ class AgentManager:
             available_tools=sdk_available_tools,
         )
 
+        # Start heartbeat BEFORE session creation so that hangs during
+        # resume_session / create_session are also visible (Bug #4 fix).
+        self._start_heartbeat(record)
+
         try:
             if resume and not is_ephemeral:
                 logger.info(
@@ -1355,9 +1365,6 @@ class AgentManager:
                     content="Sending prompt to model via send_and_wait",
                     timeout_seconds=max_duration,
                 )
-                # Start heartbeat task so the dashboard can distinguish
-                # "model is thinking" from "agent is hung"
-                self._start_heartbeat(record)
                 result = await session.send_and_wait({"prompt": prompt}, timeout=max_duration)
             except asyncio.TimeoutError:
                 self._stop_heartbeat(record.agent_id)
@@ -1535,6 +1542,9 @@ class AgentManager:
         self._watchdog_enforced.discard(agent_id)
         # Cancel watchdog timer
         self._cancel_watchdog(agent_id)
+        # Stop heartbeat thread (Bug #6 — prevents orphaned heartbeat after
+        # external cleanup, e.g. reconciliation loop or reassignment)
+        self._stop_heartbeat(agent_id)
 
         # Clear any undelivered mail messages (agent is done — no push needed)
         self.agent_mail_queues.pop(agent_id, None)
@@ -1638,45 +1648,75 @@ class AgentManager:
     # ── Heartbeat (diagnostic visibility during send_and_wait) ───────────
 
     def _start_heartbeat(self, record: "AgentRecord") -> None:
-        """Start a periodic heartbeat task for an agent during send_and_wait.
+        """Start a periodic heartbeat for an agent during send_and_wait.
 
-        Emits AGENT_HEARTBEAT activity events every 60s so the dashboard can
-        distinguish "model is still thinking" from "agent is hung/dead".
+        Runs on a **dedicated daemon thread** so that heartbeats fire even when
+        the asyncio event loop is blocked by the SDK's ``send_and_wait`` call.
+        The thread schedules ``_log_activity`` coroutines back onto the event
+        loop via ``call_soon_threadsafe`` + ``asyncio.run_coroutine_threadsafe``.
         """
-        self._stop_heartbeat(record.agent_id)  # ensure no stale task
-        task = asyncio.create_task(
-            self._heartbeat_loop(record),
+        self._stop_heartbeat(record.agent_id)  # ensure no stale thread
+        stop_event = threading.Event()
+        self._heartbeat_stops[record.agent_id] = stop_event
+        loop = asyncio.get_running_loop()
+        t = threading.Thread(
+            target=self._heartbeat_thread,
+            args=(record.agent_id, record.issue_number, record.pr_number, stop_event, loop),
             name=f"heartbeat-{record.agent_id}",
+            daemon=True,
         )
-        self._heartbeat_tasks[record.agent_id] = task
+        t.start()
 
     def _stop_heartbeat(self, agent_id: str) -> None:
-        """Cancel the heartbeat task for an agent."""
-        task = self._heartbeat_tasks.pop(agent_id, None)
-        if task and not task.done():
-            task.cancel()
+        """Signal the heartbeat thread to stop."""
+        stop_event = self._heartbeat_stops.pop(agent_id, None)
+        if stop_event is not None:
+            stop_event.set()
 
-    async def _heartbeat_loop(self, record: "AgentRecord") -> None:
-        """Emit AGENT_HEARTBEAT every 60s until cancelled."""
+    def _heartbeat_thread(
+        self,
+        agent_id: str,
+        issue_number: int | None,
+        pr_number: int | None,
+        stop_event: threading.Event,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Background thread that emits AGENT_HEARTBEAT every 60s until stopped.
+
+        Uses ``threading.Event.wait(timeout=60)`` so it is not affected by
+        event-loop starvation.  Schedules the async ``_log_activity`` call back
+        onto *loop* via ``run_coroutine_threadsafe``.
+        """
         import time
 
         start = time.monotonic()
-        try:
-            while True:
-                await asyncio.sleep(60)
-                elapsed = int(time.monotonic() - start)
-                await self._log_activity(
-                    record.agent_id,
-                    "agent_heartbeat",
-                    issue_number=record.issue_number,
-                    pr_number=record.pr_number,
-                    content=f"Agent alive — model thinking for {elapsed}s",
-                    elapsed_seconds=elapsed,
-                    tool_call_count=record.tool_call_count,
-                    turn_count=record.turn_count,
+        while not stop_event.wait(timeout=60):
+            elapsed = int(time.monotonic() - start)
+            # Read fresh metadata from the registry (best-effort, non-blocking)
+            try:
+                future = asyncio.run_coroutine_threadsafe(self.registry.get_agent(agent_id), loop)
+                fresh = future.result(timeout=5)
+            except Exception:
+                fresh = None
+            tool_call_count = fresh.tool_call_count if fresh else 0
+            turn_count = fresh.turn_count if fresh else 0
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._log_activity(
+                        agent_id,
+                        "agent_heartbeat",
+                        issue_number=issue_number,
+                        pr_number=pr_number,
+                        content=f"Agent alive — model thinking for {elapsed}s",
+                        elapsed_seconds=elapsed,
+                        tool_call_count=tool_call_count,
+                        turn_count=turn_count,
+                    ),
+                    loop,
                 )
-        except asyncio.CancelledError:
-            return
+            except Exception:
+                # Loop may be closed during shutdown — exit quietly
+                return
 
     async def _duration_watchdog(self, agent_id: str, max_seconds: int) -> None:
         """Background timer that kills an agent when max_active_duration is exceeded.

@@ -120,6 +120,7 @@ class SquadronServer:
         logger.info("Activity logger initialized: %s", activity_db_path)
 
         # 2c. Attach ring-buffer log handler to root logger for remote log access
+        self.log_buffer.attach_loop(asyncio.get_running_loop())
         ring_handler = RingBufferHandler(self.log_buffer)
         logging.getLogger().addHandler(ring_handler)
         logger.info("Ring-buffer log handler attached (capacity=%d)", self.log_buffer.maxlen)

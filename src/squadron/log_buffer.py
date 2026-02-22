@@ -87,6 +87,19 @@ class LogBuffer:
         self._buffer: deque[LogRecord] = deque(maxlen=maxlen)
         self._subscribers: list[asyncio.Queue[LogRecord]] = []
         self._lock = asyncio.Lock()
+        # Store the event loop reference so push() can broadcast from any
+        # thread (e.g. logging calls from SDK background threads).  Lazily
+        # captured on first call to ``attach_loop`` or ``push``.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Explicitly set the event loop used for broadcast scheduling.
+
+        Called from ``server.py`` during startup so that ``push()`` can always
+        use ``call_soon_threadsafe`` regardless of which thread the logging
+        handler fires on.
+        """
+        self._loop = loop
 
     # ── Write path (called from RingBufferHandler.emit) ──────────────────
 
@@ -96,14 +109,24 @@ class LogBuffer:
         This is called from ``RingBufferHandler.emit`` which may run on any
         thread, so we use ``call_soon_threadsafe`` to schedule the async
         broadcast on the event loop.
+
+        Uses the stored ``_loop`` reference (set via ``attach_loop``) so
+        broadcasting works from non-event-loop threads (e.g. SDK background
+        threads, ``aiosqlite`` worker).  Falls back to ``get_running_loop``
+        if ``attach_loop`` was not called.
         """
         self._buffer.append(entry)
         # Fire-and-forget broadcast to SSE subscribers
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return  # No loop available — skip broadcast
         try:
-            loop = asyncio.get_running_loop()
             loop.call_soon_threadsafe(self._sync_broadcast, entry)
         except RuntimeError:
-            # No running event loop (e.g. during shutdown) — skip broadcast
+            # Loop is closed (shutdown) — skip broadcast
             pass
 
     def _sync_broadcast(self, entry: LogRecord) -> None:

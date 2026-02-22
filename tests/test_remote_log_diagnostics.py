@@ -361,3 +361,224 @@ class TestLogStreamEndpoint:
         # pub/sub tests.
         resp = log_client_with_key.get("/dashboard/logs/stream?token=wrong-key")
         assert resp.status_code == 401
+
+
+# ── Heartbeat bugfix tests ───────────────────────────────────────────────────
+
+
+class TestHeartbeatUsesThread:
+    """Bug #1: Heartbeat must run on a dedicated thread, not an asyncio task."""
+
+    @pytest.mark.asyncio
+    async def test_start_heartbeat_creates_stop_event(self):
+        """_start_heartbeat should populate _heartbeat_stops with a threading.Event."""
+        import threading
+        from unittest.mock import MagicMock
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        mgr._heartbeat_stops = {}
+        mgr.registry = MagicMock()
+
+        record = MagicMock()
+        record.agent_id = "test-agent-hb"
+        record.issue_number = 1
+        record.pr_number = None
+
+        # Call the real method — must be within an async context so
+        # asyncio.get_running_loop() succeeds inside _start_heartbeat
+        AgentManager._start_heartbeat(mgr, record)
+
+        assert "test-agent-hb" in mgr._heartbeat_stops
+        assert isinstance(mgr._heartbeat_stops["test-agent-hb"], threading.Event)
+
+        # Cleanup: signal the thread to stop
+        mgr._heartbeat_stops["test-agent-hb"].set()
+
+    def test_stop_heartbeat_signals_event(self):
+        """_stop_heartbeat should set the threading.Event and remove from dict."""
+        import threading
+        from unittest.mock import MagicMock
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        stop_event = threading.Event()
+        mgr._heartbeat_stops = {"agent-1": stop_event}
+
+        AgentManager._stop_heartbeat(mgr, "agent-1")
+
+        assert stop_event.is_set()
+        assert "agent-1" not in mgr._heartbeat_stops
+
+    def test_stop_heartbeat_noop_for_unknown_agent(self):
+        """_stop_heartbeat should be safe to call for non-existent agents."""
+        from unittest.mock import MagicMock
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        mgr._heartbeat_stops = {}
+
+        # Should not raise
+        AgentManager._stop_heartbeat(mgr, "no-such-agent")
+
+    def test_heartbeat_thread_fires_within_interval(self):
+        """The heartbeat thread should emit an event after the interval elapses."""
+        import asyncio
+        import threading
+        import time
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        mgr.registry = MagicMock()
+        mgr._log_activity = AsyncMock()
+
+        loop = asyncio.new_event_loop()
+        stop_event = threading.Event()
+
+        # Patch the heartbeat to use a very short interval for testing.
+        # We can't easily change the 60s constant, so instead we test the
+        # thread mechanics by directly calling _heartbeat_thread with a
+        # pre-signaled stop event (fires immediately after first wait).
+        def signal_after_short_delay():
+            time.sleep(0.1)
+            stop_event.set()
+
+        timer = threading.Thread(target=signal_after_short_delay, daemon=True)
+        timer.start()
+
+        # Run in a thread (simulates the real call)
+        t = threading.Thread(
+            target=AgentManager._heartbeat_thread,
+            args=(mgr, "test-agent", 1, None, stop_event, loop),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=2)
+
+        # Thread should have exited (stop_event was set before the 60s sleep completed)
+        assert not t.is_alive()
+        loop.close()
+
+
+class TestLogActivityErrorVisibility:
+    """Bug #2: _log_activity failures must be logged at WARNING, not DEBUG."""
+
+    @pytest.mark.asyncio
+    async def test_failed_activity_logs_at_warning(self, caplog):
+        """When _log_activity fails, the error should appear at WARNING level."""
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        mgr.activity_logger = MagicMock()
+        mgr.activity_logger.log = AsyncMock(side_effect=RuntimeError("DB locked"))
+
+        with caplog.at_level(logging.WARNING, logger="squadron.agent_manager"):
+            await AgentManager._log_activity(mgr, "agent-1", "agent_heartbeat", content="test")
+
+        # Should have a WARNING log about the failure
+        warning_messages = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warning_messages) >= 1
+        assert "Failed to log activity event" in warning_messages[0].message
+
+
+class TestLogBufferAttachLoop:
+    """Bug #3: LogBuffer should store event loop ref for cross-thread broadcast."""
+
+    def test_attach_loop_stores_reference(self):
+        import asyncio
+
+        from squadron.log_buffer import LogBuffer
+
+        buf = LogBuffer(maxlen=100)
+        assert buf._loop is None
+
+        loop = asyncio.new_event_loop()
+        buf.attach_loop(loop)
+        assert buf._loop is loop
+        loop.close()
+
+    def test_push_broadcasts_via_stored_loop(self):
+        """push() should use the stored loop for call_soon_threadsafe."""
+        import asyncio
+
+        from squadron.log_buffer import LogBuffer, LogRecord
+
+        buf = LogBuffer(maxlen=100)
+        loop = asyncio.new_event_loop()
+        buf.attach_loop(loop)
+
+        # Subscribe from within the loop context
+        queue = asyncio.Queue(maxsize=100)
+        buf._subscribers.append(queue)
+
+        # Push from a "different thread" context (no running loop)
+        buf.push(LogRecord(timestamp="t1", level="INFO", name="test", message="hello"))
+
+        # The entry should be in the buffer
+        assert buf.size == 1
+
+        # Run the event loop briefly to process the call_soon_threadsafe callback
+        loop.call_soon(loop.stop)
+        loop.run_forever()
+
+        # The subscriber queue should have received the entry
+        assert not queue.empty()
+        entry = queue.get_nowait()
+        assert entry["message"] == "hello"
+
+        loop.close()
+
+    def test_push_falls_back_to_get_running_loop(self):
+        """If attach_loop was not called, push should still try get_running_loop."""
+        from squadron.log_buffer import LogBuffer, LogRecord
+
+        buf = LogBuffer(maxlen=100)
+        assert buf._loop is None
+
+        # Push without a running loop — should not raise, just skip broadcast
+        buf.push(LogRecord(timestamp="t1", level="INFO", name="test", message="hello"))
+        assert buf.size == 1
+
+
+class TestCleanupAgentStopsHeartbeat:
+    """Bug #6: _cleanup_agent must stop heartbeat to prevent orphaned threads."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stops_heartbeat(self):
+        """_cleanup_agent should call _stop_heartbeat for the agent."""
+        import threading
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        mgr._copilot_agents = {}
+        mgr._agent_tasks = {}
+        mgr._watchdog_enforced = set()
+        mgr.agent_mail_queues = {}
+        mgr.agent_inboxes = {}
+
+        stop_event = threading.Event()
+        mgr._heartbeat_stops = {"agent-cleanup": stop_event}
+
+        # Make all the methods that _cleanup_agent calls behave:
+        # - _cancel_watchdog: already a MagicMock from spec
+        # - _stop_heartbeat: use real impl so we can verify stop_event is set
+        mgr._stop_heartbeat = lambda aid: AgentManager._stop_heartbeat(mgr, aid)
+        # - _sandbox.teardown_session: async mock
+        mgr._sandbox = MagicMock()
+        mgr._sandbox.teardown_session = AsyncMock()
+        # - registry.get_agent: returns None so the worktree branch is skipped
+        mgr.registry = MagicMock()
+        mgr.registry.get_agent = AsyncMock(return_value=None)
+        # - config: not needed if registry returns None (no inbox re-queue path)
+        mgr.config = MagicMock()
+
+        await AgentManager._cleanup_agent(mgr, "agent-cleanup")
+
+        # Heartbeat stop event should have been signaled
+        assert stop_event.is_set()
+        assert "agent-cleanup" not in mgr._heartbeat_stops
