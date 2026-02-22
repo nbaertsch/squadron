@@ -453,6 +453,30 @@ class SquadronConfig(BaseModel):
     # Workflows - deterministic multi-agent orchestration (inline in config)
     workflows: dict[str, "WorkflowConfig"] = Field(default_factory=dict)
 
+    # AD-019: Unified pipeline system (replaces triggers, review_policy, workflows)
+    pipelines: dict[str, Any] = Field(default_factory=dict)
+
+    def get_pipeline_definitions(self) -> dict[str, Any]:
+        """Return pipeline definitions as validated PipelineDefinition models.
+
+        Uses lazy import to avoid circular dependencies and to keep the
+        pipeline package optional until Phase 3 migration is complete.
+        """
+        from squadron.pipeline.models import PipelineDefinition
+
+        result: dict[str, Any] = {}
+        for name, defn in self.pipelines.items():
+            if isinstance(defn, PipelineDefinition):
+                result[name] = defn
+            elif isinstance(defn, dict):
+                result[name] = PipelineDefinition(**defn)
+            else:
+                msg = (
+                    f"Invalid pipeline definition for '{name}': expected dict or PipelineDefinition"
+                )
+                raise TypeError(msg)
+        return result
+
     def get_sandbox_config(self):
         """Return a typed SandboxConfig, lazily importing to avoid circular deps."""
         from squadron.sandbox.config import SandboxConfig

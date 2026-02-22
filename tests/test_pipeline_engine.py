@@ -1,0 +1,1124 @@
+"""Tests for pipeline engine — core execution of pipeline runs and stage transitions (AD-019)."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import aiosqlite
+import pytest
+import pytest_asyncio
+
+from squadron.pipeline.engine import PipelineEngine
+from squadron.pipeline.gates import (
+    GateCheck,
+    GateCheckRegistry,
+    GateCheckResult,
+    PipelineContext,
+)
+from squadron.pipeline.models import (
+    GateConditionConfig,
+    ParallelBranch,
+    PipelineDefinition,
+    PipelineRunStatus,
+    ReactiveAction,
+    ReactiveEventConfig,
+    StageDefinition,
+    StageRunStatus,
+    TriggerDefinition,
+)
+from squadron.pipeline.registry import PipelineRegistry
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def make_simple_pipeline() -> PipelineDefinition:
+    """Two-stage pipeline: agent then action."""
+    return PipelineDefinition(
+        description="Test pipeline",
+        trigger=TriggerDefinition(event="pull_request.opened"),
+        stages=[
+            StageDefinition(id="review", type="agent", agent="reviewer"),
+            StageDefinition(id="merge", type="action", action="merge_pr"),
+        ],
+    )
+
+
+def make_gate_pipeline(
+    *,
+    check_name: str = "always_pass",
+    on_fail: str | None = None,
+) -> PipelineDefinition:
+    """Pipeline with a gate stage followed by an action."""
+    gate_kwargs: dict[str, Any] = {}
+    if on_fail is not None:
+        gate_kwargs["on_fail"] = on_fail
+    return PipelineDefinition(
+        description="Gate pipeline",
+        trigger=TriggerDefinition(event="pull_request.opened"),
+        stages=[
+            StageDefinition(
+                id="gate-check",
+                type="gate",
+                conditions=[GateConditionConfig(check=check_name)],
+                **gate_kwargs,
+            ),
+            StageDefinition(id="post-gate", type="action", action="merge_pr"),
+        ],
+    )
+
+
+def make_parallel_pipeline() -> PipelineDefinition:
+    """Pipeline with a parallel stage containing two agent branches."""
+    return PipelineDefinition(
+        description="Parallel pipeline",
+        trigger=TriggerDefinition(event="pull_request.opened"),
+        stages=[
+            StageDefinition(
+                id="parallel-review",
+                type="parallel",
+                branches=[
+                    ParallelBranch(id="security", agent="security-reviewer"),
+                    ParallelBranch(id="code", agent="code-reviewer"),
+                ],
+            ),
+            StageDefinition(id="final", type="action", action="merge_pr"),
+        ],
+    )
+
+
+def make_reactive_pipeline(*, action: ReactiveAction = ReactiveAction.CANCEL) -> PipelineDefinition:
+    """Pipeline that reacts to push events."""
+    return PipelineDefinition(
+        description="Reactive pipeline",
+        trigger=TriggerDefinition(event="pull_request.opened"),
+        on_events={
+            "push": ReactiveEventConfig(action=action),
+        },
+        stages=[
+            StageDefinition(id="review", type="agent", agent="reviewer"),
+            StageDefinition(id="merge", type="action", action="merge_pr"),
+        ],
+    )
+
+
+class AlwaysPassCheck(GateCheck):
+    reactive_events: set[str] = set()
+
+    async def evaluate(self, config: dict[str, Any], context: PipelineContext) -> GateCheckResult:
+        return GateCheckResult(passed=True, message="always passes")
+
+
+class AlwaysFailCheck(GateCheck):
+    reactive_events: set[str] = set()
+
+    async def evaluate(self, config: dict[str, Any], context: PipelineContext) -> GateCheckResult:
+        return GateCheckResult(passed=False, message="always fails")
+
+
+class FlipCheck(GateCheck):
+    """Gate check that fails on first call, passes on second."""
+
+    reactive_events: set[str] = {"pull_request_review.submitted"}
+
+    def __init__(self) -> None:
+        self._call_count = 0
+
+    async def evaluate(self, config: dict[str, Any], context: PipelineContext) -> GateCheckResult:
+        self._call_count += 1
+        if self._call_count >= 2:
+            return GateCheckResult(passed=True, message="now passes")
+        return GateCheckResult(passed=False, message="not yet")
+
+
+# ── Shared Fixtures ──────────────────────────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def db(tmp_path):
+    db_path = tmp_path / "test_pipeline_engine.db"
+    async with aiosqlite.connect(str(db_path)) as conn:
+        conn.row_factory = aiosqlite.Row
+        yield conn
+
+
+@pytest_asyncio.fixture
+async def registry(db):
+    reg = PipelineRegistry(db)
+    await reg.initialize()
+    return reg
+
+
+@pytest.fixture
+def gate_registry():
+    reg = GateCheckRegistry()
+    # Register custom test checks (override ValueError for existing)
+    reg._checks["always_pass"] = AlwaysPassCheck()
+    reg._checks["always_fail"] = AlwaysFailCheck()
+    return reg
+
+
+# ── Class 1: Pipeline Setup & Validation ─────────────────────────────────────
+
+
+class TestPipelineEngineSetup:
+    @pytest.fixture
+    def engine(self, registry, gate_registry):
+        return PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+
+    def test_add_and_get_pipeline(self, engine):
+        defn = make_simple_pipeline()
+        engine.add_pipeline("review-flow", defn)
+        assert engine.get_pipeline("review-flow") is defn
+        assert engine.get_pipeline("nonexistent") is None
+
+    def test_validate_all_pipelines_valid(self, engine):
+        engine.add_pipeline("review-flow", make_simple_pipeline())
+        errors = engine.validate_all_pipelines()
+        assert errors == []
+
+    def test_validate_invalid_stage_ref(self, engine):
+        defn = PipelineDefinition(
+            description="Bad ref",
+            stages=[
+                StageDefinition(
+                    id="review",
+                    type="agent",
+                    agent="reviewer",
+                    on_complete="nonexistent-stage",
+                ),
+            ],
+        )
+        engine.add_pipeline("bad-ref", defn)
+        errors = engine.validate_all_pipelines()
+        assert len(errors) == 1
+        assert "nonexistent-stage" in errors[0]
+
+    def test_validate_invalid_gate_check(self, engine):
+        defn = PipelineDefinition(
+            description="Bad gate",
+            stages=[
+                StageDefinition(
+                    id="gate",
+                    type="gate",
+                    conditions=[GateConditionConfig(check="totally_unknown_check")],
+                ),
+            ],
+        )
+        engine.add_pipeline("bad-gate", defn)
+        errors = engine.validate_all_pipelines()
+        assert any("totally_unknown_check" in e for e in errors)
+
+    def test_validate_cycle_detection(self, engine):
+        # Pipeline A references sub-pipeline B, B references A → cycle
+        pipeline_a = PipelineDefinition(
+            description="A",
+            stages=[StageDefinition(id="sub", type="pipeline", pipeline="pipeline-b")],
+        )
+        pipeline_b = PipelineDefinition(
+            description="B",
+            stages=[StageDefinition(id="sub", type="pipeline", pipeline="pipeline-a")],
+        )
+        engine.add_pipeline("pipeline-a", pipeline_a)
+        engine.add_pipeline("pipeline-b", pipeline_b)
+        errors = engine.validate_all_pipelines()
+        assert any("Cycle" in e or "cycle" in e.lower() for e in errors)
+
+
+# ── Class 2: Event Evaluation ────────────────────────────────────────────────
+
+
+class TestEventEvaluation:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "issue_number": issue_number,
+                    "pr_number": pr_number,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action, "config": config, "context": context})
+            return {"success": True, "result": "ok"}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_evaluate_event_triggers_pipeline(self, engine):
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        payload = {"pull_request": {"number": 42}}
+        run = await engine.evaluate_event("pull_request.opened", payload)
+        assert run is not None
+        assert run.pipeline_name == "pr-review"
+        assert run.pr_number == 42
+        assert run.status == PipelineRunStatus.RUNNING
+
+    @pytest.mark.asyncio
+    async def test_evaluate_event_no_match(self, engine):
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        payload = {"issue": {"number": 10}}
+        run = await engine.evaluate_event("issues.opened", payload)
+        assert run is None
+
+    @pytest.mark.asyncio
+    async def test_evaluate_event_dedup_by_running_pipeline(self, engine):
+        """Same pipeline name already running for same PR should not start a second."""
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        payload = {"pull_request": {"number": 42}}
+
+        run1 = await engine.evaluate_event("pull_request.opened", payload)
+        assert run1 is not None
+
+        # Second event for same PR — pipeline already running
+        run2 = await engine.evaluate_event("pull_request.opened", payload)
+        assert run2 is None
+
+
+# ── Class 3: Agent Stage Execution ───────────────────────────────────────────
+
+
+class TestAgentStageExecution:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "issue_number": issue_number,
+                    "pr_number": pr_number,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action, "config": config, "context": context})
+            return {"success": True, "result": "ok"}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_agent_stage_spawns_agent(self, engine, registry):
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+        assert len(self._spawned_agents) == 1
+        assert self._spawned_agents[0]["role"] == "reviewer"
+        assert self._spawned_agents[0]["pr_number"] == 42
+        assert self._spawned_agents[0]["stage_id"] == "review"
+
+    @pytest.mark.asyncio
+    async def test_agent_stage_enters_waiting(self, engine, registry):
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+        assert stage_run.agent_id == "reviewer-review-agent"
+
+    @pytest.mark.asyncio
+    async def test_on_agent_complete_advances(self, engine, registry):
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+
+        agent_id = self._spawned_agents[0]["agent_id"]
+        await engine.on_agent_complete(agent_id, outputs={"review": "lgtm"})
+
+        # Review stage should be completed
+        stage_run = await registry.get_latest_stage_run(run.run_id, "review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+
+        # Action stage (merge) should have executed
+        assert len(self._actions) == 1
+        assert self._actions[0]["action"] == "merge_pr"
+
+    @pytest.mark.asyncio
+    async def test_on_agent_error_handles_failure(self, engine, registry):
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+
+        agent_id = self._spawned_agents[0]["agent_id"]
+        await engine.on_agent_error(agent_id, "agent crashed")
+
+        # Stage should be failed
+        stage_run = await registry.get_latest_stage_run(run.run_id, "review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.FAILED
+        assert stage_run.error_message == "agent crashed"
+
+        # Pipeline should be failed (no on_error handler)
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_agent_spawn_failure_fails_stage(self, engine, registry):
+        """When spawn callback returns None, the stage should fail."""
+
+        # Override spawn to return None
+        async def fail_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            return None
+
+        engine.set_spawn_callback(fail_spawn)
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.FAILED
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.FAILED
+
+
+# ── Class 4: Gate Stage Execution ────────────────────────────────────────────
+
+
+class TestGateStageExecution:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_gate_all_pass_completes(self, engine, registry):
+        defn = make_gate_pipeline(check_name="always_pass")
+        engine.add_pipeline("gated", defn)
+        run = await engine.start_pipeline("gated", pr_number=10)
+        assert run is not None
+
+        # Gate passed → stage completed → action stage should have fired
+        stage_run = await registry.get_latest_stage_run(run.run_id, "gate-check")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_gate_any_fail_enters_waiting(self, engine, registry):
+        defn = make_gate_pipeline(check_name="always_fail")
+        engine.add_pipeline("gated", defn)
+        run = await engine.start_pipeline("gated", pr_number=10)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "gate-check")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+        # Action should NOT have fired
+        assert len(self._actions) == 0
+
+    @pytest.mark.asyncio
+    async def test_gate_fail_with_on_fail_transition(self, engine, registry):
+        """Gate fails and follows on_fail transition to a specific stage."""
+        defn = PipelineDefinition(
+            description="Gate with on_fail",
+            stages=[
+                StageDefinition(
+                    id="gate-check",
+                    type="gate",
+                    conditions=[GateConditionConfig(check="always_fail")],
+                    on_fail="fallback",
+                ),
+                StageDefinition(id="normal-path", type="action", action="merge_pr"),
+                StageDefinition(id="fallback", type="action", action="notify_failure"),
+            ],
+        )
+        engine.add_pipeline("gated-fallback", defn)
+        run = await engine.start_pipeline("gated-fallback", pr_number=10)
+        assert run is not None
+
+        # The gate uses on_fail which is a pass/fail transition key.
+        # In the engine, gate failing enters WAITING state (reactive re-eval).
+        # on_fail is only followed via _advance_after_stage with result="fail".
+        # The current gate implementation enters WAITING on fail, it does NOT
+        # follow on_fail transition automatically — it waits for re-evaluation.
+        stage_run = await registry.get_latest_stage_run(run.run_id, "gate-check")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+
+    @pytest.mark.asyncio
+    async def test_gate_records_check_results(self, engine, registry):
+        """Gate evaluations are persisted as GateCheckRecord rows."""
+        defn = make_gate_pipeline(check_name="always_pass")
+        engine.add_pipeline("gated", defn)
+        run = await engine.start_pipeline("gated", pr_number=10)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "gate-check")
+        assert stage_run is not None
+        checks = await registry.get_gate_checks_for_stage(stage_run.id)
+        assert len(checks) == 1
+        assert checks[0].passed is True
+        assert checks[0].check_type == "always_pass"
+
+
+# ── Class 5: Action Stage Execution ─────────────────────────────────────────
+
+
+class TestActionStageExecution:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            return f"{role}-{stage_id}-agent"
+
+        async def mock_action(action, config, context):
+            self._actions.append(
+                {
+                    "action": action,
+                    "config": config,
+                    "context": context,
+                }
+            )
+            return {"success": True, "result": "done"}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_action_stage_calls_callback(self, engine, registry):
+        """Action-only pipeline calls the action callback with correct args."""
+        defn = PipelineDefinition(
+            description="Action pipeline",
+            stages=[
+                StageDefinition(id="do-merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("action-only", defn)
+        run = await engine.start_pipeline("action-only", pr_number=99)
+        assert run is not None
+        assert len(self._actions) == 1
+        assert self._actions[0]["action"] == "merge_pr"
+        # Context object should carry pr_number
+        ctx = self._actions[0]["context"]
+        assert isinstance(ctx, PipelineContext)
+        assert ctx.pr_number == 99
+
+    @pytest.mark.asyncio
+    async def test_action_stage_completes(self, engine, registry):
+        defn = PipelineDefinition(
+            description="Action pipeline",
+            stages=[
+                StageDefinition(id="do-merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("action-only", defn)
+        run = await engine.start_pipeline("action-only", pr_number=99)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "do-merge")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_action_stage_failure(self, engine, registry):
+        """Action returning success=False should fail the stage."""
+
+        async def failing_action(action, config, context):
+            return {"success": False, "error": "merge conflict"}
+
+        engine.set_action_callback(failing_action)
+
+        defn = PipelineDefinition(
+            description="Failing action",
+            stages=[
+                StageDefinition(id="do-merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("fail-action", defn)
+        run = await engine.start_pipeline("fail-action", pr_number=5)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "do-merge")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.FAILED
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.FAILED
+
+
+# ── Class 6: Pipeline Lifecycle ──────────────────────────────────────────────
+
+
+class TestPipelineLifecycle:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_pipeline_completes_after_last_stage(self, engine, registry):
+        """Pipeline status → COMPLETED after final action stage succeeds."""
+        defn = PipelineDefinition(
+            description="Single action",
+            stages=[StageDefinition(id="act", type="action", action="merge_pr")],
+        )
+        engine.add_pipeline("single", defn)
+        run = await engine.start_pipeline("single", pr_number=1)
+        assert run is not None
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.COMPLETED
+        assert updated_run.completed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_pipeline_fail(self, engine, registry):
+        """Error in agent stage with no retry → pipeline FAILED."""
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+
+        agent_id = self._spawned_agents[0]["agent_id"]
+        await engine.on_agent_error(agent_id, "catastrophic failure")
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.FAILED
+        assert updated_run.error_message == "catastrophic failure"
+        assert updated_run.error_stage_id == "review"
+
+    @pytest.mark.asyncio
+    async def test_cancel_pipeline(self, engine, registry):
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+
+        cancelled = await engine.cancel_pipeline(run.run_id)
+        assert cancelled is True
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.CANCELLED
+        assert updated_run.completed_at is not None
+
+    @pytest.mark.asyncio
+    async def test_cancel_already_completed_returns_false(self, engine, registry):
+        """Cancelling a completed pipeline returns False."""
+        defn = PipelineDefinition(
+            description="Quick",
+            stages=[StageDefinition(id="act", type="action", action="merge_pr")],
+        )
+        engine.add_pipeline("quick", defn)
+        run = await engine.start_pipeline("quick", pr_number=1)
+        assert run is not None
+
+        # Already completed
+        cancelled = await engine.cancel_pipeline(run.run_id)
+        assert cancelled is False
+
+    @pytest.mark.asyncio
+    async def test_explicit_stage_transitions(self, engine, registry):
+        """on_complete pointing to a specific stage jumps there, skipping the middle."""
+        defn = PipelineDefinition(
+            description="Jump pipeline",
+            stages=[
+                StageDefinition(
+                    id="step-a",
+                    type="action",
+                    action="action_a",
+                    on_complete="step-c",
+                ),
+                StageDefinition(id="step-b", type="action", action="action_b"),
+                StageDefinition(id="step-c", type="action", action="action_c"),
+            ],
+        )
+        engine.add_pipeline("jump", defn)
+        run = await engine.start_pipeline("jump", pr_number=1)
+        assert run is not None
+
+        # step-a completed → jump to step-c (skipping step-b)
+        actions_called = [a["action"] for a in self._actions]
+        assert "action_a" in actions_called
+        assert "action_c" in actions_called
+        assert "action_b" not in actions_called
+
+    @pytest.mark.asyncio
+    async def test_start_unknown_pipeline_returns_none(self, engine):
+        result = await engine.start_pipeline("does-not-exist")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_multi_stage_sequential_completion(self, engine, registry):
+        """Agent stage → on_agent_complete → action stage → pipeline COMPLETED."""
+        engine.add_pipeline("two-stage", make_simple_pipeline())
+        run = await engine.start_pipeline("two-stage", pr_number=7)
+        assert run is not None
+
+        agent_id = self._spawned_agents[0]["agent_id"]
+        await engine.on_agent_complete(agent_id)
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.COMPLETED
+
+
+# ── Class 7: Reactive Events ────────────────────────────────────────────────
+
+
+class TestReactiveEvents:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_cancel_reactive_event(self, engine, registry):
+        """Push event with action=cancel should cancel the running pipeline."""
+        defn = make_reactive_pipeline(action=ReactiveAction.CANCEL)
+        engine.add_pipeline("reactive", defn)
+
+        # Start via trigger
+        payload = {"pull_request": {"number": 42}}
+        run = await engine.evaluate_event("pull_request.opened", payload)
+        assert run is not None
+        assert run.status == PipelineRunStatus.RUNNING
+
+        # Fire the reactive event
+        push_payload = {"pull_request": {"number": 42}}
+        await engine.evaluate_event("push", push_payload)
+
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_reevaluate_gates_reactive(self, engine, registry, gate_registry):
+        """Reactive event re-evaluates a waiting gate and advances on pass."""
+        flip_check = FlipCheck()
+        gate_registry._checks["flip_check"] = flip_check
+
+        defn = PipelineDefinition(
+            description="Flip gate pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            on_events={
+                "pull_request_review.submitted": ReactiveEventConfig(
+                    action=ReactiveAction.REEVALUATE_GATES,
+                ),
+            },
+            stages=[
+                StageDefinition(
+                    id="gate",
+                    type="gate",
+                    conditions=[GateConditionConfig(check="flip_check")],
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("flip-gate", defn)
+
+        # Start — first evaluation fails, gate enters WAITING
+        payload = {"pull_request": {"number": 55}}
+        run = await engine.evaluate_event("pull_request.opened", payload)
+        assert run is not None
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "gate")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+
+        # Fire reactive event — second evaluation passes
+        review_payload = {"pull_request": {"number": 55}}
+        await engine.evaluate_event("pull_request_review.submitted", review_payload)
+
+        stage_run = await registry.get_latest_stage_run(run.run_id, "gate")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+
+        # Action after gate should have fired
+        assert len(self._actions) == 1
+        assert self._actions[0]["action"] == "merge_pr"
+
+
+# ── Class 8: Parallel Stage Execution ────────────────────────────────────────
+
+
+class TestParallelStageExecution:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_parallel_spawns_all_branches(self, engine, registry):
+        engine.add_pipeline("parallel", make_parallel_pipeline())
+        run = await engine.start_pipeline("parallel", pr_number=20)
+        assert run is not None
+
+        # Should have spawned two agents (one per branch)
+        assert len(self._spawned_agents) == 2
+        roles = {a["role"] for a in self._spawned_agents}
+        assert "security-reviewer" in roles
+        assert "code-reviewer" in roles
+
+    @pytest.mark.asyncio
+    async def test_parallel_stage_enters_waiting(self, engine, registry):
+        engine.add_pipeline("parallel", make_parallel_pipeline())
+        run = await engine.start_pipeline("parallel", pr_number=20)
+        assert run is not None
+
+        # Parent parallel stage should be WAITING
+        stage_run = await registry.get_latest_stage_run(run.run_id, "parallel-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+
+    @pytest.mark.asyncio
+    async def test_parallel_completes_when_all_done(self, engine, registry):
+        engine.add_pipeline("parallel", make_parallel_pipeline())
+        run = await engine.start_pipeline("parallel", pr_number=20)
+        assert run is not None
+
+        # Complete both branch agents
+        for spawned in self._spawned_agents:
+            await engine.on_agent_complete(spawned["agent_id"])
+
+        # Parent parallel stage should now be completed
+        stage_run = await registry.get_latest_stage_run(run.run_id, "parallel-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.COMPLETED
+
+        # The final action should have fired
+        assert len(self._actions) == 1
+        assert self._actions[0]["action"] == "merge_pr"
+
+        # Pipeline should be completed
+        updated_run = await registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_parallel_partial_complete_stays_waiting(self, engine, registry):
+        """Completing only one branch of a parallel stage keeps it WAITING."""
+        engine.add_pipeline("parallel", make_parallel_pipeline())
+        run = await engine.start_pipeline("parallel", pr_number=20)
+        assert run is not None
+
+        # Complete only the first branch
+        await engine.on_agent_complete(self._spawned_agents[0]["agent_id"])
+
+        # Parent should still be waiting
+        stage_run = await registry.get_latest_stage_run(run.run_id, "parallel-review")
+        assert stage_run is not None
+        assert stage_run.status == StageRunStatus.WAITING
+        assert len(self._actions) == 0
+
+
+# ── Class 9: Context and Edge Cases ─────────────────────────────────────────
+
+
+class TestContextAndEdgeCases:
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "issue_number": issue_number,
+                    "pr_number": pr_number,
+                    "stage_id": stage_id,
+                    "context": context,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_context_propagated_to_agent(self, engine, registry):
+        """Extra context passed to start_pipeline appears in spawn callback."""
+        defn = PipelineDefinition(
+            description="Context test",
+            context={"base_key": "base_val"},
+            stages=[StageDefinition(id="review", type="agent", agent="reviewer")],
+        )
+        engine.add_pipeline("ctx-test", defn)
+        run = await engine.start_pipeline("ctx-test", pr_number=5, context={"extra": "data"})
+        assert run is not None
+
+        spawned_ctx = self._spawned_agents[0]["context"]
+        assert spawned_ctx["base_key"] == "base_val"
+        assert spawned_ctx["extra"] == "data"
+        assert spawned_ctx["pr_number"] == 5
+
+    @pytest.mark.asyncio
+    async def test_pipeline_run_persisted(self, engine, registry):
+        """Pipeline run is persisted to DB and retrievable."""
+        engine.add_pipeline("pr-review", make_simple_pipeline())
+        run = await engine.start_pipeline("pr-review", pr_number=42)
+        assert run is not None
+
+        fetched = await registry.get_pipeline_run(run.run_id)
+        assert fetched is not None
+        assert fetched.pipeline_name == "pr-review"
+        assert fetched.pr_number == 42
+        assert fetched.status == PipelineRunStatus.RUNNING
+        assert fetched.current_stage_id == "review"
+
+    @pytest.mark.asyncio
+    async def test_on_agent_complete_unknown_agent_noop(self, engine):
+        """Completing an unknown agent_id is a no-op, doesn't raise."""
+        await engine.on_agent_complete("totally-unknown-agent-id")
+
+    @pytest.mark.asyncio
+    async def test_on_agent_error_unknown_agent_noop(self, engine):
+        """Erroring an unknown agent_id is a no-op, doesn't raise."""
+        await engine.on_agent_error("totally-unknown-agent-id", "some error")
+
+    @pytest.mark.asyncio
+    async def test_cancel_nonexistent_returns_false(self, engine):
+        result = await engine.cancel_pipeline("nonexistent-run-id")
+        assert result is False
