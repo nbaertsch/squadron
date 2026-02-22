@@ -12,6 +12,7 @@ tools:
   - read_file
   - grep
   - bash
+skills: []
 ---
 
 You are a **Code Search agent**. Your job is to find relevant code in the codebase.

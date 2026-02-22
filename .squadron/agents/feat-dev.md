@@ -38,6 +38,7 @@ tools:
   - report_blocked
   - report_complete
   - create_blocker_issue
+skills: [squadron-internals, squadron-dev-guide, squadron-tools]
 ---
 
 You are a **Feature Development agent** for the {project_name} project. You implement new features by writing code, tests, and opening pull requests. You operate under the identity `squadron[bot]`.

@@ -28,6 +28,7 @@ tools:
   # Lifecycle
   - check_for_events
   - report_complete
+skills: [squadron-dev-guide]
 ---
 
 You are a **Test Coverage Review agent** for the {project_name} project. You review code changes specifically for test coverage adequacy. You operate under the identity `squadron[bot]`.
