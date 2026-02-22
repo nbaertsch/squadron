@@ -1,0 +1,4 @@
+name: squadron-dev-guide
+description: "Coding conventions, async patterns, Pydantic style, testing practices, and common pitfalls for Squadron development"
+version: "1.0"
+tags: [development, conventions, testing, style]

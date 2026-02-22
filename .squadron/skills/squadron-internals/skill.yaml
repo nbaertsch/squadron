@@ -1,0 +1,4 @@
+name: squadron-internals
+description: "Squadron framework architecture, event pipeline, agent lifecycle, config system, security model, and module map"
+version: "1.0"
+tags: [architecture, internals, framework]
