@@ -11,7 +11,7 @@ Covers:
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -582,3 +582,242 @@ class TestCleanupAgentStopsHeartbeat:
         # Heartbeat stop event should have been signaled
         assert stop_event.is_set()
         assert "agent-cleanup" not in mgr._heartbeat_stops
+
+
+class TestNoActivityAlert:
+    """Phase 3: Heartbeat emits a NO-ACTIVITY ALERT after 120s with 0 tool calls."""
+
+    def test_no_activity_warning_logged(self, caplog):
+        """If 120s pass with 0 tool calls and 0 turns, a WARNING is logged."""
+        import asyncio
+        import logging
+        import threading
+        import time
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        mgr.registry = MagicMock()
+        # Simulate an agent with 0 tool calls / 0 turns
+        mock_agent = MagicMock()
+        mock_agent.tool_call_count = 0
+        mock_agent.turn_count = 0
+        mgr.registry.get_agent = AsyncMock(return_value=mock_agent)
+        mgr._log_activity = AsyncMock()
+
+        loop = asyncio.new_event_loop()
+        stop_event = threading.Event()
+
+        # We need to simulate elapsed >= 120s. We'll monkey-patch time.monotonic
+        # to fast-forward time. The thread uses `stop_event.wait(timeout=60)` which
+        # we can't easily accelerate, so we use a different approach: signal stop
+        # after a short delay and verify the warning happens for elapsed >= 120s.
+        #
+        # Instead, directly test the logic by calling _heartbeat_thread with a mock
+        # that makes time.monotonic return values > 120s ahead.
+        original_monotonic = time.monotonic
+        call_count = 0
+
+        def fake_wait(timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                # After first iteration, stop
+                stop_event.set()
+                return True
+            # First call: simulate that 60s passed (returns False = not stopped)
+            return False
+
+        # Patch the stop_event.wait to not actually wait
+        stop_event.wait = fake_wait
+
+        # Patch time.monotonic to simulate 130s elapsed
+        start_time = original_monotonic()
+
+        def fast_monotonic():
+            if call_count >= 1:
+                return start_time + 130  # 130s elapsed
+            return start_time
+
+        with (
+            caplog.at_level(logging.WARNING, logger="squadron.agent_manager"),
+            patch("time.monotonic", side_effect=fast_monotonic),
+        ):
+            AgentManager._heartbeat_thread(mgr, "test-no-activity", 1, None, stop_event, loop)
+
+        # Should have logged a NO-ACTIVITY ALERT warning
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno >= logging.WARNING and "NO-ACTIVITY ALERT" in r.message
+        ]
+        assert len(warnings) >= 1
+        assert "test-no-activity" in warnings[0].message
+
+        loop.close()
+
+    def test_no_activity_warning_not_fired_when_active(self, caplog):
+        """No warning if the agent has non-zero tool calls."""
+        import asyncio
+        import logging
+        import threading
+        import time
+
+        from squadron.agent_manager import AgentManager
+
+        mgr = MagicMock(spec=AgentManager)
+        mgr.registry = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.tool_call_count = 5
+        mock_agent.turn_count = 2
+        mgr.registry.get_agent = AsyncMock(return_value=mock_agent)
+        mgr._log_activity = AsyncMock()
+
+        loop = asyncio.new_event_loop()
+        stop_event = threading.Event()
+
+        original_monotonic = time.monotonic
+        call_count = 0
+
+        def fake_wait(timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                stop_event.set()
+                return True
+            return False
+
+        stop_event.wait = fake_wait
+
+        start_time = original_monotonic()
+
+        def fast_monotonic():
+            if call_count >= 1:
+                return start_time + 130
+            return start_time
+
+        # Run the event loop in a background thread so that
+        # run_coroutine_threadsafe can actually execute coroutines.
+        loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+
+        try:
+            with (
+                caplog.at_level(logging.WARNING, logger="squadron.agent_manager"),
+                patch("time.monotonic", side_effect=fast_monotonic),
+            ):
+                AgentManager._heartbeat_thread(mgr, "test-active-agent", 1, None, stop_event, loop)
+
+            # Should NOT have a NO-ACTIVITY ALERT (agent has tool_call_count=5)
+            warnings = [r for r in caplog.records if "NO-ACTIVITY ALERT" in r.message]
+            assert len(warnings) == 0
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=2)
+            loop.close()
+
+
+class TestCleanupAgentStderrCapture:
+    """Phase 3: _cleanup_agent captures CLI stderr before stopping."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_logs_stderr_when_present(self, caplog):
+        """_cleanup_agent should log CLI stderr at WARNING level."""
+        import logging
+
+        from squadron.agent_manager import AgentManager
+        from squadron.copilot import CopilotAgent
+
+        mgr = MagicMock(spec=AgentManager)
+
+        # Create a mock CopilotAgent that returns stderr
+        mock_copilot = MagicMock(spec=CopilotAgent)
+        mock_copilot.get_cli_stderr.return_value = "Error: authentication failed"
+        mock_copilot.stop = AsyncMock()
+
+        mgr._copilot_agents = {"agent-stderr": mock_copilot}
+        mgr._agent_tasks = {}
+        mgr._watchdog_enforced = set()
+        mgr.agent_mail_queues = {}
+        mgr.agent_inboxes = {}
+        mgr._heartbeat_stops = {}
+        mgr._stop_heartbeat = lambda aid: AgentManager._stop_heartbeat(mgr, aid)
+        mgr._sandbox = MagicMock()
+        mgr._sandbox.teardown_session = AsyncMock()
+        mgr.registry = MagicMock()
+        mgr.registry.get_agent = AsyncMock(return_value=None)
+        mgr.config = MagicMock()
+
+        with caplog.at_level(logging.WARNING, logger="squadron.agent_manager"):
+            await AgentManager._cleanup_agent(mgr, "agent-stderr")
+
+        # Should have logged the stderr
+        stderr_logs = [r for r in caplog.records if "CLI stderr" in r.message]
+        assert len(stderr_logs) >= 1
+        assert "authentication failed" in stderr_logs[0].message
+
+        # CopilotAgent.stop() should still have been called
+        mock_copilot.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_no_log_when_stderr_empty(self, caplog):
+        """_cleanup_agent should not log if CLI stderr is empty."""
+        import logging
+
+        from squadron.agent_manager import AgentManager
+        from squadron.copilot import CopilotAgent
+
+        mgr = MagicMock(spec=AgentManager)
+        mock_copilot = MagicMock(spec=CopilotAgent)
+        mock_copilot.get_cli_stderr.return_value = ""
+        mock_copilot.stop = AsyncMock()
+
+        mgr._copilot_agents = {"agent-quiet": mock_copilot}
+        mgr._agent_tasks = {}
+        mgr._watchdog_enforced = set()
+        mgr.agent_mail_queues = {}
+        mgr.agent_inboxes = {}
+        mgr._heartbeat_stops = {}
+        mgr._stop_heartbeat = lambda aid: AgentManager._stop_heartbeat(mgr, aid)
+        mgr._sandbox = MagicMock()
+        mgr._sandbox.teardown_session = AsyncMock()
+        mgr.registry = MagicMock()
+        mgr.registry.get_agent = AsyncMock(return_value=None)
+        mgr.config = MagicMock()
+
+        with caplog.at_level(logging.WARNING, logger="squadron.agent_manager"):
+            await AgentManager._cleanup_agent(mgr, "agent-quiet")
+
+        # Should NOT have logged stderr
+        stderr_logs = [r for r in caplog.records if "CLI stderr" in r.message]
+        assert len(stderr_logs) == 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_continues_if_stderr_capture_fails(self):
+        """_cleanup_agent should not fail if stderr capture raises."""
+        from squadron.agent_manager import AgentManager
+        from squadron.copilot import CopilotAgent
+
+        mgr = MagicMock(spec=AgentManager)
+        mock_copilot = MagicMock(spec=CopilotAgent)
+        mock_copilot.get_cli_stderr.side_effect = RuntimeError("pipe broken")
+        mock_copilot.stop = AsyncMock()
+
+        mgr._copilot_agents = {"agent-broken": mock_copilot}
+        mgr._agent_tasks = {}
+        mgr._watchdog_enforced = set()
+        mgr.agent_mail_queues = {}
+        mgr.agent_inboxes = {}
+        mgr._heartbeat_stops = {}
+        mgr._stop_heartbeat = lambda aid: AgentManager._stop_heartbeat(mgr, aid)
+        mgr._sandbox = MagicMock()
+        mgr._sandbox.teardown_session = AsyncMock()
+        mgr.registry = MagicMock()
+        mgr.registry.get_agent = AsyncMock(return_value=None)
+        mgr.config = MagicMock()
+
+        # Should not raise
+        await AgentManager._cleanup_agent(mgr, "agent-broken")
+
+        # stop() should still have been called
+        mock_copilot.stop.assert_awaited_once()

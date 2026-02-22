@@ -1529,8 +1529,26 @@ class AgentManager:
                 logger.warning("Failed to delete session %s for agent %s", session_id, agent_id)
 
         # Stop CopilotAgent process
+        # Capture CLI stderr for post-mortem diagnostics before stopping.
+        # The CLI's stderr often contains auth errors, model API failures,
+        # or internal panics that are otherwise invisible.
         agent_copilot = self._copilot_agents.pop(agent_id, None)
         if agent_copilot:
+            try:
+                cli_stderr = agent_copilot.get_cli_stderr()
+                if cli_stderr:
+                    # Truncate to avoid flooding logs with huge stderr output
+                    max_len = 4096
+                    truncated = cli_stderr[:max_len]
+                    if len(cli_stderr) > max_len:
+                        truncated += f"\n... (truncated, {len(cli_stderr)} bytes total)"
+                    logger.warning(
+                        "CLI stderr for agent %s:\n%s",
+                        agent_id,
+                        truncated,
+                    )
+            except Exception:
+                pass  # Don't let stderr capture failure block cleanup
             try:
                 await agent_copilot.stop()
             except Exception:
@@ -1686,10 +1704,15 @@ class AgentManager:
         Uses ``threading.Event.wait(timeout=60)`` so it is not affected by
         event-loop starvation.  Schedules the async ``_log_activity`` call back
         onto *loop* via ``run_coroutine_threadsafe``.
+
+        Includes a "no-activity" early warning: if after 120s the agent still
+        has 0 tool calls and 0 turns, a WARNING is logged indicating the CLI
+        may be failing to reach the model API (e.g. missing auth token).
         """
         import time
 
         start = time.monotonic()
+        no_activity_warned = False
         while not stop_event.wait(timeout=60):
             elapsed = int(time.monotonic() - start)
             # Read fresh metadata from the registry (best-effort, non-blocking)
@@ -1700,6 +1723,45 @@ class AgentManager:
                 fresh = None
             tool_call_count = fresh.tool_call_count if fresh else 0
             turn_count = fresh.turn_count if fresh else 0
+
+            # Early warning: if 120s have passed with zero activity, the CLI
+            # is likely unable to reach the model API (auth failure, network
+            # issue, or sandbox problem).
+            if (
+                not no_activity_warned
+                and elapsed >= 120
+                and tool_call_count == 0
+                and turn_count == 0
+            ):
+                no_activity_warned = True
+                logger.warning(
+                    "NO-ACTIVITY ALERT — agent %s has 0 tool calls and 0 turns "
+                    "after %ds. The Copilot CLI may be unable to authenticate "
+                    "with the model API. Check CLI stderr and COPILOT_GITHUB_TOKEN.",
+                    agent_id,
+                    elapsed,
+                )
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._log_activity(
+                            agent_id,
+                            "agent_heartbeat",
+                            issue_number=issue_number,
+                            pr_number=pr_number,
+                            content=(
+                                f"NO-ACTIVITY ALERT — 0 tool calls, 0 turns after {elapsed}s. "
+                                "CLI may be unable to authenticate with model API."
+                            ),
+                            elapsed_seconds=elapsed,
+                            tool_call_count=0,
+                            turn_count=0,
+                            no_activity_alert=True,
+                        ),
+                        loop,
+                    )
+                except Exception:
+                    pass
+
             try:
                 asyncio.run_coroutine_threadsafe(
                     self._log_activity(

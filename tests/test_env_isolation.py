@@ -144,3 +144,143 @@ class TestCopilotAgentEnv:
             working_directory="/tmp/test",
         )
         assert agent._env is None
+
+    def test_github_token_resolved_from_environ(self):
+        """CopilotAgent resolves COPILOT_GITHUB_TOKEN at construction time."""
+        from squadron.config import RuntimeConfig
+        from squadron.copilot import CopilotAgent
+
+        with patch.dict(os.environ, {"COPILOT_GITHUB_TOKEN": "ghu_test_token"}, clear=False):
+            agent = CopilotAgent(
+                runtime_config=RuntimeConfig(),
+                working_directory="/tmp/test",
+            )
+        assert agent._github_token == "ghu_test_token"
+
+    def test_github_token_none_when_missing(self):
+        """CopilotAgent._github_token is None when env var is absent."""
+        from squadron.config import RuntimeConfig
+        from squadron.copilot import CopilotAgent
+
+        env_without_token = {k: v for k, v in os.environ.items() if k != "COPILOT_GITHUB_TOKEN"}
+        with patch.dict(os.environ, env_without_token, clear=True):
+            agent = CopilotAgent(
+                runtime_config=RuntimeConfig(),
+                working_directory="/tmp/test",
+            )
+        assert agent._github_token is None
+
+    def test_start_passes_github_token_to_client(self):
+        """CopilotAgent.start() passes github_token in client_opts."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from squadron.config import RuntimeConfig
+        from squadron.copilot import CopilotAgent
+
+        with patch.dict(os.environ, {"COPILOT_GITHUB_TOKEN": "ghu_pass_test"}, clear=False):
+            agent = CopilotAgent(
+                runtime_config=RuntimeConfig(),
+                working_directory="/tmp/test",
+                env={"PATH": "/usr/bin"},
+            )
+
+        # Mock CopilotClient to capture the options it receives
+        captured_opts = {}
+
+        def fake_client_init(opts=None):
+            captured_opts.update(opts or {})
+            mock = MagicMock()
+            mock.start = AsyncMock()
+            return mock
+
+        with patch("squadron.copilot.CopilotClient", side_effect=fake_client_init):
+            asyncio.run(agent.start())
+
+        assert captured_opts.get("github_token") == "ghu_pass_test"
+        assert captured_opts.get("cwd") == "/tmp/test"
+        assert captured_opts.get("env") == {"PATH": "/usr/bin"}
+
+    def test_start_warns_when_token_missing(self, caplog):
+        """CopilotAgent.start() logs WARNING when no COPILOT_GITHUB_TOKEN."""
+        import asyncio
+        import logging
+        from unittest.mock import AsyncMock, MagicMock
+
+        from squadron.config import RuntimeConfig
+        from squadron.copilot import CopilotAgent
+
+        env_without_token = {k: v for k, v in os.environ.items() if k != "COPILOT_GITHUB_TOKEN"}
+        with patch.dict(os.environ, env_without_token, clear=True):
+            agent = CopilotAgent(
+                runtime_config=RuntimeConfig(),
+                working_directory="/tmp/test",
+                env={"PATH": "/usr/bin"},
+            )
+
+        def fake_client_init(opts=None):
+            mock = MagicMock()
+            mock.start = AsyncMock()
+            return mock
+
+        with (
+            patch("squadron.copilot.CopilotClient", side_effect=fake_client_init),
+            caplog.at_level(logging.WARNING, logger="squadron.copilot"),
+        ):
+            asyncio.run(agent.start())
+
+        assert any("COPILOT_GITHUB_TOKEN" in r.message for r in caplog.records)
+
+
+class TestCopilotAgentStderr:
+    """Tests for CopilotAgent.get_cli_stderr() method."""
+
+    def test_get_cli_stderr_returns_empty_when_no_client(self):
+        """get_cli_stderr returns '' when client is not started."""
+        from squadron.config import RuntimeConfig
+        from squadron.copilot import CopilotAgent
+
+        agent = CopilotAgent(
+            runtime_config=RuntimeConfig(),
+            working_directory="/tmp/test",
+        )
+        assert agent.get_cli_stderr() == ""
+
+    def test_get_cli_stderr_returns_captured_output(self):
+        """get_cli_stderr returns stderr captured by the SDK's JsonRpcClient."""
+        from unittest.mock import MagicMock
+
+        from squadron.config import RuntimeConfig
+        from squadron.copilot import CopilotAgent
+
+        agent = CopilotAgent(
+            runtime_config=RuntimeConfig(),
+            working_directory="/tmp/test",
+        )
+        # Simulate a started client with a _client (JsonRpcClient) that has stderr
+        mock_rpc_client = MagicMock()
+        mock_rpc_client.get_stderr_output.return_value = "Error: auth failed"
+        mock_copilot_client = MagicMock()
+        mock_copilot_client._client = mock_rpc_client
+        agent._client = mock_copilot_client
+
+        assert agent.get_cli_stderr() == "Error: auth failed"
+
+    def test_get_cli_stderr_handles_exception(self):
+        """get_cli_stderr returns '' if accessing stderr raises."""
+        from unittest.mock import MagicMock
+
+        from squadron.config import RuntimeConfig
+        from squadron.copilot import CopilotAgent
+
+        agent = CopilotAgent(
+            runtime_config=RuntimeConfig(),
+            working_directory="/tmp/test",
+        )
+        mock_rpc_client = MagicMock()
+        mock_rpc_client.get_stderr_output.side_effect = RuntimeError("pipe broken")
+        mock_copilot_client = MagicMock()
+        mock_copilot_client._client = mock_rpc_client
+        agent._client = mock_copilot_client
+
+        assert agent.get_cli_stderr() == ""

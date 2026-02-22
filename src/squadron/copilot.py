@@ -38,6 +38,17 @@ from squadron.dashboard_security import DASHBOARD_API_KEY_ENV
 
 logger = logging.getLogger(__name__)
 
+# ── Copilot CLI authentication ────────────────────────────────────────────
+# Env var that holds the GitHub token used by the Copilot CLI to
+# authenticate with the model API.  Resolved once at CopilotAgent
+# construction and passed to CopilotClient as ``github_token`` — the SDK
+# then injects it into the subprocess env under a different name
+# (COPILOT_SDK_AUTH_TOKEN) via ``--auth-token-env``.  This means the
+# original env var is *still* stripped from the subprocess (good for
+# security) while the CLI has valid auth (fixes the agent-hangs-at-
+# send_and_wait bug).
+COPILOT_GITHUB_TOKEN_ENV = "COPILOT_GITHUB_TOKEN"
+
 # ── Secret isolation ──────────────────────────────────────────────────────
 # Environment variables that contain application secrets and MUST NOT be
 # inherited by agent CLI subprocesses.  The agent's bash tool runs inside
@@ -49,6 +60,11 @@ logger = logging.getLogger(__name__)
 # builds its own env).  BYOK API keys are resolved once by the framework
 # and passed as values in the SDK SessionConfig — the subprocess does not
 # need the env var.
+#
+# COPILOT_GITHUB_TOKEN is stripped here too — the CopilotAgent passes the
+# token *value* to CopilotClient({"github_token": ...}) instead.  The SDK
+# re-injects it as COPILOT_SDK_AUTH_TOKEN (inaccessible to bash tool
+# under the original name).
 
 _SECRET_ENV_VARS: frozenset[str] = frozenset(
     {
@@ -112,6 +128,12 @@ class CopilotAgent:
     subprocess.  Callers MUST pass a sanitized env (via
     :func:`build_agent_env`) to prevent the agent's built-in bash tool
     from reading application secrets.
+
+    Authentication: The Copilot CLI needs a GitHub token to call the
+    model API.  Rather than leaking the token into the subprocess env
+    (where the bash tool could read it), we pass it as the SDK's
+    ``github_token`` option.  The SDK injects it under a different env
+    var name (``COPILOT_SDK_AUTH_TOKEN``) via ``--auth-token-env``.
     """
 
     def __init__(
@@ -125,6 +147,11 @@ class CopilotAgent:
         self._env = env  # sanitized env for CLI subprocess
         self._client: CopilotClient | None = None
         self._session: SDKSession | None = None
+
+        # Resolve Copilot auth token from the *framework* environment
+        # (before env stripping).  This is the token the CLI needs to
+        # authenticate with the model API.
+        self._github_token: str | None = os.environ.get(COPILOT_GITHUB_TOKEN_ENV)
 
     async def start(self) -> None:
         """Start the underlying CopilotClient (spawns CLI subprocess).
@@ -140,6 +167,20 @@ class CopilotAgent:
         client_opts: dict[str, Any] = {"cwd": self.working_directory}
         if self._env is not None:
             client_opts["env"] = self._env
+
+        # Pass Copilot GitHub token via the SDK's dedicated auth mechanism.
+        # The SDK sets --auth-token-env COPILOT_SDK_AUTH_TOKEN on the CLI
+        # and injects the token into env["COPILOT_SDK_AUTH_TOKEN"].  This
+        # keeps the original COPILOT_GITHUB_TOKEN stripped (bash tool can't
+        # read it) while the CLI can authenticate with the model API.
+        if self._github_token:
+            client_opts["github_token"] = self._github_token
+        else:
+            logger.warning(
+                "No %s found in environment — CLI may fail to authenticate "
+                "with the model API (send_and_wait will hang)",
+                COPILOT_GITHUB_TOKEN_ENV,
+            )
 
         for attempt in range(max_retries + 1):
             try:
@@ -192,6 +233,27 @@ class CopilotAgent:
         if self._client is None:
             raise RuntimeError("CopilotAgent not started — call start() first")
         return self._client
+
+    def get_cli_stderr(self) -> str:
+        """Return captured stderr output from the CLI subprocess.
+
+        The SDK's JsonRpcClient accumulates stderr in a thread-safe list.
+        This is useful for post-mortem diagnostics when an agent hangs or
+        fails — the CLI's stderr often contains auth errors, model API
+        failures, or internal panics that are otherwise invisible.
+
+        Returns an empty string if no client exists or no stderr was captured.
+        """
+        if self._client is None:
+            return ""
+        # Access the SDK's internal JsonRpcClient which captures stderr
+        rpc_client = getattr(self._client, "_client", None)
+        if rpc_client is not None and hasattr(rpc_client, "get_stderr_output"):
+            try:
+                return rpc_client.get_stderr_output()
+            except Exception:
+                return ""
+        return ""
 
     async def create_session(self, config: SDKSessionConfig) -> SDKSession:
         """Create a new session for this agent."""
