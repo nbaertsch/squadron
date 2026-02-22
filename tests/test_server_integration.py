@@ -477,10 +477,10 @@ class TestConfigHotReload:
         )
         server._config_version = None
         server.agent_manager = MagicMock()
-        server.agent_manager._register_trigger_handlers = MagicMock()
+        server.agent_manager._register_pipeline_handlers = MagicMock()
         server.reconciliation = MagicMock()
         server.router = MagicMock()
-        server.workflow_engine = None
+        server.pipeline_engine = None
 
         event = SquadronEvent(
             event_type=SquadronEventType.PUSH,
@@ -506,4 +506,4 @@ class TestConfigHotReload:
         # Config should be updated
         assert server.config.project.name == "updated-project"
         assert server._config_version == "abc123def456"
-        server.agent_manager._register_trigger_handlers.assert_called_once()
+        server.agent_manager._register_pipeline_handlers.assert_called_once()

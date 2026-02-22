@@ -186,6 +186,10 @@ class PipelineEngine:
         """Look up a pipeline definition by name."""
         return self._pipelines.get(name)
 
+    def list_pipelines(self) -> list[str]:
+        """Return the names of all registered pipeline definitions."""
+        return list(self._pipelines.keys())
+
     def set_spawn_callback(self, callback: SpawnAgentCallback) -> None:
         """Set the callback for spawning agents."""
         self._spawn_agent = callback

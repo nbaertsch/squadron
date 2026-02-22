@@ -22,7 +22,6 @@ import pytest_asyncio
 
 from squadron.config import (
     AgentRoleConfig,
-    AgentTrigger,
     BranchNamingConfig,
     ProjectConfig,
     SquadronConfig,
@@ -60,21 +59,12 @@ def _config() -> SquadronConfig:
         agent_roles={
             "feat-dev": AgentRoleConfig(
                 agent_definition="agents/feat-dev.md",
-                triggers=[
-                    AgentTrigger(event="issues.labeled", label="feature"),
-                ],
             ),
             "bug-fix": AgentRoleConfig(
                 agent_definition="agents/bug-fix.md",
-                triggers=[
-                    AgentTrigger(event="issues.labeled", label="bug"),
-                ],
             ),
             "pr-review": AgentRoleConfig(
                 agent_definition="agents/pr-review.md",
-                triggers=[
-                    AgentTrigger(event="pull_request.opened"),
-                ],
             ),
         },
     )
