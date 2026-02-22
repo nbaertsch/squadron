@@ -1297,24 +1297,29 @@ class AgentManager:
         # ── Tool selection: .md frontmatter is the single source of truth ──
         # The frontmatter `tools:` list is a mixed bag of:
         #   - Custom Squadron tools (names in ALL_TOOL_NAMES) → passed as tools=
-        #   - SDK built-in tools (read_file, bash, git, etc.) → passed as available_tools=
+        #   - SDK built-in tools (read_file, bash, git, etc.) → controlled via excluded_tools=
         # We split them here so each goes to the right SDK config key.
-        from squadron.tools.squadron_tools import ALL_TOOL_NAMES_SET
+        #
+        # IMPORTANT: We use excluded_tools (deny-list) instead of available_tools
+        # (allow-list) because available_tools acts as a GLOBAL whitelist that
+        # also hides custom tools from the model.  The SDK validates
+        # available_tools names against its known builtins and rejects custom
+        # Squadron names, so we cannot add custom tools there either.
+        # excluded_tools only removes specific SDK builtins without affecting
+        # custom tools registered via tools=.
+        # (Fix for issue #118 regression: review agents only see grep/read_file)
+        from squadron.tools.squadron_tools import ALL_TOOL_NAMES_SET, SDK_BUILTIN_TOOLS
 
         if agent_def.tools is not None:
             custom_tool_names = [t for t in agent_def.tools if t in ALL_TOOL_NAMES_SET]
-            # SDK available_tools must ONLY include SDK built-in tool names (not custom
-            # Squadron tool names like `read_issue` or `check_for_events`).
-            # If custom tool names are passed here, the SDK rejects the entire allowlist
-            # and blocks all built-in tools including bash and grep.
-            # Custom Squadron tools are already registered via tools= above.
-            # (Fix for issue #118: bash/grep tools non-functional)
-            sdk_available_tools = [
-                t for t in agent_def.tools if t not in ALL_TOOL_NAMES_SET
-            ] or None
+            # Compute which SDK builtins the frontmatter allows
+            frontmatter_sdk_builtins = {t for t in agent_def.tools if t not in ALL_TOOL_NAMES_SET}
+            # Exclude SDK builtins NOT listed in frontmatter (deny-list approach).
+            # Unknown future builtins remain visible (permissive by default).
+            sdk_excluded_tools = sorted(SDK_BUILTIN_TOOLS - frontmatter_sdk_builtins) or None
         else:
             custom_tool_names = None  # → no Squadron tools (must be in frontmatter)
-            sdk_available_tools = None  # → all SDK tools visible
+            sdk_excluded_tools = None  # → all SDK tools visible
 
         tools = self._tools.get_tools(
             record.agent_id,
@@ -1337,7 +1342,7 @@ class AgentManager:
             custom_agents=custom_agents,
             mcp_servers=mcp_servers,
             skill_directories=skill_directories,
-            available_tools=sdk_available_tools,
+            excluded_tools=sdk_excluded_tools,
         )
 
         # Start heartbeat BEFORE session creation so that hangs during
@@ -1362,7 +1367,7 @@ class AgentManager:
                     custom_agents=custom_agents,
                     mcp_servers=mcp_servers,
                     skill_directories=skill_directories,
-                    available_tools=sdk_available_tools,
+                    excluded_tools=sdk_excluded_tools,
                 )
                 session = await copilot.resume_session(
                     record.session_id or record.agent_id, resume_config

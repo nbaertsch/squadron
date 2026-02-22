@@ -96,6 +96,11 @@ ALL_TOOL_NAMES = [
 # O(1) lookup set for splitting .md tool lists into custom vs SDK built-in
 ALL_TOOL_NAMES_SET = frozenset(ALL_TOOL_NAMES)
 
+# Known SDK built-in tool names.  Used to compute the excluded_tools deny-list
+# when an agent's frontmatter restricts which SDK builtins the model may use.
+# If the CLI adds new builtins in the future they remain visible (permissive).
+SDK_BUILTIN_TOOLS = frozenset(["read_file", "write_file", "grep", "bash", "git"])
+
 
 # ── Tool Parameter Models ────────────────────────────────────────────────────
 
