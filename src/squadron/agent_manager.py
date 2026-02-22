@@ -1245,6 +1245,130 @@ class AgentManager:
 
         return agent_id
 
+    # ── send_and_wait with CLI health monitoring ─────────────────────────
+    async def _send_and_wait_with_health_check(
+        self,
+        session,
+        copilot: CopilotAgent,
+        prompt: str,
+        timeout: float,
+        agent_id: str,
+        poll_interval: float = 5.0,
+    ):
+        """Wrap session.send_and_wait() with CLI process health monitoring.
+
+        The SDK's send_and_wait() waits for a ``SESSION_IDLE`` event delivered
+        via the JSON-RPC notification stream.  If the CLI subprocess crashes or
+        exits *before* emitting that event, the asyncio.Event inside
+        send_and_wait never fires and the call blocks until the circuit-breaker
+        timeout (up to 1800 s).
+
+        ``_fail_pending_requests()`` in the SDK only resolves pending JSON-RPC
+        *request* futures — it does NOT fire the notification-based
+        ``SESSION_IDLE`` that send_and_wait is listening for.
+
+        This wrapper runs a concurrent polling loop that checks whether the CLI
+        process is still alive.  If it exits, we cancel the send_and_wait task
+        immediately and raise an informative error with stderr output.
+        """
+        # Reach into SDK internals to get the subprocess.Popen handle.
+        # Access path: CopilotAgent._client (CopilotClient)
+        #              → CopilotClient._client (JsonRpcClient)
+        #              → JsonRpcClient.process (subprocess.Popen)
+        rpc_client = getattr(copilot._client, "_client", None)
+        cli_process = getattr(rpc_client, "process", None) if rpc_client else None
+
+        # Verify we have a real subprocess.Popen — check for pid (int) and
+        # callable poll.  This avoids false positives when tests use MagicMock.
+        has_valid_process = (
+            cli_process is not None
+            and callable(getattr(cli_process, "poll", None))
+            and isinstance(getattr(cli_process, "pid", None), int)
+        )
+
+        if not has_valid_process:
+            # Can't monitor — fall back to plain send_and_wait
+            logger.debug(
+                "Agent %s: no CLI process handle available for health monitoring; "
+                "using plain send_and_wait",
+                agent_id,
+            )
+            return await session.send_and_wait({"prompt": prompt}, timeout=timeout)
+
+        # Use an event + shared state to communicate between tasks
+        process_died = asyncio.Event()
+        process_error_msg: list[str] = []  # mutable container for error info
+
+        async def _poll_process():
+            """Poll CLI process until it exits or we're cancelled."""
+            while True:
+                exit_code = cli_process.poll()
+                if exit_code is not None:
+                    stderr = copilot.get_cli_stderr()
+                    msg = (
+                        f"CLI process exited with code {exit_code} during "
+                        f"send_and_wait for agent {agent_id}. "
+                        f"stderr: {stderr[:2000] if stderr else '(empty)'}"
+                    )
+                    logger.error(
+                        "Agent %s: CLI process exited (code=%s) while send_and_wait "
+                        "was in progress. stderr=%s",
+                        agent_id,
+                        exit_code,
+                        stderr[:2000] if stderr else "(empty)",
+                    )
+                    process_error_msg.append(msg)
+                    process_died.set()
+                    return
+                await asyncio.sleep(poll_interval)
+
+        # Launch send_and_wait as a task
+        send_task = asyncio.create_task(session.send_and_wait({"prompt": prompt}, timeout=timeout))
+        poll_task = asyncio.create_task(_poll_process())
+
+        try:
+            # Wait for whichever finishes first
+            done, pending = await asyncio.wait(
+                {send_task, poll_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel whatever is still running
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # If the poll task detected a dead process, raise immediately
+            if process_died.is_set():
+                # Also cancel send_task if it's somehow still going
+                if not send_task.done():
+                    send_task.cancel()
+                    try:
+                        await send_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                raise RuntimeError(
+                    process_error_msg[0]
+                    if process_error_msg
+                    else f"CLI process exited during send_and_wait for agent {agent_id}"
+                )
+
+            # send_task finished — propagate its result or exception
+            return send_task.result()
+
+        finally:
+            # Ensure both tasks are cleaned up
+            for task in (send_task, poll_task):
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
     async def _run_agent(
         self,
         record: AgentRecord,
@@ -1427,7 +1551,13 @@ class AgentManager:
                     content="Sending prompt to model via send_and_wait",
                     timeout_seconds=max_duration,
                 )
-                result = await session.send_and_wait({"prompt": prompt}, timeout=max_duration)
+                result = await self._send_and_wait_with_health_check(
+                    session,
+                    copilot,
+                    prompt,
+                    timeout=max_duration,
+                    agent_id=record.agent_id,
+                )
             except asyncio.TimeoutError:
                 self._stop_heartbeat(record.agent_id)
                 logger.warning(
