@@ -745,13 +745,15 @@ class AgentManager:
         Missing skill definitions or directories are logged as warnings so
         agents still start even if skills are unavailable.
 
-        Defense-in-depth: after resolution, each path is checked to ensure it
-        remains within the repo root (guards against symlink escapes or
-        constructed paths that bypass the pydantic validators).
+        A containment check using Path.resolve() verifies that every resolved
+        skill path stays within repo_root, providing defence-in-depth against
+        path traversal even if config-level validators are somehow bypassed
+        (e.g. via symlinks pointing outside the repository).
         """
 
         skills_config = self.config.skills
         base = self.repo_root / skills_config.base_path
+        repo_root_resolved = self.repo_root.resolve()
         dirs: list[str] = []
         for skill_name in agent_def.skills:
             skill_def = skills_config.definitions.get(skill_name)
@@ -763,23 +765,26 @@ class AgentManager:
                 )
                 continue
             skill_path = base / skill_def.path
-            if skill_path.is_dir():
-                resolved = skill_path.resolve()
-                repo_resolved = self.repo_root.resolve()
-                if not resolved.is_relative_to(repo_resolved):
-                    logger.warning(
-                        "Skill '%s' resolved to path outside repo root: %s — skipping",
-                        skill_name,
-                        resolved,
-                    )
-                    continue
-                dirs.append(str(skill_path))
-            else:
+            if not skill_path.is_dir():
                 logger.warning(
                     "Skill directory not found for '%s': %s — skipping",
                     skill_name,
                     skill_path,
                 )
+                continue
+            # Defence-in-depth: verify the resolved path is within repo_root.
+            # This catches symlinks or other filesystem tricks that could escape
+            # the repository even after config-level validation.
+            resolved = skill_path.resolve()
+            if not resolved.is_relative_to(repo_root_resolved):
+                logger.warning(
+                    "Skill '%s' path %s resolves outside repository root %s — skipping",
+                    skill_name,
+                    resolved,
+                    repo_root_resolved,
+                )
+                continue
+            dirs.append(str(skill_path))
         return dirs
 
     async def create_agent(

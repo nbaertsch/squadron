@@ -243,11 +243,15 @@ class TestSkillFrontmatterIntegration:
         assert str(base / "squadron-internals") in result
 
 
-class TestSkillPathContainmentCheck:
-    """Runtime defense-in-depth: symlink escapes are caught by resolve() check."""
+class TestSkillDirectoryContainment:
+    """Regression tests for runtime path containment in _resolve_skill_directories.
 
-    def test_symlink_escape_rejected(self, tmp_path: Path, caplog):
-        """A skill directory that is a symlink pointing outside repo root is skipped."""
+    These tests verify that skill paths are validated to be within the repo root,
+    even if config-level validators are somehow bypassed.
+    """
+
+    def test_containment_blocks_symlink_escape(self, tmp_path: Path, caplog):
+        """A skill path that escapes the repo root via symlink is skipped with a warning."""
         import logging
         import os
 
@@ -257,15 +261,15 @@ class TestSkillPathContainmentCheck:
 
         # Create repo root and skill base
         repo_root = tmp_path / "repo"
-        skill_base = repo_root / ".squadron" / "skills"
+        skill_base = repo_root / "skills"
         skill_base.mkdir(parents=True)
 
         # Create a symlink inside the skill base that points outside repo root
-        symlink_target = skill_base / "evil-skill"
-        os.symlink(str(outside), str(symlink_target))
+        evil_link = skill_base / "evil-skill"
+        os.symlink(str(outside), str(evil_link))
 
         skills_config = SkillsConfig(
-            base_path=".squadron/skills",
+            base_path="skills",
             definitions={"evil-skill": SkillDefinition(path="evil-skill")},
         )
         config = _make_config(repo_root, skills_config)
@@ -275,5 +279,24 @@ class TestSkillPathContainmentCheck:
         with caplog.at_level(logging.WARNING):
             result = stub._resolve_skill_directories(agent_def)
 
-        assert result == []
-        assert "outside repo root" in caplog.text
+        assert result == [], f"Expected empty list but got: {result}"
+        assert any("outside" in r.message or "repo" in r.message.lower() for r in caplog.records), (
+            f"Expected containment warning but got: {[r.message for r in caplog.records]}"
+        )
+
+    def test_containment_allows_valid_skill_path(self, tmp_path: Path):
+        """A skill path within the repo root is allowed."""
+        skill_dir = tmp_path / "skills" / "good-skill"
+        skill_dir.mkdir(parents=True)
+
+        skills_config = SkillsConfig(
+            base_path="skills",
+            definitions={"good-skill": SkillDefinition(path="good-skill")},
+        )
+        config = _make_config(tmp_path, skills_config)
+        stub = _make_agent_manager_stub(config, tmp_path)
+        agent_def = _make_agent_def("feat-dev", ["good-skill"])
+
+        result = stub._resolve_skill_directories(agent_def)
+        assert len(result) == 1
+        assert "good-skill" in result[0]
