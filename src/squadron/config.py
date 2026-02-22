@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,28 @@ class SkillDefinition(BaseModel):
     the Copilot SDK can index and inject as context.
     """
 
-    path: str  # Relative to skills.base_path
+    path: str  # Relative to skills.base_path — must be a plain relative path
     description: str = ""
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        """Reject absolute paths and directory traversal components.
+
+        Absolute paths (starting with /) cause pathlib to silently drop the
+        base path: Path('/repo') / '/etc' → /etc. Traversal components (..)
+        can escape the repository root. Both are rejected here as defence-in-depth.
+        """
+        from pathlib import PurePosixPath
+
+        p = PurePosixPath(v)
+        if p.is_absolute():
+            raise ValueError(f"SkillDefinition.path must be a relative path, got absolute: {v!r}")
+        if ".." in p.parts:
+            raise ValueError(
+                f"SkillDefinition.path must not contain directory traversal components (..): {v!r}"
+            )
+        return v
 
 
 class SkillsConfig(BaseModel):
@@ -40,6 +60,25 @@ class SkillsConfig(BaseModel):
 
     base_path: str = ".squadron/skills"
     definitions: dict[str, SkillDefinition] = Field(default_factory=dict)
+
+    @field_validator("base_path")
+    @classmethod
+    def _validate_base_path(cls, v: str) -> str:
+        """Reject absolute paths and directory traversal components.
+
+        Same reasoning as SkillDefinition.path: absolute paths bypass the
+        repo root entirely, and .. components can escape it.
+        """
+        from pathlib import PurePosixPath
+
+        p = PurePosixPath(v)
+        if p.is_absolute():
+            raise ValueError(f"SkillsConfig.base_path must be a relative path, got absolute: {v!r}")
+        if ".." in p.parts:
+            raise ValueError(
+                f"SkillsConfig.base_path must not contain directory traversal components (..): {v!r}"
+            )
+        return v
 
 
 class ProjectConfig(BaseModel):

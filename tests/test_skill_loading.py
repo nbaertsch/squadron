@@ -156,12 +156,12 @@ class TestResolveSkillDirectories:
         assert "missing-skill" in caplog.text
 
     def test_custom_base_path(self, tmp_path: Path):
-        # Custom base path
+        # Custom base path — must be relative (absolute paths are rejected by SkillsConfig validator)
         custom_base = tmp_path / "custom" / "skills"
         (custom_base / "my-skill").mkdir(parents=True)
 
         skills_config = SkillsConfig(
-            base_path=str(custom_base),
+            base_path="custom/skills",  # relative to repo_root (tmp_path)
             definitions={"my-skill": SkillDefinition(path="my-skill")},
         )
         config = _make_config(tmp_path, skills_config)
@@ -241,3 +241,73 @@ class TestSkillFrontmatterIntegration:
         result = stub._resolve_skill_directories(agent_def)
         assert len(result) == 1
         assert str(base / "squadron-internals") in result
+
+
+class TestSkillDirectoryContainment:
+    """Regression tests for runtime path containment in _resolve_skill_directories.
+
+    These tests verify that skill paths are validated to be within the repo root,
+    even if config-level validators are somehow bypassed.
+    """
+
+    def _make_manager(self, tmp_path: Path, skills_config: SkillsConfig):
+        from unittest.mock import MagicMock
+
+        from squadron.agent_manager import AgentManager
+
+        config = _make_config(tmp_path, skills_config)
+        manager = AgentManager.__new__(AgentManager)
+        manager.config = config
+        manager.repo_root = tmp_path
+        manager._github = MagicMock()
+        manager._active_agents = {}
+        manager._sleeping_agents = {}
+        return manager
+
+    def test_containment_blocks_absolute_skill_path(self, tmp_path: Path, caplog):
+        """A skill path that escapes the repo root is skipped with a warning."""
+        import logging
+
+        # Create a skill dir OUTSIDE tmp_path (simulating escape)
+        outside_dir = tmp_path.parent / "outside-repo-skill"
+        outside_dir.mkdir(exist_ok=True)
+        (outside_dir / "secret.md").write_text("sensitive data")
+
+        # The skill path is relative but resolves outside repo_root via symlink
+        # We test by patching: create a subdir that is actually a symlink to outside
+        evil_link = tmp_path / "skills" / "evil-skill"
+        evil_link.parent.mkdir(parents=True, exist_ok=True)
+        evil_link.symlink_to(outside_dir)
+
+        skills_config = SkillsConfig(
+            base_path="skills",
+            definitions={"evil-skill": SkillDefinition(path="evil-skill")},
+        )
+        manager = self._make_manager(tmp_path, skills_config)
+        agent_def = _make_agent_def("test-agent", ["evil-skill"])
+
+        with caplog.at_level(logging.WARNING):
+            result = manager._resolve_skill_directories(agent_def)
+
+        # The symlinked outside-repo path should be blocked
+        assert result == [], f"Expected empty list but got: {result}"
+        assert any(
+            "outside" in r.message or "containment" in r.message or "repo" in r.message.lower()
+            for r in caplog.records
+        ), f"Expected containment warning but got: {[r.message for r in caplog.records]}"
+
+    def test_containment_allows_valid_skill_path(self, tmp_path: Path):
+        """A skill path within the repo root is allowed."""
+        skill_dir = tmp_path / "skills" / "good-skill"
+        skill_dir.mkdir(parents=True)
+
+        skills_config = SkillsConfig(
+            base_path="skills",
+            definitions={"good-skill": SkillDefinition(path="good-skill")},
+        )
+        manager = self._make_manager(tmp_path, skills_config)
+        agent_def = _make_agent_def("test-agent", ["good-skill"])
+
+        result = manager._resolve_skill_directories(agent_def)
+        assert len(result) == 1
+        assert "good-skill" in result[0]
