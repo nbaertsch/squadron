@@ -1,3 +1,16 @@
+skills:
+  base_path: .squadron/skills
+  definitions:
+    squadron-internals:
+      path: squadron-internals
+      description: "Squadron framework architecture, event pipeline, and component design"
+    squadron-dev-guide:
+      path: squadron-dev-guide
+      description: "Coding conventions, async patterns, Pydantic style, and testing practices"
+    squadron-tools:
+      path: squadron-tools
+      description: "Squadron tool registry, signatures, and guide for adding new tools"
+
 agent_roles:
   bug-fix:
     agent_definition: agents/bug-fix.md
