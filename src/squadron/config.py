@@ -224,6 +224,9 @@ class SquadronConfig(BaseModel):
     # AD-019: Unified pipeline system (replaces triggers, review_policy, workflows)
     pipelines: dict[str, Any] = Field(default_factory=dict)
 
+    # AD-019 Phase 5: Pipeline settings — custom gate plugins, etc.
+    pipeline_settings: dict[str, Any] = Field(default_factory=dict)
+
     def get_pipeline_definitions(self) -> dict[str, Any]:
         """Return pipeline definitions as validated PipelineDefinition models.
 

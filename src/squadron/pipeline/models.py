@@ -276,6 +276,9 @@ class StageDefinition(BaseModel):
     # Sub-pipeline stage fields
     pipeline: str | None = None
 
+    # Output validation (agent / webhook / action stages)
+    expected_outputs: list[str] | None = None
+
     # Conditional execution (all stage types)
     condition: dict[str, Any] | None = None
     skip_to: str | None = None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
 import pytest
@@ -2686,3 +2687,926 @@ class TestGateConditionPRField:
         cond = GateConditionConfig(check="ci_status")
         config = cond.get_config()
         assert "pr" not in config
+
+
+# ── Phase 5: Condition Evaluation ────────────────────────────────────────────
+
+
+class TestConditionEvaluation:
+    """P5.2: Full conditional stage evaluation with any/all, paths_match, expr."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_labels_include_match(self, engine):
+        """Stage with labels_include condition runs when label is present."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="conditional-stage",
+                    type="action",
+                    action="merge_pr",
+                    condition={"labels_include": "approved"},
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"labels": ["approved", "ready"]},
+        )
+        assert run is not None
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_labels_include_no_match(self, engine):
+        """Stage with labels_include condition is skipped when label missing."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="conditional-stage",
+                    type="action",
+                    action="merge_pr",
+                    condition={"labels_include": "approved"},
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"labels": ["needs-review"]},
+        )
+        assert run is not None
+        # Stage should be skipped — action not called
+        assert len(self._actions) == 0
+
+    @pytest.mark.asyncio
+    async def test_paths_match_condition(self, engine):
+        """Stage runs when paths_match pattern matches changed files."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="security-review",
+                    type="agent",
+                    agent="security-reviewer",
+                    condition={"paths_match": ["src/auth/**", "*.secret"]},
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"changed_files": ["src/auth/login.py", "README.md"]},
+        )
+        assert run is not None
+        assert len(self._spawned_agents) == 1
+
+    @pytest.mark.asyncio
+    async def test_paths_match_no_match(self, engine):
+        """Stage is skipped when paths_match doesn't match any changed file."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="security-review",
+                    type="agent",
+                    agent="security-reviewer",
+                    condition={"paths_match": ["src/auth/**"]},
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"changed_files": ["src/utils/helpers.py"]},
+        )
+        assert run is not None
+        assert len(self._spawned_agents) == 0
+
+    @pytest.mark.asyncio
+    async def test_expr_condition_truthy(self, engine):
+        """Stage runs when expr template evaluates to truthy."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="action-stage",
+                    type="action",
+                    action="merge_pr",
+                    condition={"expr": "context.ready == true"},
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"ready": True},
+        )
+        assert run is not None
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_expr_condition_falsy(self, engine):
+        """Stage is skipped when expr template evaluates to falsy."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="action-stage",
+                    type="action",
+                    action="merge_pr",
+                    condition={"expr": "context.ready == true"},
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"ready": False},
+        )
+        assert run is not None
+        assert len(self._actions) == 0
+
+    @pytest.mark.asyncio
+    async def test_any_combinator(self, engine):
+        """Stage runs when any sub-condition matches."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="action-stage",
+                    type="action",
+                    action="merge_pr",
+                    condition={
+                        "any": [
+                            {"labels_include": "urgent"},
+                            {"labels_include": "hotfix"},
+                        ]
+                    },
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"labels": ["hotfix"]},
+        )
+        assert run is not None
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_all_combinator(self, engine):
+        """Stage is skipped when not all sub-conditions match."""
+        defn = PipelineDefinition(
+            description="Conditional pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="action-stage",
+                    type="action",
+                    action="merge_pr",
+                    condition={
+                        "all": [
+                            {"labels_include": "approved"},
+                            {"labels_include": "ci-passed"},
+                        ]
+                    },
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"labels": ["approved"]},  # missing ci-passed
+        )
+        assert run is not None
+        assert len(self._actions) == 0
+
+    def test_paths_match_static_method(self):
+        """_eval_paths_match correctly matches glob patterns."""
+        assert (
+            PipelineEngine._eval_paths_match(
+                ["src/auth/**"], {"changed_files": ["src/auth/login.py"]}
+            )
+            is True
+        )
+        assert (
+            PipelineEngine._eval_paths_match(
+                ["src/auth/**"], {"changed_files": ["src/utils/helpers.py"]}
+            )
+            is False
+        )
+        assert PipelineEngine._eval_paths_match(["*.py"], {"changed_files": ["test.py"]}) is True
+        assert PipelineEngine._eval_paths_match(["src/**"], {}) is False
+
+
+# ── Phase 5: Parallel Branch Conditions ──────────────────────────────────────
+
+
+class TestParallelBranchConditions:
+    """P5.2: Parallel branches with conditions should be evaluated/skipped."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_branch_with_met_condition_runs(self, engine):
+        """Parallel branch runs when its condition is met."""
+        defn = PipelineDefinition(
+            description="Conditional parallel",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="parallel-review",
+                    type="parallel",
+                    branches=[
+                        ParallelBranch(
+                            id="security",
+                            agent="security-reviewer",
+                            condition={"labels_include": "security"},
+                        ),
+                        ParallelBranch(id="code", agent="code-reviewer"),
+                    ],
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"labels": ["security"]},
+        )
+        assert run is not None
+        # Both branches should run (security condition met + code has no condition)
+        assert len(self._spawned_agents) == 2
+
+    @pytest.mark.asyncio
+    async def test_branch_with_unmet_condition_skipped(self, engine):
+        """Parallel branch is skipped when its condition is not met."""
+        defn = PipelineDefinition(
+            description="Conditional parallel",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="parallel-review",
+                    type="parallel",
+                    branches=[
+                        ParallelBranch(
+                            id="security",
+                            agent="security-reviewer",
+                            condition={"labels_include": "security"},
+                        ),
+                        ParallelBranch(id="code", agent="code-reviewer"),
+                    ],
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={"labels": ["enhancement"]},  # no "security" label
+        )
+        assert run is not None
+        # Only code branch should run
+        roles = [a["role"] for a in self._spawned_agents]
+        assert "code-reviewer" in roles
+        assert "security-reviewer" not in roles
+
+
+# ── Phase 5: Webhook Stage Execution ─────────────────────────────────────────
+
+
+class TestWebhookStageExecution:
+    """P5.4: Webhook stage sends HTTP requests and validates responses."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_webhook_success(self, engine):
+        """Webhook stage completes successfully on expected status."""
+        from squadron.pipeline.models import WebhookRequestConfig
+
+        defn = PipelineDefinition(
+            description="Webhook pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="external-check",
+                    type="webhook",
+                    request=WebhookRequestConfig(
+                        url="https://api.example.com/validate",
+                        method="POST",
+                        body={"pr": "{{ context.pr_number }}"},
+                    ),
+                    expect={"status": 200},
+                    on_success="post-webhook",
+                ),
+                StageDefinition(id="post-webhook", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+
+        # Mock httpx response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {"result": "ok"}
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            run = await engine.start_pipeline(
+                "test",
+                issue_number=1,
+                pr_number=42,
+                context={"pr_number": 42},
+            )
+
+        assert run is not None
+        # Should have advanced to post-webhook action
+        assert len(self._actions) == 1
+
+        # Verify the request was made with resolved templates
+        mock_client.request.assert_called_once()
+        call_kwargs = mock_client.request.call_args
+        assert call_kwargs[0][0] == "POST"
+        assert call_kwargs[0][1] == "https://api.example.com/validate"
+        assert call_kwargs[1]["json"] == {"pr": 42}
+
+    @pytest.mark.asyncio
+    async def test_webhook_failure_status(self, engine):
+        """Webhook stage fails when status doesn't match expected."""
+        from squadron.pipeline.models import WebhookRequestConfig
+
+        defn = PipelineDefinition(
+            description="Webhook pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="external-check",
+                    type="webhook",
+                    request=WebhookRequestConfig(
+                        url="https://api.example.com/validate",
+                        method="POST",
+                    ),
+                    expect={"status": 200},
+                    on_fail="handle-failure",
+                ),
+                StageDefinition(
+                    id="handle-failure",
+                    type="action",
+                    action="notify_failure",
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.headers = {"content-type": "text/plain"}
+        mock_response.json.side_effect = ValueError("not json")
+        mock_response.text = "Internal Server Error"
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            run = await engine.start_pipeline(
+                "test",
+                issue_number=1,
+                pr_number=42,
+                context={},
+            )
+
+        assert run is not None
+        # Should have routed to the on_fail handler
+        assert len(self._actions) == 1
+        assert self._actions[0]["action"] == "notify_failure"
+
+    @pytest.mark.asyncio
+    async def test_webhook_http_error(self, engine):
+        """Webhook stage handles HTTP connection errors."""
+        import httpx
+        from squadron.pipeline.models import WebhookRequestConfig
+
+        defn = PipelineDefinition(
+            description="Webhook pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="external-check",
+                    type="webhook",
+                    request=WebhookRequestConfig(
+                        url="https://api.example.com/validate",
+                    ),
+                    expect={"status": 200},
+                ),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            run = await engine.start_pipeline(
+                "test",
+                issue_number=1,
+                pr_number=42,
+                context={},
+            )
+
+        assert run is not None
+        # Pipeline should be in a failed state
+        updated_run = await engine._registry.get_pipeline_run(run.run_id)
+        assert updated_run is not None
+        assert updated_run.status == PipelineRunStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_webhook_status_list_expect(self, engine):
+        """Webhook stage accepts a list of expected status codes."""
+        from squadron.pipeline.models import WebhookRequestConfig
+
+        defn = PipelineDefinition(
+            description="Webhook pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="external-check",
+                    type="webhook",
+                    request=WebhookRequestConfig(
+                        url="https://api.example.com/validate",
+                    ),
+                    expect={"status": [200, 201, 204]},
+                    on_success="done",
+                ),
+                StageDefinition(id="done", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.headers = {}
+        mock_response.json.return_value = {}
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            run = await engine.start_pipeline(
+                "test",
+                issue_number=1,
+                pr_number=42,
+                context={},
+            )
+
+        assert run is not None
+        assert len(self._actions) == 1
+
+
+# ── Phase 5: Output Validation ───────────────────────────────────────────────
+
+
+class TestOutputValidation:
+    """P5.5: Agent stages with expected_outputs should validate outputs."""
+
+    @pytest_asyncio.fixture
+    async def engine(self, registry, gate_registry):
+        eng = PipelineEngine(
+            registry=registry,
+            gate_registry=gate_registry,
+            owner="test-owner",
+            repo="test-repo",
+        )
+        self._spawned_agents: list[dict[str, Any]] = []
+        self._actions: list[dict[str, Any]] = []
+
+        async def mock_spawn(
+            role,
+            issue_number,
+            *,
+            pr_number=None,
+            pipeline_run_id=None,
+            stage_id=None,
+            action=None,
+            continue_session=False,
+            context=None,
+        ):
+            agent_id = f"{role}-{stage_id}-agent"
+            self._spawned_agents.append(
+                {
+                    "role": role,
+                    "stage_id": stage_id,
+                    "agent_id": agent_id,
+                }
+            )
+            return agent_id
+
+        async def mock_action(action, config, context):
+            self._actions.append({"action": action})
+            return {"success": True}
+
+        eng.set_spawn_callback(mock_spawn)
+        eng.set_action_callback(mock_action)
+        return eng
+
+    @pytest.mark.asyncio
+    async def test_valid_outputs_advance(self, engine):
+        """Agent with expected_outputs advances when all keys present."""
+        defn = PipelineDefinition(
+            description="Output validation pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="review",
+                    type="agent",
+                    agent="reviewer",
+                    expected_outputs=["summary", "approved"],
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={},
+        )
+        assert run is not None
+        assert len(self._spawned_agents) == 1
+        agent_id = self._spawned_agents[0]["agent_id"]
+
+        # Complete with all expected outputs
+        await engine.on_agent_complete(
+            agent_id, outputs={"summary": "Looks good", "approved": True}
+        )
+
+        # Should advance to merge action
+        assert len(self._actions) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_outputs_fail(self, engine):
+        """Agent with expected_outputs fails when keys are missing."""
+        defn = PipelineDefinition(
+            description="Output validation pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="review",
+                    type="agent",
+                    agent="reviewer",
+                    expected_outputs=["summary", "approved"],
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={},
+        )
+        assert run is not None
+        agent_id = self._spawned_agents[0]["agent_id"]
+
+        # Complete with missing "approved" key
+        await engine.on_agent_complete(agent_id, outputs={"summary": "Looks good"})
+
+        # Should NOT advance to merge — validation failed
+        assert len(self._actions) == 0
+
+        # Stage run should be marked as failed
+        stage_runs = await engine._registry.get_stage_runs_for_pipeline(run.run_id)
+        review_run = [s for s in stage_runs if s.stage_id == "review"][0]
+        assert review_run.status == StageRunStatus.FAILED
+        assert "approved" in (review_run.error_message or "")
+
+    @pytest.mark.asyncio
+    async def test_no_outputs_when_expected_fails(self, engine):
+        """Agent with expected_outputs fails when outputs is None."""
+        defn = PipelineDefinition(
+            description="Output validation pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(
+                    id="review",
+                    type="agent",
+                    agent="reviewer",
+                    expected_outputs=["summary"],
+                ),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={},
+        )
+        assert run is not None
+        agent_id = self._spawned_agents[0]["agent_id"]
+
+        # Complete with no outputs
+        await engine.on_agent_complete(agent_id, outputs=None)
+
+        # Should fail validation
+        assert len(self._actions) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_expected_outputs_always_advances(self, engine):
+        """Agent without expected_outputs always advances on complete."""
+        defn = PipelineDefinition(
+            description="No validation pipeline",
+            trigger=TriggerDefinition(event="pull_request.opened"),
+            stages=[
+                StageDefinition(id="review", type="agent", agent="reviewer"),
+                StageDefinition(id="merge", type="action", action="merge_pr"),
+            ],
+        )
+        engine.add_pipeline("test", defn)
+        run = await engine.start_pipeline(
+            "test",
+            issue_number=1,
+            pr_number=10,
+            context={},
+        )
+        assert run is not None
+        agent_id = self._spawned_agents[0]["agent_id"]
+
+        # Complete with no outputs and no expected_outputs — should be fine
+        await engine.on_agent_complete(agent_id, outputs=None)
+        assert len(self._actions) == 1
+
+
+# ── Phase 5: Custom Gate Plugin Config ───────────────────────────────────────
+
+
+class TestCustomGatePluginConfig:
+    """P5.6: Custom gate check loading from Python modules."""
+
+    def test_load_custom_gates_registers_check(self):
+        """load_custom_gates() registers a valid GateCheck subclass."""
+        from squadron.pipeline.gates import GateCheck, GateCheckRegistry, GateCheckResult
+
+        # Create a temporary module with a custom gate
+        import types
+
+        test_module = types.ModuleType("test_custom_gates")
+
+        class CustomCheck(GateCheck):
+            reactive_events: set[str] = set()
+
+            async def evaluate(self, config, context):
+                return GateCheckResult(passed=True, message="custom ok")
+
+        test_module.CustomCheck = CustomCheck
+
+        import sys
+
+        sys.modules["test_custom_gates"] = test_module
+
+        try:
+            reg = GateCheckRegistry()
+            reg.load_custom_gates(
+                [
+                    {
+                        "module": "test_custom_gates",
+                        "checks": [{"name": "custom_check", "class": "CustomCheck"}],
+                    }
+                ]
+            )
+            assert reg.has("custom_check")
+        finally:
+            del sys.modules["test_custom_gates"]
+
+    def test_load_custom_gates_bad_module(self):
+        """load_custom_gates() logs error for missing module."""
+        from squadron.pipeline.gates import GateCheckRegistry
+
+        reg = GateCheckRegistry()
+        # Should not raise, just log error
+        reg.load_custom_gates(
+            [
+                {
+                    "module": "nonexistent_module_xyz",
+                    "checks": [{"name": "bad_check", "class": "BadCheck"}],
+                }
+            ]
+        )
+        assert not reg.has("bad_check")
+
+    def test_load_custom_gates_bad_class(self):
+        """load_custom_gates() logs error for missing class in module."""
+        import types
+        import sys
+
+        test_module = types.ModuleType("test_bad_class_gates")
+        sys.modules["test_bad_class_gates"] = test_module
+
+        try:
+            from squadron.pipeline.gates import GateCheckRegistry
+
+            reg = GateCheckRegistry()
+            reg.load_custom_gates(
+                [
+                    {
+                        "module": "test_bad_class_gates",
+                        "checks": [{"name": "missing", "class": "NonExistentClass"}],
+                    }
+                ]
+            )
+            assert not reg.has("missing")
+        finally:
+            del sys.modules["test_bad_class_gates"]
+
+    def test_load_custom_gates_not_gate_check_subclass(self):
+        """load_custom_gates() rejects class that isn't a GateCheck subclass."""
+        import types
+        import sys
+
+        test_module = types.ModuleType("test_not_gate")
+        test_module.NotAGate = type("NotAGate", (), {})
+
+        sys.modules["test_not_gate"] = test_module
+
+        try:
+            from squadron.pipeline.gates import GateCheckRegistry
+
+            reg = GateCheckRegistry()
+            reg.load_custom_gates(
+                [
+                    {
+                        "module": "test_not_gate",
+                        "checks": [{"name": "bad", "class": "NotAGate"}],
+                    }
+                ]
+            )
+            assert not reg.has("bad")
+        finally:
+            del sys.modules["test_not_gate"]
+
+
+# ── Phase 5: Expected Outputs Model Field ────────────────────────────────────
+
+
+class TestExpectedOutputsModel:
+    """P5.5 model: StageDefinition includes expected_outputs field."""
+
+    def test_expected_outputs_field(self):
+        stage = StageDefinition(
+            id="review",
+            type="agent",
+            agent="reviewer",
+            expected_outputs=["summary", "approved"],
+        )
+        assert stage.expected_outputs == ["summary", "approved"]
+
+    def test_expected_outputs_none_by_default(self):
+        stage = StageDefinition(
+            id="review",
+            type="agent",
+            agent="reviewer",
+        )
+        assert stage.expected_outputs is None
+
+    def test_expected_outputs_serialization(self):
+        stage = StageDefinition(
+            id="review",
+            type="agent",
+            agent="reviewer",
+            expected_outputs=["summary"],
+        )
+        data = stage.model_dump()
+        assert data["expected_outputs"] == ["summary"]

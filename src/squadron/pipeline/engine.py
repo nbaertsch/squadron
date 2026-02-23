@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
 from squadron.pipeline.gates import GateCheckRegistry, GateCheckResult, PipelineContext
+from squadron.pipeline.templates import TemplateResolver
 from squadron.pipeline.models import (
     GateCheckRecord,
     GateTimeoutConfig,
@@ -682,12 +683,7 @@ class PipelineEngine:
                 case StageType.PIPELINE:
                     await self._execute_pipeline_stage(run, definition, stage, stage_run)
                 case StageType.WEBHOOK:
-                    # Webhook stages are Phase 5
-                    logger.warning("Webhook stages not yet implemented (stage '%s')", stage.id)
-                    stage_run.status = StageRunStatus.SKIPPED
-                    stage_run.completed_at = datetime.now(timezone.utc)
-                    await self._registry.update_stage_run(stage_run)
-                    await self._advance_after_stage(run, definition, stage, "complete")
+                    await self._execute_webhook_stage(run, definition, stage, stage_run)
 
         except Exception as exc:
             logger.exception(
@@ -867,6 +863,137 @@ class PipelineEngine:
                     run, definition, stage, result.get("error", "Action failed")
                 )
 
+    async def _execute_webhook_stage(
+        self,
+        run: PipelineRun,
+        definition: PipelineDefinition,
+        stage: StageDefinition,
+        stage_run: StageRun,
+    ) -> None:
+        """Execute a webhook stage — send an HTTP request and validate the response.
+
+        Resolves ``{{ }}`` templates in the request URL, headers, and body
+        before sending. Validates the response against ``stage.expect``
+        (currently supports ``status`` code matching).
+
+        Routes to ``on_success`` / ``on_failure`` transitions based on result.
+        """
+        import httpx
+
+        request_cfg = stage.request
+        if not request_cfg:
+            msg = f"Webhook stage '{stage.id}' has no request config"
+            raise RuntimeError(msg)
+
+        # Resolve templates in request config
+        resolver = TemplateResolver({"context": run.context})
+        resolved_url: str = resolver.resolve(request_cfg.url)
+        resolved_headers: dict[str, str] = resolver.resolve(dict(request_cfg.headers))
+        resolved_body: dict[str, Any] = resolver.resolve(dict(request_cfg.body))
+        method = request_cfg.method.upper()
+
+        logger.info(
+            "Webhook stage '%s' sending %s %s (pipeline %s)",
+            stage.id,
+            method,
+            resolved_url,
+            run.run_id,
+        )
+
+        stage_run.status = StageRunStatus.WAITING
+        await self._registry.update_stage_run(stage_run)
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.request(
+                    method,
+                    resolved_url,
+                    headers=resolved_headers,
+                    json=resolved_body if resolved_body else None,
+                )
+        except httpx.HTTPError as exc:
+            logger.error(
+                "Webhook stage '%s' request failed: %s (pipeline %s)",
+                stage.id,
+                exc,
+                run.run_id,
+            )
+            stage_run.status = StageRunStatus.FAILED
+            stage_run.error_message = f"HTTP request failed: {exc}"
+            stage_run.outputs = {"error": str(exc)}
+            stage_run.completed_at = datetime.now(timezone.utc)
+            await self._registry.update_stage_run(stage_run)
+
+            if stage.on_fail:
+                target = stage.get_next_stage_id("fail")
+                if target:
+                    await self._transition_to(run, definition, target)
+                    return
+            await self._handle_stage_error(run, definition, stage, f"HTTP request failed: {exc}")
+            return
+
+        # Build outputs from response
+        response_outputs: dict[str, Any] = {
+            "status": response.status_code,
+            "headers": dict(response.headers),
+        }
+        try:
+            response_outputs["body"] = response.json()
+        except Exception:
+            response_outputs["body"] = response.text
+
+        stage_run.outputs = response_outputs
+
+        # Validate against expect config
+        expect = stage.expect or {}
+        success = True
+
+        if "status" in expect:
+            expected_status = expect["status"]
+            if isinstance(expected_status, list):
+                success = response.status_code in expected_status
+            else:
+                success = response.status_code == expected_status
+
+        if success:
+            logger.info(
+                "Webhook stage '%s' succeeded (status %d, pipeline %s)",
+                stage.id,
+                response.status_code,
+                run.run_id,
+            )
+            stage_run.status = StageRunStatus.COMPLETED
+            stage_run.completed_at = datetime.now(timezone.utc)
+            await self._registry.update_stage_run(stage_run)
+            result_key = "success" if stage.on_success else "complete"
+            await self._advance_after_stage(run, definition, stage, result_key)
+        else:
+            logger.warning(
+                "Webhook stage '%s' failed validation (expected status %s, got %d, pipeline %s)",
+                stage.id,
+                expect.get("status"),
+                response.status_code,
+                run.run_id,
+            )
+            stage_run.status = StageRunStatus.FAILED
+            stage_run.error_message = (
+                f"Expected status {expect.get('status')}, got {response.status_code}"
+            )
+            stage_run.completed_at = datetime.now(timezone.utc)
+            await self._registry.update_stage_run(stage_run)
+
+            if stage.on_fail:
+                target = stage.get_next_stage_id("fail")
+                if target:
+                    await self._transition_to(run, definition, target)
+                    return
+            await self._handle_stage_error(
+                run,
+                definition,
+                stage,
+                f"Expected status {expect.get('status')}, got {response.status_code}",
+            )
+
     async def _execute_delay_stage(
         self,
         run: PipelineRun,
@@ -874,17 +1001,63 @@ class PipelineEngine:
         stage: StageDefinition,
         stage_run: StageRun,
     ) -> None:
-        """Execute a delay stage — wait for the specified duration."""
+        """Execute a delay stage — wait for the specified duration.
+
+        If ``stage.poll`` is configured, periodically evaluates a template
+        condition during the delay. When the condition becomes truthy, the
+        delay ends early (``on_ready: skip_remaining_delay``).
+
+        Poll config format::
+
+            poll:
+              interval: 5s
+              condition: "{{ context.some_flag }}"
+              on_ready: skip_remaining_delay
+        """
         duration_str = stage.duration
         if not duration_str:
             msg = f"Delay stage '{stage.id}' has no duration"
             raise RuntimeError(msg)
 
         seconds = _parse_duration_seconds(duration_str)
+        poll_cfg = stage.poll
 
         async def _delay_coroutine() -> None:
             try:
-                await asyncio.sleep(seconds)
+                if poll_cfg:
+                    # Poll mode: check condition periodically during the delay
+                    poll_interval_str = poll_cfg.get("interval", "10s")
+                    poll_interval = _parse_duration_seconds(poll_interval_str)
+                    condition_expr = poll_cfg.get("condition", "")
+                    elapsed = 0
+
+                    while elapsed < seconds:
+                        wait_time = min(poll_interval, seconds - elapsed)
+                        await asyncio.sleep(wait_time)
+                        elapsed += wait_time
+
+                        # Evaluate poll condition using template resolver
+                        if condition_expr:
+                            # Reload run context for fresh data
+                            current_run = await self._registry.get_pipeline_run(run.run_id)
+                            ctx = current_run.context if current_run else run.context
+                            resolver = TemplateResolver({"context": ctx})
+                            result = resolver.resolve(condition_expr)
+                            if result and result is not True:
+                                # If it resolved to a non-empty, truthy value
+                                result = bool(result)
+                            if result:
+                                logger.info(
+                                    "Delay stage '%s' poll condition met after %ds (pipeline %s)",
+                                    stage.id,
+                                    elapsed,
+                                    run.run_id,
+                                )
+                                break
+                else:
+                    # Simple delay — just sleep
+                    await asyncio.sleep(seconds)
+
                 stage_run.status = StageRunStatus.COMPLETED
                 stage_run.completed_at = datetime.now(timezone.utc)
                 await self._registry.update_stage_run(stage_run)
@@ -901,9 +1074,10 @@ class PipelineEngine:
         task = asyncio.create_task(_delay_coroutine())
         self._delay_tasks[run.run_id] = task
         logger.info(
-            "Delay stage '%s' waiting %ds (pipeline %s)",
+            "Delay stage '%s' waiting %ds%s (pipeline %s)",
             stage.id,
             seconds,
+            " (with poll)" if poll_cfg else "",
             run.run_id,
         )
 
@@ -1054,12 +1228,25 @@ class PipelineEngine:
         await self._registry.update_stage_run(stage_run)
 
         for branch in stage.branches:
-            # Check branch condition (simplified — full conditions in Phase 5)
-            if branch.condition:
+            # Evaluate branch condition using the full condition evaluator
+            if branch.condition and not self._eval_condition(branch.condition, run):
                 logger.info(
-                    "Skipping conditional branch '%s' (conditions not yet evaluated)",
+                    "Parallel branch '%s' condition not met, skipping (pipeline %s)",
                     branch.id,
+                    run.run_id,
                 )
+                # Create a SKIPPED stage run for tracking
+                skipped_stage_id = f"{stage.id}/{branch.id}"
+                skipped_run = StageRun(
+                    run_id=run.run_id,
+                    stage_id=skipped_stage_id,
+                    status=StageRunStatus.SKIPPED,
+                    branch_id=branch.id,
+                    parent_stage_id=stage.id,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                )
+                await self._registry.create_stage_run(skipped_run)
                 continue
 
             branch_stage_id = f"{stage.id}/{branch.id}"
@@ -1397,41 +1584,62 @@ class PipelineEngine:
             await self._fail_pipeline(run, error_message, error_stage_id=stage.id)
 
     def _evaluate_stage_condition(self, stage: StageDefinition, run: PipelineRun) -> bool:
-        """Evaluate a stage's conditional execution config (simplified).
+        """Evaluate a stage's conditional execution config.
 
-        Full template expression evaluation is Phase 5.
-        For now, supports:
-            - labels_include: check if label is in context["labels"]
+        Supports:
+            - ``labels_include``: check if label is in context["labels"]
+            - ``paths_match``: check if any file in context["changed_files"] matches patterns
+            - ``{{ expr }}``: template expression evaluation
+            - ``any`` / ``all`` combinators for nested conditions
         """
         if not stage.condition:
             return True
+        return self._eval_condition(stage.condition, run)
 
-        condition = stage.condition
+    def _eval_condition(self, condition: dict[str, Any], run: PipelineRun) -> bool:
+        """Recursively evaluate a condition dict against pipeline context."""
         ctx = run.context
-        labels = ctx.get("labels", [])
 
-        # any: at least one condition must match
+        # any: at least one sub-condition must match
         if "any" in condition:
-            for sub in condition["any"]:
-                if "labels_include" in sub:
-                    if sub["labels_include"] in labels:
-                        return True
-            return False
+            return any(self._eval_condition(sub, run) for sub in condition["any"])
 
-        # all: every condition must match
+        # all: every sub-condition must match
         if "all" in condition:
-            for sub in condition["all"]:
-                if "labels_include" in sub:
-                    if sub["labels_include"] not in labels:
-                        return False
-            return True
+            return all(self._eval_condition(sub, run) for sub in condition["all"])
 
-        # Direct condition
+        # labels_include: check if label is present
         if "labels_include" in condition:
+            labels = ctx.get("labels", [])
             return condition["labels_include"] in labels
 
-        # Unknown condition format — default to True
+        # paths_match: check if any changed file matches glob patterns
+        if "paths_match" in condition:
+            return self._eval_paths_match(condition["paths_match"], ctx)
+
+        # expr: template expression that must evaluate to truthy
+        if "expr" in condition:
+            resolver = TemplateResolver({"context": ctx})
+            result = resolver.resolve_expr(condition["expr"])
+            return bool(result)
+
+        # Unknown condition format — default to True (forward-compat)
         return True
+
+    @staticmethod
+    def _eval_paths_match(patterns: list[str], ctx: dict[str, Any]) -> bool:
+        """Check if any file in context["changed_files"] matches the glob patterns."""
+        import fnmatch
+
+        changed_files: list[str] = ctx.get("changed_files", [])
+        if not changed_files:
+            return False
+
+        for pattern in patterns:
+            for filepath in changed_files:
+                if fnmatch.fnmatch(filepath, pattern):
+                    return True
+        return False
 
     # ── Reactive Event Handling ──────────────────────────────────────────────
 
@@ -1738,8 +1946,42 @@ class PipelineEngine:
             return
 
         stage = defn.get_stage(stage_run.stage_id)
-        if stage:
-            await self._advance_after_stage(run, defn, stage, "complete")
+        if not stage:
+            return
+
+        # Validate expected outputs if configured
+        if stage.expected_outputs and outputs:
+            missing = [key for key in stage.expected_outputs if key not in outputs]
+            if missing:
+                error_msg = f"Agent outputs missing required keys: {', '.join(missing)}"
+                logger.warning(
+                    "Stage '%s' output validation failed: %s (pipeline %s)",
+                    stage.id,
+                    error_msg,
+                    run.run_id,
+                )
+                stage_run.status = StageRunStatus.FAILED
+                stage_run.error_message = error_msg
+                await self._registry.update_stage_run(stage_run)
+                await self._handle_stage_error(run, defn, stage, error_msg)
+                return
+        elif stage.expected_outputs and not outputs:
+            error_msg = (
+                f"Agent produced no outputs but expected: {', '.join(stage.expected_outputs)}"
+            )
+            logger.warning(
+                "Stage '%s' output validation failed: %s (pipeline %s)",
+                stage.id,
+                error_msg,
+                run.run_id,
+            )
+            stage_run.status = StageRunStatus.FAILED
+            stage_run.error_message = error_msg
+            await self._registry.update_stage_run(stage_run)
+            await self._handle_stage_error(run, defn, stage, error_msg)
+            return
+
+        await self._advance_after_stage(run, defn, stage, "complete")
 
     async def on_agent_error(
         self,

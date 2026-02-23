@@ -214,6 +214,11 @@ class SquadronServer:
 
         gate_registry = GateCheckRegistry()
 
+        # Load custom gate check plugins from config (AD-019 Phase 5)
+        custom_gates = self.config.pipeline_settings.get("custom_gates", [])
+        if custom_gates:
+            gate_registry.load_custom_gates(custom_gates)
+
         self.pipeline_engine = PipelineEngine(
             registry=self.pipeline_registry,
             gate_registry=gate_registry,

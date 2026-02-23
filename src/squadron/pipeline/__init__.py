@@ -31,6 +31,7 @@ from squadron.pipeline.gates import (
     PipelineContext,
     PrApprovalsMetCheck,
 )
+from squadron.pipeline.templates import TemplateResolver, resolve_templates
 from squadron.pipeline.models import (
     ErrorConfig,
     GateCheckRecord,
@@ -78,6 +79,9 @@ __all__ = [
     "LabelPresentCheck",
     "NoChangesRequestedCheck",
     "PrApprovalsMetCheck",
+    # Templates
+    "TemplateResolver",
+    "resolve_templates",
     # Definition models
     "PipelineDefinition",
     "StageDefinition",
