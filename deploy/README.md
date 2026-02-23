@@ -54,64 +54,58 @@ ghcr.io/nbaertsch/squadron:latest
 
 All deployment templates use this image by default. You never need to build your own.
 
-## Recent Updates
+## Environment Variables
 
-**Note**: This deployment guide reflects the current Squadron architecture with the following recent improvements:
-
-- **Tool-based agents**: 20+ specialized tools with per-agent selection
-- **Introspection tools**: Agents use tools to understand state rather than injected context
-- **GitHub App authentication**: Improved git operations with proper GitHub App credentials
-- **Circuit breaker refinements**: Better resource limits and escalation flows
-- **Auto-merge system**: PR approval tracking and automatic merging
-
-### Updated Environment Variables
-
-The following environment variables are now required:
+The following environment variables must be set in your deployment environment:
 
 ```bash
-# GitHub App credentials (unchanged)
+# ── GitHub App Credentials ───────────────────────────────────────────
+# From your GitHub App settings (see github-app-setup.md)
 GITHUB_APP_ID=123456
-GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----..."
-GITHUB_WEBHOOK_SECRET=your-webhook-secret
+GITHUB_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
+MIIEvQ...
+-----END PRIVATE KEY-----"
+GITHUB_INSTALLATION_ID=78901234
+GITHUB_WEBHOOK_SECRET=your-random-secret   # openssl rand -hex 32
 
-# LLM API credentials (unchanged)
-OPENAI_API_KEY=sk-...
-# OR
-ANTHROPIC_API_KEY=sk-ant-...
+# ── Copilot SDK Authentication ───────────────────────────────────────
+# Fine-grained PAT from a GitHub account with an active Copilot subscription.
+# Required scopes: No additional scopes needed beyond default PAT scopes.
+COPILOT_GITHUB_TOKEN=github_pat_...
 
-# NEW: Optional GitHub token for enhanced API access
-GITHUB_TOKEN=ghp_...
+# ── Repository Configuration ─────────────────────────────────────────
+# Optional: If set, the container clones this repo at startup.
+# If not set, mount the repo directory and use --repo-root.
+SQUADRON_REPO_URL=https://github.com/your-org/your-repo
 
-# Database and runtime (unchanged)
-DATABASE_URL=sqlite:///squadron.db
-LOG_LEVEL=INFO
+# ── Optional Configuration ───────────────────────────────────────────
+LOG_LEVEL=INFO   # DEBUG, INFO, WARNING, ERROR (default: INFO)
+SQUADRON_DASHBOARD_API_KEY=your-dashboard-key  # Secures /dashboard/ endpoints
 ```
 
-### Configuration Hot-Reload
+> **Note for local development:** Use `SQ_APP_ID_DEV`, `SQ_APP_PRIVATE_KEY_FILE`, etc. as shown in `.env.example`. The production variable names listed above are used by the deployed container.
 
-Squadron now supports hot-reloading of agent configurations. When you push changes to `.squadron/` files, the system automatically:
+## Config Hot-Reload
 
-1. Detects changes via git pull
-2. Reloads agent definitions
-3. Validates new configuration
-4. Applies changes without restart
+Squadron supports hot-reloading of agent configurations. When you push changes to `.squadron/` files:
 
-This means you can iterate on agent configurations without redeploying the entire service.
+1. Squadron detects the push webhook
+2. Pulls the latest changes to the cloned repo
+3. Reloads agent definitions and validates configuration
+4. Applies changes without service restart
 
-### New Monitoring Endpoints
+This means you can iterate on agent configurations without redeploying the service.
 
-```bash
-# Health check
-GET /health
+## Monitoring Endpoints
 
-# Agent status
-GET /api/agents/status
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Basic health check |
+| `GET /dashboard/` | Web UI for real-time agent activity |
+| `GET /dashboard/agents` | Active/recent agent list (API) |
+| `GET /dashboard/stream` | SSE stream of all agent activity |
+| `GET /dashboard/status` | Dashboard system status |
 
-# Recent activity
-GET /api/agents/history?limit=50
-
-# Configuration validation
-GET /api/config/validate
-```
+See [Observability Guide](../docs/observability.md) for the full dashboard API reference.
 
 For complete setup instructions, see [Getting Started Guide](../docs/getting-started.md).
