@@ -455,9 +455,7 @@ class SquadronTools:
                 )
                 if body_snippet:
                     line += f"\n  Summary: {body_snippet}"
-                line += (
-                    f"\n  → Call `get_pr_feedback` to fetch all inline comments."
-                )
+                line += "\n  → Call `get_pr_feedback` to fetch all inline comments."
                 event_lines.append(line)
 
             elif event.event_type == SquadronEventType.PR_REVIEW_COMMENT:
@@ -470,9 +468,7 @@ class SquadronTools:
                 body_snippet = body[:150] + "..." if len(body) > 150 else body
                 line = (
                     f"- [PR_REVIEW_COMMENT] PR #{event.pr_number} "
-                    f"| {path}"
-                    + (f":{line_num}" if line_num else "")
-                    + f" | reviewer=@{reviewer}"
+                    f"| {path}" + (f":{line_num}" if line_num else "") + f" | reviewer=@{reviewer}"
                 )
                 if body_snippet:
                     line += f"\n  Comment: {body_snippet}"
@@ -756,6 +752,95 @@ class SquadronTools:
             )
             # Surface the error clearly to the agent so it can adapt
             if status_code == 403:
+                # GitHub rejects REQUEST_CHANGES when the reviewer is the PR author
+                # (all Squadron agents share the same bot identity). For REQUEST_CHANGES,
+                # fall back to the label-based blocking strategy: apply a 'needs-changes'
+                # label to the PR and record changes_requested in the internal DB so that
+                # both the GitHub label and the Squadron auto-merge gate block the merge.
+                # Fix for issue #139.
+                if event_upper == "REQUEST_CHANGES":
+                    fallback_parts: list[str] = []
+                    label_applied = False
+
+                    # 1. Ensure 'needs-changes' label exists in the repo, then apply it.
+                    try:
+                        await self.github.ensure_labels_exist(
+                            self.owner,
+                            self.repo,
+                            ["needs-changes"],
+                        )
+                        await self.github.add_labels(
+                            self.owner,
+                            self.repo,
+                            params.pr_number,
+                            ["needs-changes"],
+                        )
+                        fallback_parts.append("applied 'needs-changes' label to the PR")
+                        label_applied = True
+                    except Exception as label_exc:
+                        logger.warning(
+                            "Failed to apply 'needs-changes' label to PR #%d: %s",
+                            params.pr_number,
+                            label_exc,
+                        )
+
+                    # 2. Record changes_requested in the internal DB so auto-merge is blocked.
+                    agent = None
+                    try:
+                        agent = await self.registry.get_agent(agent_id)
+                        if agent:
+                            await self.registry.record_pr_approval(
+                                pr_number=params.pr_number,
+                                agent_role=agent.role,
+                                agent_id=agent_id,
+                                state="changes_requested",
+                                review_body=params.body,
+                            )
+                            fallback_parts.append("recorded changes_requested in internal DB")
+                    except Exception as db_exc:
+                        logger.warning(
+                            "Failed to record changes_requested in DB for PR #%d: %s",
+                            params.pr_number,
+                            db_exc,
+                        )
+
+                    # 3. Log activity (reuse agent from step 2)
+                    try:
+                        await self._log_activity(
+                            agent_id=agent_id,
+                            event_type="github_review",
+                            issue_number=agent.issue_number if agent else None,
+                            pr_number=params.pr_number,
+                            content=(
+                                f"REQUEST_CHANGES rejected (bot-authored PR) — "
+                                f"fallback applied: {', '.join(fallback_parts)}"
+                            ),
+                            tool_name="submit_pr_review",
+                            review_event="REQUEST_CHANGES",
+                            review_id="fallback",
+                        )
+                    except Exception:
+                        pass
+
+                    fallback_summary = (
+                        "; ".join(fallback_parts)
+                        if fallback_parts
+                        else "no fallback actions succeeded"
+                    )
+                    merge_note = (
+                        " The 'needs-changes' label will prevent auto-merge."
+                        if label_applied
+                        else ""
+                    )
+                    return (
+                        f"GitHub rejected REQUEST_CHANGES review on PR #{params.pr_number} "
+                        f"because the reviewer cannot review their own PR (HTTP 403 — "
+                        f"all Squadron agents share the same bot identity). "
+                        f"Fallback applied: {fallback_summary}.{merge_note} "
+                        f"You should notify the PR author via comment_on_pr with "
+                        f"your review feedback."
+                    )
+                # For other events (APPROVE, COMMENT) that get 403, surface as error.
                 return (
                     f"GitHub API error (403 Forbidden) submitting {event_upper} review on "
                     f"PR #{params.pr_number}. The GitHub App may lack 'pull-requests: write' "
