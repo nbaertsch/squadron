@@ -53,6 +53,7 @@ EVENT_MAP: dict[str, SquadronEventType] = {
     "pull_request.opened": SquadronEventType.PR_OPENED,
     "pull_request.closed": SquadronEventType.PR_CLOSED,
     "pull_request.synchronize": SquadronEventType.PR_SYNCHRONIZED,
+    "pull_request.labeled": SquadronEventType.PR_LABELED,  # label applied to PR (e.g. needs-changes fallback)
     "pull_request_review.submitted": SquadronEventType.PR_REVIEW_SUBMITTED,
     "pull_request_review_comment.created": SquadronEventType.PR_REVIEW_COMMENT,
     "push": SquadronEventType.PUSH,

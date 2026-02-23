@@ -21,6 +21,9 @@ agent_roles:
     - action: sleep
       event: pull_request.opened
     - action: wake
+      label: needs-changes
+      event: pull_request.labeled
+    - action: wake
       condition:
         review_state: changes_requested
       event: pull_request_review.submitted
@@ -50,6 +53,9 @@ agent_roles:
     - action: sleep
       event: pull_request.opened
     - action: wake
+      label: needs-changes
+      event: pull_request.labeled
+    - action: wake
       condition:
         review_state: changes_requested
       event: pull_request_review.submitted
@@ -72,6 +78,9 @@ agent_roles:
       label: feature
     - action: sleep
       event: pull_request.opened
+    - action: wake
+      label: needs-changes
+      event: pull_request.labeled
     - action: wake
       condition:
         review_state: changes_requested
@@ -99,6 +108,9 @@ agent_roles:
     triggers:
     - action: sleep
       event: pull_request.opened
+    - action: wake
+      label: needs-changes
+      event: pull_request.labeled
     - action: wake
       condition:
         review_state: changes_requested

@@ -216,6 +216,7 @@ class SquadronEventType(str, enum.Enum):
     PR_REVIEW_SUBMITTED = "pr.review_submitted"
     PR_REVIEW_COMMENT = "pr.review_comment"  # Inline comment on PR diff
     PR_SYNCHRONIZED = "pr.synchronized"
+    PR_LABELED = "pr.labeled"  # pull_request.labeled — label applied to PR
     PUSH = "push"
 
     # Framework-internal
