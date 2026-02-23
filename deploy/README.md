@@ -42,7 +42,7 @@ Start with the [GitHub App setup guide](github-app-setup.md) — it walks throug
 
 | Target | Status | Directory |
 |--------|--------|-----------|
-| [Azure Container Apps](azure-container-apps/) | ✅ Supported | `deploy/azure-container-apps/` |
+| [Azure Container Apps](azure-container-apps/README.md) | ✅ Supported | `deploy/azure-container-apps/` |
 
 ## Container Image
 

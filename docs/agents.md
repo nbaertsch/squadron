@@ -410,4 +410,4 @@ Agents can collaborate using the `@squadron-dev {role}` mention system in issue 
 @squadron-dev infra-dev This feature needs new environment variables in the deployment config
 ```
 
-See [Agent Collaboration Guide](../docs/agent-collaboration.md) for detailed patterns.
+See [Agent Collaboration Guide](agent-collaboration.md) for detailed patterns.
