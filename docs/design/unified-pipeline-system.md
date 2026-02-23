@@ -1,6 +1,6 @@
 # Unified Pipeline System — Design Document (AD-019)
 
-**Status:** Proposed  
+**Status:** Implemented  
 **Supersedes:** `workflow-system-v2.md`, `review_policy` config section, `agent_roles.<role>.triggers`  
 **Extends:** AD-006, AD-009, AD-013, AD-015, AD-017, AD-018  
 **Related research:** `approval-flow-schema.md`, `event-routing.md`, `event-architecture.md`

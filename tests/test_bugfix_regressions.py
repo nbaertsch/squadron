@@ -2,7 +2,7 @@
 
 Covers:
 - BUG 1: _find_existing_pr_for_issue uses self.config.project.owner/repo (not self.owner/repo)
-- BUG 3: spawn_workflow_agent signature matches SpawnAgentCallback protocol
+- BUG 3: spawn_pipeline_agent signature matches SpawnAgentCallback protocol
 - Type narrowing: _create_worktree raises ValueError when record.branch is None
 - Type narrowing: watchdog comment skipped when agent.issue_number is None
 - Type narrowing: proxy.py response is always bound in _handle_connection finally block
@@ -27,9 +27,9 @@ from squadron.config import (
     RuntimeConfig,
     SquadronConfig,
 )
-from squadron.models import AgentRecord, AgentStatus, SquadronEvent, SquadronEventType
+from squadron.models import AgentRecord, AgentStatus
 from squadron.registry import AgentRegistry
-from squadron.workflow.engine import SpawnAgentCallback
+from squadron.pipeline.engine import SpawnAgentCallback
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -155,23 +155,22 @@ class TestFindExistingPrForIssue:
         assert result["number"] == 20
 
 
-# ── BUG 3: spawn_workflow_agent matches SpawnAgentCallback protocol ──────────
+# ── BUG 3: spawn_pipeline_agent matches SpawnAgentCallback protocol ──────────
 
 
-class TestSpawnWorkflowAgentSignature:
-    """Verify spawn_workflow_agent signature matches SpawnAgentCallback protocol.
+class TestSpawnPipelineAgentSignature:
+    """Verify spawn_pipeline_agent signature matches SpawnAgentCallback protocol.
 
-    Previously had mismatched param names (pr_number vs issue_number,
-    event vs trigger_event, stage_name vs stage_id) which would cause
-    TypeError when the workflow engine tried to call it.
+    Previously had mismatched param names which would cause TypeError when
+    the pipeline engine tried to call it.
     """
 
     def test_signature_matches_protocol(self):
-        """spawn_workflow_agent must accept the exact kwargs that
-        WorkflowEngine._execute_agent_stage passes."""
+        """spawn_pipeline_agent must accept the exact kwargs that
+        PipelineEngine._execute_agent_stage passes."""
         from squadron.agent_manager import AgentManager
 
-        method_sig = inspect.signature(AgentManager.spawn_workflow_agent)
+        method_sig = inspect.signature(AgentManager.spawn_pipeline_agent)
         proto_sig = inspect.signature(SpawnAgentCallback.__call__)
 
         # Extract parameter names (skip 'self')
@@ -185,7 +184,7 @@ class TestSpawnWorkflowAgentSignature:
         # Every protocol parameter must exist in the method with matching kind
         for name, proto_param in proto_params.items():
             assert name in method_params, (
-                f"Protocol parameter '{name}' missing from spawn_workflow_agent"
+                f"Protocol parameter '{name}' missing from spawn_pipeline_agent"
             )
             method_param = method_params[name]
             assert method_param.kind == proto_param.kind, (
@@ -194,7 +193,7 @@ class TestSpawnWorkflowAgentSignature:
             )
 
     async def test_can_be_called_with_engine_kwargs(self, registry):
-        """spawn_workflow_agent can be invoked with the exact keyword args
+        """spawn_pipeline_agent can be invoked with the exact keyword args
         that _execute_agent_stage uses, without TypeError."""
         config, github, router = _make_manager_deps(registry)
         manager = _make_manager(config, registry, github, router)
@@ -208,32 +207,17 @@ class TestSpawnWorkflowAgentSignature:
             prompt="You are a test reviewer.",
         )
 
-        trigger = SquadronEvent(
-            event_type=SquadronEventType.PR_OPENED,
-            pr_number=99,
-            issue_number=42,
-            data={
-                "payload": {
-                    "pull_request": {
-                        "number": 99,
-                        "head": {"ref": "feat/test"},
-                        "body": "Closes #42",
-                    }
-                }
-            },
-        )
-
         with patch("squadron.agent_manager.CopilotAgent") as MockCA:
             mock_copilot = AsyncMock()
             mock_copilot.start = AsyncMock()
             MockCA.return_value = mock_copilot
 
-            # This is the exact call pattern from engine._execute_agent_stage (line 383)
-            agent_id = await manager.spawn_workflow_agent(
+            # This is the exact call pattern from PipelineEngine._execute_agent_stage
+            agent_id = await manager.spawn_pipeline_agent(
                 role="test-reviewer",
                 issue_number=42,
-                trigger_event=trigger,
-                workflow_run_id="run-abc",
+                pr_number=99,
+                pipeline_run_id="run-abc",
                 stage_id="review-stage",
                 action="review",
             )

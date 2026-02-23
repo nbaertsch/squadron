@@ -46,13 +46,13 @@ if TYPE_CHECKING:
     from squadron.config import (
         AgentDefinition,
         CircuitBreakerDefaults,
-        FailureAction,
         SquadronConfig,
     )
     from squadron.event_router import EventRouter
     from squadron.github_client import GitHubClient
+    from squadron.pipeline import PipelineEngine
+    from squadron.pipeline.gates import PipelineContext
     from squadron.registry import AgentRegistry
-    from squadron.workflow import WorkflowEngine
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,6 @@ class AgentManager:
             agent_definitions=agent_definitions,
             pre_sleep_hook=self._wip_commit_and_push,
             git_push_callback=self._git_push_for_agent,
-            auto_merge_callback=self._auto_merge_pr,
         )
 
         # Per-agent CopilotAgent instances (one CLI subprocess each)
@@ -132,8 +131,8 @@ class AgentManager:
         # Observability: last spawn timestamp (ISO string)
         self.last_spawn_time: str | None = None
 
-        # Workflow engine (optional — set via set_workflow_engine)
-        self._workflow_engine: WorkflowEngine | None = None
+        # Pipeline engine (set via set_pipeline_engine before start())
+        self._pipeline_engine: PipelineEngine | None = None
 
         # Agent concurrency limiter
         max_concurrent = config.runtime.max_concurrent_agents
@@ -141,12 +140,9 @@ class AgentManager:
             asyncio.Semaphore(max_concurrent) if max_concurrent > 0 else None
         )
 
-        # Track which event types have config-driven handlers (for idempotent re-registration)
-        self._config_trigger_types: set[SquadronEventType] = set()
-
-    def set_workflow_engine(self, engine: WorkflowEngine) -> None:
-        """Attach the workflow engine for event-driven pipeline triggers."""
-        self._workflow_engine = engine
+    def set_pipeline_engine(self, engine: PipelineEngine) -> None:
+        """Attach the pipeline engine for event-driven orchestration."""
+        self._pipeline_engine = engine
 
     async def _log_activity(
         self,
@@ -180,15 +176,14 @@ class AgentManager:
             )
 
     async def start(self) -> None:
-        """Start the agent manager — register config-driven event handlers."""
+        """Start the agent manager — register pipeline and framework event handlers."""
         self._running = True
 
         # Start sandbox infrastructure (auth broker, audit log)
         await self._sandbox.start()
 
-        # Register config-driven trigger handler for all event types
-        # that appear in agent_roles.triggers
-        self._register_trigger_handlers()
+        # Register pipeline event handler (AD-019: replaces legacy triggers)
+        self._register_pipeline_handlers()
 
         # Register command-based routing for comment events (Layer 2)
         self.router.on(SquadronEventType.ISSUE_COMMENT, self._handle_command_routing)
@@ -199,15 +194,9 @@ class AgentManager:
         # Register handler for issue reassignment (D-12: abort on reassign)
         self.router.on(SquadronEventType.ISSUE_ASSIGNED, self._handle_issue_assigned)
 
-        # Register handler for PR synchronize (invalidate approvals on PR update)
-        self.router.on(SquadronEventType.PR_SYNCHRONIZED, self._handle_pr_synchronize)
-
-        # Register handler for PR opened (set up review requirements)
-        self.router.on(SquadronEventType.PR_OPENED, self._handle_pr_opened)
-
         # Register framework-level handler for PR review events (issue #112).
         # This ensures sleeping PR-owning agents are notified of reviews via their
-        # inbox regardless of config trigger setup.
+        # inbox regardless of pipeline setup.
         self.router.on(SquadronEventType.PR_REVIEW_SUBMITTED, self._handle_pr_review_submitted)
         self.router.on(SquadronEventType.PR_REVIEW_COMMENT, self._handle_pr_review_comment)
 
@@ -250,60 +239,63 @@ class AgentManager:
 
         logger.info("Agent manager stopped")
 
-    # ── Config-Driven Trigger Matching ───────────────────────────────────
+    # ── Pipeline Event Handling (AD-019) ─────────────────────────────────
 
-    def _register_trigger_handlers(self) -> None:
-        """Register event handlers based on config.yaml agent_roles.triggers.
+    def _register_pipeline_handlers(self) -> None:
+        """Register event handlers for pipeline trigger matching.
 
-        Scans all agent roles for trigger definitions and registers
-        _handle_config_trigger for each unique event type that appears.
-        Idempotent — clears previously registered config trigger handlers first.
+        Scans all registered pipeline definitions for trigger events and
+        registers _handle_pipeline_event for each unique SquadronEventType.
+        Idempotent — safe to call on config reload.
         """
         from squadron.event_router import EVENT_MAP
 
-        # Clear previously registered config-trigger event types
-        for old_type in self._config_trigger_types:
-            self.router.clear_handlers_for(old_type)
+        if not self._pipeline_engine:
+            logger.warning("Pipeline engine not set — skipping handler registration")
+            return
 
-        # Collect all unique SquadronEventTypes referenced by triggers
+        # Collect all unique SquadronEventTypes from pipeline triggers
         trigger_event_types: set[SquadronEventType] = set()
-        for _role_name, role_config in self.config.agent_roles.items():
-            for trigger in role_config.triggers:
-                internal_type = EVENT_MAP.get(trigger.event)
+        for name in self._pipeline_engine.list_pipelines():
+            defn = self._pipeline_engine.get_pipeline(name)
+            if defn and defn.trigger:
+                internal_type = EVENT_MAP.get(defn.trigger.event)
                 if internal_type:
                     trigger_event_types.add(internal_type)
                 else:
                     logger.warning(
-                        "Unknown trigger event type '%s' — not in EVENT_MAP", trigger.event
+                        "Pipeline '%s' trigger event '%s' not in EVENT_MAP",
+                        name,
+                        defn.trigger.event,
                     )
 
-        # Register the universal trigger handler for each event type
-        for event_type in trigger_event_types:
-            self.router.on(event_type, self._handle_config_trigger)
+            # Also register for reactive event types
+            if defn:
+                for event_str in defn.on_events:
+                    internal_type = EVENT_MAP.get(event_str)
+                    if internal_type:
+                        trigger_event_types.add(internal_type)
 
-        self._config_trigger_types = trigger_event_types
+        # Register the universal pipeline handler for each event type
+        for event_type in trigger_event_types:
+            self.router.on(event_type, self._handle_pipeline_event)
 
         logger.info(
-            "Registered config triggers for %d event types: %s",
+            "Registered pipeline handlers for %d event types: %s",
             len(trigger_event_types),
             ", ".join(t.value for t in trigger_event_types),
         )
 
-    async def _handle_config_trigger(self, event: SquadronEvent) -> None:
-        """Match an event against all config triggers and execute matching actions.
+    async def _handle_pipeline_event(self, event: SquadronEvent) -> None:
+        """Universal pipeline event handler — forward all events to the pipeline engine.
 
-        This is the universal trigger handler — all event→agent behaviour is
-        driven by config triggers and workflow definitions.  Supports four
-        trigger actions:
-          - spawn: create a new agent (default)
-          - wake: wake a sleeping agent of this role
-          - complete: complete an agent of this role
-          - sleep: transition an active agent to SLEEPING
-
-        After processing role triggers, also evaluates workflow triggers
-        (sequential agent pipelines) and handles PR review stage advancement.
+        The pipeline engine handles trigger matching (starting new pipelines)
+        and reactive event routing (advancing running pipelines).
         """
         from squadron.event_router import REVERSE_EVENT_MAP
+
+        if not self._pipeline_engine:
+            return
 
         github_event_type = REVERSE_EVENT_MAP.get(event.event_type)
         if not github_event_type:
@@ -311,337 +303,330 @@ class AgentManager:
 
         payload = event.data.get("payload", {})
 
-        for role_name, role_config in self.config.agent_roles.items():
-            for trigger in role_config.triggers:
-                if trigger.event != github_event_type:
-                    continue
+        try:
+            run = await self._pipeline_engine.evaluate_event(github_event_type, payload, event)
+            if run:
+                logger.info(
+                    "Pipeline triggered by %s → run %s (%s)",
+                    github_event_type,
+                    run.run_id,
+                    run.pipeline_name,
+                )
+        except Exception:
+            logger.exception("Pipeline engine error evaluating %s", github_event_type)
 
-                # Label match (for issues.labeled triggers)
-                if trigger.label:
-                    event_label = payload.get("label", {}).get("name", "")
-                    if event_label != trigger.label:
-                        continue
-
-                # Condition evaluation
-                if trigger.condition and not self._evaluate_condition(
-                    trigger.condition, event, role_name, payload
-                ):
-                    continue
-
-                # Dispatch by action
-                if trigger.action == "spawn":
-                    await self._trigger_spawn(role_name, role_config, trigger, event)
-                elif trigger.action == "wake":
-                    await self._trigger_wake(role_name, event)
-                elif trigger.action == "complete":
-                    await self._trigger_complete(role_name, event)
-                elif trigger.action == "sleep":
-                    await self._trigger_sleep(role_name, event)
-
-        # ── Workflow evaluation (sequential agent pipelines) ─────────
-        if self._workflow_engine:
-            await self._evaluate_workflows(github_event_type, payload, event)
-
-    def _evaluate_condition(
+    async def spawn_pipeline_agent(
         self,
-        condition: dict,
-        event: SquadronEvent,
-        role_name: str,
-        payload: dict,
-    ) -> bool:
-        """Evaluate a trigger condition dict. Returns True if all conditions pass."""
-        # approval_flow: true — only spawn if this role is required by review_policy
-        if condition.get("approval_flow"):
-            if not self.config.review_policy.enabled:
-                return False
-            pr_data = payload.get("pull_request", {})
-            labels = [lbl.get("name", "") for lbl in pr_data.get("labels", [])]
-            base_branch = pr_data.get("base", {}).get("ref", "")
-            # TODO: could also pass changed_files for path-based rules
-            required_roles = self.config.review_policy.get_required_roles(
-                labels, changed_files=None, base_branch=base_branch
-            )
-            if role_name not in required_roles:
-                return False
+        role: str,
+        issue_number: int | None,
+        *,
+        pr_number: int | None = None,
+        pipeline_run_id: str | None = None,
+        stage_id: str | None = None,
+        action: str | None = None,
+        continue_session: bool = False,
+        context: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Spawn or wake an agent for a pipeline stage.
 
-        # merged: true/false — check if PR was merged
-        if "merged" in condition:
-            pr_data = payload.get("pull_request", {})
-            if pr_data.get("merged", False) != condition["merged"]:
-                return False
+        Conforms to :class:`~squadron.pipeline.engine.SpawnAgentCallback`.
 
-        # review_state: "changes_requested" / "approved" / "commented" — filter by review action
-        if "review_state" in condition:
-            review = payload.get("review", {})
-            if review.get("state", "").lower() != condition["review_state"].lower():
-                return False
+        If ``continue_session`` is True and a sleeping agent of the given role
+        exists for the same PR/issue, it will be woken instead of creating a new
+        one.
+        """
+        # Resolve issue number from PR if needed
+        effective_issue = issue_number
+        if not effective_issue and pr_number:
+            effective_issue = pr_number  # fallback: use PR as issue
 
-        # is_pr_comment: true — only match if comment is on a PR (not a plain issue)
-        # GitHub includes "pull_request" key in issue payload for PR comments
-        if condition.get("is_pr_comment"):
-            issue_data = payload.get("issue", {})
-            if not issue_data.get("pull_request"):
-                return False
-
-        # is_human_comment: true — only match if comment is from a human (not bot)
-        if condition.get("is_human_comment"):
-            comment = payload.get("comment", {})
-            user = comment.get("user", {})
-            user_type = user.get("type", "").lower()
-            if user_type == "bot":
-                return False
-
-        return True
-
-    async def _trigger_spawn(
-        self,
-        role_name: str,
-        role_config: Any,
-        trigger: Any,
-        event: SquadronEvent,
-    ) -> None:
-        """Handle spawn action — create a new agent for this role."""
-        # For PR-triggered spawns, use pr_number as issue fallback
-        issue_number = event.issue_number
-        if not issue_number and event.pr_number:
-            # Try to extract source issue from PR body
-            payload = event.data.get("payload", {})
-            pr_data = payload.get("pull_request", {})
-            body = pr_data.get("body", "") or ""
-            issue_number = self._extract_issue_number(body) or event.pr_number
-
-        if not issue_number:
+        if not effective_issue:
             logger.warning(
-                "Trigger %s/%s matched but no issue_number — skipping",
-                role_name,
-                trigger.event,
+                "spawn_pipeline_agent: no issue_number for role=%s — skipping",
+                role,
             )
-            return
+            return None
 
-        # Singleton guard — only one agent of this role globally
-        if role_config.singleton:
-            all_active = await self.registry.get_all_active_agents()
-            active_of_role = [a for a in all_active if a.role == role_name]
-            if active_of_role:
-                logger.info(
-                    "Singleton role %s already has active agent %s — skipping",
-                    role_name,
-                    active_of_role[0].agent_id,
-                )
-                return
+        # continue_session: try to wake an existing sleeping agent
+        if continue_session:
+            agents = await self.registry.get_all_active_agents()
+            for agent in agents:
+                if agent.role != role or agent.status != AgentStatus.SLEEPING:
+                    continue
+                if pr_number and agent.pr_number == pr_number:
+                    pass  # match by PR
+                elif agent.issue_number == effective_issue:
+                    pass  # match by issue
+                else:
+                    continue
 
-        # Duplicate guard (ephemeral agents skip)
-        # Only block if a non-terminal (CREATED/ACTIVE/SLEEPING) agent exists for this role.
-        # Terminal agents (COMPLETED/ESCALATED/FAILED) do NOT block re-spawning — this
-        # allows re-review cycles after a pr-review agent completes (issue #88).
-        if not role_config.is_ephemeral:
-            existing = await self.registry.get_all_agents_for_issue(issue_number)
-            non_terminal_statuses = {AgentStatus.CREATED, AgentStatus.ACTIVE, AgentStatus.SLEEPING}
-            if any(a.role == role_name and a.status in non_terminal_statuses for a in existing):
-                logger.info(
-                    "Agent %s already exists for issue #%d (status=%s) — skipping",
-                    role_name,
-                    issue_number,
-                    next(
-                        a.status
-                        for a in existing
-                        if a.role == role_name and a.status in non_terminal_statuses
-                    ),
+                # Wake the sleeping agent
+                wake_event = SquadronEvent(
+                    event_type=SquadronEventType.WAKE_AGENT,
+                    pr_number=pr_number,
+                    issue_number=effective_issue,
+                    agent_id=agent.agent_id,
+                    data={
+                        "pipeline_run_id": pipeline_run_id,
+                        "pipeline_stage": stage_id,
+                        "pipeline_action": action,
+                    },
                 )
-                return
+                await self.wake_agent(agent.agent_id, wake_event)
+                logger.info(
+                    "Pipeline woke sleeping agent %s (role=%s, stage=%s)",
+                    agent.agent_id,
+                    role,
+                    stage_id,
+                )
+                return agent.agent_id
+
+        # Verify the role has a definition
+        agent_def = self.agent_definitions.get(role)
+        if not agent_def:
+            logger.error("No agent definition for pipeline role: %s", role)
+            return None
+
+        # Build unique agent ID for pipeline agents
+        suffix = f"pl-{pr_number or effective_issue}"
+        if stage_id:
+            suffix = f"pl-{stage_id}-{pr_number or effective_issue}"
+        agent_id = f"{role}-{suffix}"
+
+        # Check for existing agent with same ID
+        existing = await self.registry.get_agent(agent_id)
+        if existing and existing.status in (
+            AgentStatus.ACTIVE,
+            AgentStatus.SLEEPING,
+            AgentStatus.CREATED,
+        ):
+            logger.info("Pipeline agent %s already exists (status=%s)", agent_id, existing.status)
+            return agent_id
+
+        # For PR-triggered agents, resolve the PR head branch
+        pr_head_branch: str | None = None
+        if pr_number:
+            try:
+                pr_data = await self.github.get_pull_request(
+                    self.config.project.owner,
+                    self.config.project.repo,
+                    pr_number,
+                )
+                pr_head_branch = pr_data.get("head", {}).get("ref") or None
+            except Exception:
+                logger.debug("Could not fetch PR #%d for branch info", pr_number)
+
+        record = AgentRecord(
+            agent_id=agent_id,
+            role=role,
+            issue_number=effective_issue,
+            pr_number=pr_number,
+            session_id=f"squadron-{agent_id}",
+            status=AgentStatus.ACTIVE,
+            active_since=datetime.now(timezone.utc),
+            branch=pr_head_branch or "unknown",
+        )
+        await self.registry.create_agent(record)
+
+        # Create inbox and mail queue
+        self.agent_inboxes[agent_id] = asyncio.Queue()
+        self.agent_mail_queues[agent_id] = []
+
+        # Create CopilotAgent
+        copilot = CopilotAgent(
+            runtime_config=self.config.runtime,
+            working_directory=str(self.repo_root),
+            env=self._build_agent_env(),
+        )
+        await copilot.start()
+        self._copilot_agents[agent_id] = copilot
+
+        # Build trigger event with pipeline metadata
+        trigger_event = SquadronEvent(
+            event_type=SquadronEventType.PR_OPENED if pr_number else SquadronEventType.ISSUE_OPENED,
+            pr_number=pr_number,
+            issue_number=effective_issue,
+            data={
+                "pipeline_run_id": pipeline_run_id,
+                "pipeline_stage": stage_id,
+                "pipeline_action": action,
+                **(context or {}),
+            },
+        )
+        agent_task = asyncio.create_task(
+            self._run_agent(record, trigger_event),
+            name=f"agent-{agent_id}",
+        )
+        self._agent_tasks[agent_id] = agent_task
 
         logger.info(
-            "Config trigger matched: %s/%s [%s] → spawning %s for issue #%d",
-            trigger.event,
-            trigger.label or "*",
-            trigger.action,
-            role_name,
-            issue_number,
+            "Pipeline agent spawned: %s for %s (stage=%s, action=%s, run=%s)",
+            agent_id,
+            f"PR #{pr_number}" if pr_number else f"issue #{effective_issue}",
+            stage_id,
+            action,
+            pipeline_run_id,
         )
-        # Extract the PR's head branch BEFORE creating the agent so that the worktree
-        # is created from the feature branch (not a freshly-generated reviewer branch).
-        # This is the fix for issue #101: reviewer agents previously received a worktree
-        # checked out to their own generated branch (e.g. "security/issue-85"), meaning
-        # they could only see squadron-dev code, not the code being reviewed.
-        pr_head_branch: str | None = None
-        if event.pr_number:
-            _payload = event.data.get("payload", {})
-            _pr_data = _payload.get("pull_request", {})
-            pr_head_branch = _pr_data.get("head", {}).get("ref") or None
 
-        record = await self.create_agent(
-            role_name,
-            issue_number,
-            trigger_event=event,
-            override_branch=pr_head_branch,
+        await self._log_activity(
+            agent_id=agent_id,
+            event_type="agent_spawned",
+            issue_number=effective_issue,
+            pr_number=pr_number,
+            content=(
+                f"Pipeline agent spawned: role={role}, stage={stage_id}, run={pipeline_run_id}"
+            ),
+            role=role,
+            lifecycle="pipeline",
+            stage=stage_id,
+            pipeline_run_id=pipeline_run_id,
         )
-        if record:
-            self.last_spawn_time = datetime.now(timezone.utc).isoformat()
-        # For PR-spawned agents, associate with the PR number if not already set.
-        # (The branch is already correct because we passed override_branch above.)
-        if record and event.pr_number and not record.pr_number:
-            record.pr_number = event.pr_number
-            await self.registry.update_agent(record)
 
-    async def _trigger_wake(self, role_name: str, event: SquadronEvent) -> None:
-        """Handle wake action — wake sleeping agents of this role for the PR/issue."""
-        agents = await self.registry.get_all_active_agents()
-        target_pr = event.pr_number
-        target_issue = event.issue_number
+        self.last_spawn_time = datetime.now(timezone.utc).isoformat()
+        return agent_id
 
-        for agent in agents:
-            if agent.role != role_name:
-                continue
-            if agent.status != AgentStatus.SLEEPING:
-                continue
-            # Match by PR number or issue number
-            if target_pr and agent.pr_number == target_pr:
-                pass  # match
-            elif target_issue and agent.issue_number == target_issue:
-                pass  # match
-            else:
-                continue
+    async def pipeline_action_callback(
+        self,
+        action: str,
+        config: dict[str, Any],
+        context: "PipelineContext",
+    ) -> dict[str, Any]:
+        """Execute a built-in pipeline action.
 
-            wake_event = SquadronEvent(
-                event_type=SquadronEventType.WAKE_AGENT,
-                pr_number=target_pr,
-                issue_number=target_issue,
-                agent_id=agent.agent_id,
-                data=event.data,
-            )
-            logger.info(
-                "Config trigger: wake %s (role=%s, pr=#%s)",
-                agent.agent_id,
-                role_name,
-                target_pr,
-            )
-            await self.wake_agent(agent.agent_id, wake_event)
+        Conforms to :class:`~squadron.pipeline.engine.ActionCallback`.
 
-    async def _trigger_complete(self, role_name: str, event: SquadronEvent) -> None:
-        """Handle complete action — complete agents of this role for the PR/issue."""
-        agents = await self.registry.get_all_active_agents()
-        target_pr = event.pr_number
-        target_issue = event.issue_number
-
-        for agent in agents:
-            if agent.role != role_name:
-                continue
-            if agent.status in (AgentStatus.COMPLETED, AgentStatus.ESCALATED):
-                continue
-            # Match by PR number or issue number
-            if target_pr and agent.pr_number == target_pr:
-                pass  # match
-            elif target_issue and agent.issue_number == target_issue:
-                pass  # match
-            else:
-                continue
-
-            logger.info(
-                "Config trigger: completing %s (role=%s, pr=#%s)",
-                agent.agent_id,
-                role_name,
-                target_pr,
-            )
-            agent.status = AgentStatus.COMPLETED
-            agent.active_since = None
-            await self.registry.update_agent(agent)
-
-            copilot = self._copilot_agents.get(agent.agent_id)
-            await self._cleanup_agent(
-                agent.agent_id,
-                destroy_session=True,
-                copilot=copilot,
-                session_id=agent.session_id,
-            )
-
-            # Post completion comment
-            if agent.issue_number:
-                try:
-                    reason = ""
-                    if target_pr:
-                        payload = event.data.get("payload", {})
-                        merged = payload.get("pull_request", {}).get("merged", False)
-                        reason = f"PR #{target_pr} {'merged' if merged else 'closed'}."
-                    await self.github.comment_on_issue(
-                        self.config.project.owner,
-                        self.config.project.repo,
-                        agent.issue_number,
-                        f"{self._agent_signature(agent.role)}{reason} Task complete.",
-                    )
-                except Exception:
-                    logger.debug("Failed to post completion comment for %s", agent.agent_id)
-
-    async def _trigger_sleep(self, role_name: str, event: SquadronEvent) -> None:
-        """Handle sleep action — transition active agents of this role to SLEEPING.
-
-        Used to put a dev agent to sleep after it opens a PR, so it waits
-        for review feedback before continuing.  Matches agents by PR number
-        or issue number (extracted from the PR body).
+        Supported actions:
+            merge_pr — merge the PR using the specified method
+            close_pr — close the PR
+            add_label — add a label to the PR/issue
+            remove_label — remove a label
+            comment — post a comment on the PR/issue
         """
-        agents = await self.registry.get_all_active_agents()
-        target_pr = event.pr_number
-        target_issue = event.issue_number
+        owner = self.config.project.owner
+        repo = self.config.project.repo
+        pr_number = context.pr_number
+        issue_number = context.issue_number or pr_number
 
-        # Also try to extract linked issue from PR body
-        if not target_issue and target_pr:
-            payload = event.data.get("payload", {})
-            pr_data = payload.get("pull_request", {})
-            body = pr_data.get("body", "") or ""
-            target_issue = self._extract_issue_number(body)
+        try:
+            if action == "merge_pr":
+                if not pr_number:
+                    return {"success": False, "error": "no pr_number in context"}
+                merge_method = config.get("method", "squash")
+                pr_data = await self.github.get_pull_request(owner, repo, pr_number)
+                title = pr_data.get("title", f"PR #{pr_number}")
+                await self.github.merge_pull_request(
+                    owner,
+                    repo,
+                    pr_number,
+                    merge_method=merge_method,
+                    commit_title=f"{title} (#{pr_number})",
+                )
+                # Optionally delete branch
+                if config.get("delete_branch", True):
+                    head_branch = pr_data.get("head", {}).get("ref", "")
+                    if head_branch:
+                        try:
+                            await self.github.delete_branch(owner, repo, head_branch)
+                        except Exception:
+                            logger.warning("Failed to delete branch %s", head_branch)
+                return {"success": True, "merged": True}
 
-        for agent in agents:
-            if agent.role != role_name:
-                continue
-            if agent.status != AgentStatus.ACTIVE:
-                continue
-            # Match by PR number or issue number
-            if target_pr and agent.pr_number == target_pr:
-                pass  # match
-            elif target_issue and agent.issue_number == target_issue:
-                pass  # match
+            elif action == "close_pr":
+                if not pr_number:
+                    return {"success": False, "error": "no pr_number in context"}
+                # PRs are issues in GitHub API — closing via update_issue
+                await self.github.close_issue(owner, repo, pr_number)
+                return {"success": True, "closed": True}
+
+            elif action == "add_label":
+                label = config.get("label", "")
+                target = pr_number or issue_number
+                if not target or not label:
+                    return {"success": False, "error": "missing label or target"}
+                await self.github.add_labels(owner, repo, target, [label])
+                return {"success": True}
+
+            elif action == "remove_label":
+                label = config.get("label", "")
+                target = pr_number or issue_number
+                if not target or not label:
+                    return {"success": False, "error": "missing label or target"}
+                # GitHub API: DELETE /repos/{owner}/{repo}/issues/{issue}/labels/{label}
+                await self.github._request(
+                    "DELETE",
+                    f"/repos/{owner}/{repo}/issues/{target}/labels/{label}",
+                )
+                return {"success": True}
+
+            elif action == "comment":
+                message = config.get("message", "")
+                target = pr_number or issue_number
+                if not target or not message:
+                    return {"success": False, "error": "missing message or target"}
+                await self.github.comment_on_issue(owner, repo, target, message)
+                return {"success": True}
+
             else:
-                continue
+                return {"success": False, "error": f"unknown action: {action}"}
 
-            logger.info(
-                "Config trigger: sleeping %s (role=%s, pr=#%s)",
-                agent.agent_id,
-                role_name,
-                target_pr,
-            )
+        except Exception as e:
+            logger.exception("Pipeline action '%s' failed", action)
+            return {"success": False, "error": str(e)}
 
-            # Associate the PR with this agent if not already set
-            if target_pr and not agent.pr_number:
-                agent.pr_number = target_pr
+    async def pipeline_notify_callback(
+        self,
+        target: str,
+        context: "PipelineContext",
+        *,
+        message: str | None = None,
+        label: str | None = None,
+        users: list[str] | None = None,
+    ) -> None:
+        """Deliver pipeline notifications via GitHub API.
 
-            # WIP commit before sleep (3.1)
-            await self._wip_commit_and_push(agent)
+        Conforms to :class:`~squadron.pipeline.engine.NotifyCallback`.
 
-            agent.status = AgentStatus.SLEEPING
-            agent.sleeping_since = datetime.now(timezone.utc)
-            agent.active_since = None
-            await self.registry.update_agent(agent)
+        Targets:
+            pr_comment — post message as a PR/issue comment
+            label — add label to the PR/issue
+            assign — request review from / assign users
+            remove_label — remove label from the PR/issue
+        """
+        owner = self.config.project.owner
+        repo = self.config.project.repo
+        pr_number = context.pr_number
+        issue_number = context.issue_number or pr_number
+        target_number = pr_number or issue_number
 
-            # Cancel the running agent task (the session is preserved)
-            task = self._agent_tasks.pop(agent.agent_id, None)
-            if task and not task.done():
-                task.cancel()
+        if not target_number:
+            logger.warning("pipeline_notify: no target number for %s notification", target)
+            return
 
-            # Cancel watchdog — sleeping agents don't have timers
-            self._cancel_watchdog(agent.agent_id)
-            # Release concurrency slot
-            self._release_semaphore()
-
-            if agent.issue_number:
-                try:
-                    await self.github.comment_on_issue(
-                        self.config.project.owner,
-                        self.config.project.repo,
-                        agent.issue_number,
-                        f"{self._agent_signature(agent.role)}PR #{target_pr} opened. "
-                        "Going to sleep while waiting for review feedback.",
+        try:
+            if target == "pr_comment" and message:
+                await self.github.comment_on_issue(owner, repo, target_number, message)
+            elif target == "label" and label:
+                await self.github.add_labels(owner, repo, target_number, [label])
+            elif target == "remove_label" and label:
+                # GitHub API: DELETE /repos/{owner}/{repo}/issues/{issue}/labels/{label}
+                await self.github._request(
+                    "DELETE",
+                    f"/repos/{owner}/{repo}/issues/{target_number}/labels/{label}",
+                )
+            elif target == "assign" and users:
+                if pr_number:
+                    # Request review via GitHub API
+                    await self.github._request(
+                        "POST",
+                        f"/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+                        json={"reviewers": users},
                     )
-                except Exception:
-                    logger.debug("Failed to post sleep comment for %s", agent.agent_id)
+                else:
+                    await self.github.assign_issue(owner, repo, target_number, users)
+            else:
+                logger.warning("pipeline_notify: unhandled target=%s", target)
+        except Exception:
+            logger.exception("Pipeline notification failed: target=%s", target)
 
     # ── WIP Commit (3.1 — save work before sleep) ──────────────────────
 
@@ -700,43 +685,6 @@ class AgentManager:
             logger.warning("WIP commit/push timed out for %s", agent.agent_id)
         except Exception:
             logger.exception("WIP commit/push failed for %s", agent.agent_id)
-
-    # ── Workflow Evaluation (2.3d — unified dispatch) ────────────────────
-
-    async def _evaluate_workflows(
-        self,
-        github_event_type: str,
-        payload: dict,
-        event: SquadronEvent,
-    ) -> None:
-        """Evaluate workflow triggers and PR review stage advancement.
-
-        Called at the end of ``_handle_config_trigger()`` to consolidate all
-        event dispatch in the agent manager.  Delegates to the workflow engine
-        for trigger matching and stage advancement.
-        """
-        assert self._workflow_engine is not None
-
-        # 1. Check if any workflow should activate for this event
-        try:
-            triggered = await self._workflow_engine.evaluate_event(
-                github_event_type,
-                payload,
-                event,
-            )
-            if triggered:
-                logger.info(
-                    "Workflow triggered for %s — pipeline initiated",
-                    github_event_type,
-                )
-        except Exception:
-            logger.exception("Workflow engine error evaluating %s", github_event_type)
-
-        # TODO: PR review events should advance workflow stages once
-        # WorkflowEngine.handle_pr_review() is implemented.  The engine's
-        # resume_workflow() can advance a running stage when a review is
-        # submitted, but the lookup logic (PR → active run → stage) has
-        # not been built yet.  See issue #117 audit notes.
 
     # ── Agent Creation ───────────────────────────────────────────────────
 
@@ -1118,132 +1066,6 @@ class AgentManager:
 
         # Clean up resources (but preserve branch for human use)
         await self._cleanup_agent(agent_id, destroy_session=True)
-
-    async def spawn_workflow_agent(
-        self,
-        role: str,
-        issue_number: int,
-        *,
-        trigger_event: SquadronEvent | None = None,
-        workflow_run_id: str | None = None,
-        stage_id: str | None = None,
-        action: str | None = None,
-    ) -> str | None:
-        """Spawn a review agent for a workflow pipeline stage.
-
-        Called by the WorkflowEngine to create an agent for each stage.
-        The agent_id includes the workflow run ID to distinguish from
-        approval flow agents.
-
-        Conforms to the :class:`~squadron.workflow.engine.SpawnAgentCallback`
-        protocol.
-
-        Args:
-            role: Agent role name (e.g. "test-coverage", "security-review").
-            issue_number: Issue number associated with the workflow run.
-            trigger_event: The triggering SquadronEvent (carries PR data).
-            workflow_run_id: Workflow run ID for tracking.
-            stage_id: ID of the workflow stage.
-            action: Stage action ("review", "review_and_merge", etc.).
-
-        Returns:
-            The agent_id of the created agent, or None on failure.
-        """
-        # Extract PR number and data from the triggering event
-        event = trigger_event
-        payload = event.data.get("payload", {}) if event else {}
-        pr_data = payload.get("pull_request", {})
-        pr_number = (event.pr_number if event else None) or pr_data.get("number") or issue_number
-
-        # Build unique agent ID for workflow agents
-        suffix = f"wf-{pr_number}"
-        if stage_id:
-            suffix = f"wf-{stage_id}-{pr_number}"
-        agent_id = f"{role}-{suffix}"
-
-        # Check for existing agent with same ID
-        existing = await self.registry.get_agent(agent_id)
-        if existing:
-            logger.info("Workflow agent %s already exists — skipping", agent_id)
-            return agent_id
-
-        # Verify the role has a definition
-        agent_def = self.agent_definitions.get(role)
-        if not agent_def:
-            logger.error("No agent definition for workflow role: %s", role)
-            return None
-
-        # Determine issue number (from PR body or fallback to passed issue_number)
-        source_issue = pr_data.get("body", "") or ""
-        resolved_issue = self._extract_issue_number(source_issue) or issue_number
-
-        record = AgentRecord(
-            agent_id=agent_id,
-            role=role,
-            issue_number=resolved_issue,
-            pr_number=pr_number,
-            session_id=f"squadron-{agent_id}",
-            status=AgentStatus.ACTIVE,
-            active_since=datetime.now(timezone.utc),
-            branch=pr_data.get("head", {}).get("ref", "unknown"),
-        )
-        await self.registry.create_agent(record)
-
-        # Create inbox and mail queue
-        self.agent_inboxes[agent_id] = asyncio.Queue()
-        self.agent_mail_queues[agent_id] = []
-
-        # Create CopilotAgent (reviewers use repo root, no worktree needed)
-        # Pass sanitized env to prevent secret leakage via bash tool (#117)
-        copilot = CopilotAgent(
-            runtime_config=self.config.runtime,
-            working_directory=str(self.repo_root),
-            env=self._build_agent_env(),
-        )
-        await copilot.start()
-        self._copilot_agents[agent_id] = copilot
-
-        # Build review event with workflow metadata
-        review_event = SquadronEvent(
-            event_type=SquadronEventType.PR_OPENED,
-            pr_number=pr_number,
-            issue_number=resolved_issue,
-            data={
-                **(event.data if event else {}),
-                "workflow_run_id": workflow_run_id,
-                "workflow_stage": stage_id,
-                "workflow_action": action,
-            },
-        )
-        agent_task = asyncio.create_task(
-            self._run_agent(record, review_event),
-            name=f"agent-{agent_id}",
-        )
-        self._agent_tasks[agent_id] = agent_task
-
-        logger.info(
-            "Created workflow agent %s for PR #%d (stage=%s, action=%s, run=%s)",
-            agent_id,
-            pr_number,
-            stage_id,
-            action,
-            workflow_run_id,
-        )
-
-        # Log activity event (same as create_agent does)
-        await self._log_activity(
-            agent_id=agent_id,
-            event_type="agent_spawned",
-            issue_number=resolved_issue,
-            pr_number=pr_number,
-            content=f"Workflow agent spawned: role={role}, stage={stage_id}, run={workflow_run_id}",
-            role=role,
-            lifecycle="workflow",
-            stage=stage_id,
-            workflow_run_id=workflow_run_id,
-        )
-
-        return agent_id
 
     # ── send_and_wait with CLI health monitoring ─────────────────────────
     async def _send_and_wait_with_health_check(
@@ -1654,6 +1476,17 @@ class AgentManager:
                     except Exception:
                         logger.warning("Failed to stop CopilotClient for %s", record.agent_id)
 
+                # Notify pipeline engine of agent completion (SLEEPING = stage done)
+                if self._pipeline_engine:
+                    try:
+                        await self._pipeline_engine.on_agent_complete(record.agent_id)
+                    except Exception:
+                        logger.debug(
+                            "Pipeline on_agent_complete failed for %s",
+                            record.agent_id,
+                            exc_info=True,
+                        )
+
             elif updated.status == AgentStatus.COMPLETED:
                 # Agent called report_complete → full cleanup
                 logger.info("AGENT COMPLETE — %s", record.agent_id)
@@ -1663,6 +1496,17 @@ class AgentManager:
                     copilot=copilot,
                     session_id=record.session_id,
                 )
+
+                # Notify pipeline engine of agent completion
+                if self._pipeline_engine:
+                    try:
+                        await self._pipeline_engine.on_agent_complete(record.agent_id)
+                    except Exception:
+                        logger.debug(
+                            "Pipeline on_agent_complete failed for %s",
+                            record.agent_id,
+                            exc_info=True,
+                        )
 
             else:
                 # Agent finished turn without calling a lifecycle tool.
@@ -1688,6 +1532,18 @@ class AgentManager:
             logger.exception("Agent %s failed", record.agent_id)
             record.status = AgentStatus.ESCALATED
             await self.registry.update_agent(record)
+            # Notify pipeline engine of agent error
+            if self._pipeline_engine:
+                try:
+                    await self._pipeline_engine.on_agent_error(
+                        record.agent_id, "Agent execution failed"
+                    )
+                except Exception:
+                    logger.debug(
+                        "Pipeline on_agent_error failed for %s",
+                        record.agent_id,
+                        exc_info=True,
+                    )
             # Best-effort cleanup on failure
             try:
                 await self._cleanup_agent(
@@ -2639,115 +2495,16 @@ class AgentManager:
                         agent.agent_id,
                     )
 
-    async def _handle_pr_opened(self, event: SquadronEvent) -> None:
-        """Handle PR opened — set up review requirements based on policy.
-
-        When a new PR is opened:
-        1. Determine which roles need to review (from review_policy config)
-        2. Store the requirements in the registry
-        3. Set up sequence state if sequential reviews are configured
-        """
-        if not event.pr_number:
-            return
-
-        policy = self.config.review_policy
-        if not policy.enabled:
-            logger.debug("Review policy disabled — skipping PR #%d setup", event.pr_number)
-            return
-
-        payload = event.data.get("payload", {})
-        pr_data = payload.get("pull_request", {})
-
-        # Get PR labels and base branch
-        labels = [lbl.get("name", "") for lbl in pr_data.get("labels", [])]
-        base_branch = pr_data.get("base", {}).get("ref", "")
-
-        # Get changed files (optional, may not be in the webhook payload)
-        changed_files = None
-        try:
-            files = await self.github.list_pull_request_files(
-                self.config.project.owner,
-                self.config.project.repo,
-                event.pr_number,
-            )
-            changed_files = [f.get("filename", "") for f in files]
-        except Exception:
-            logger.debug("Could not fetch changed files for PR #%d", event.pr_number)
-
-        # Determine requirements
-        requirements, sequence = policy.get_requirements_for_pr(labels, changed_files, base_branch)
-
-        if not requirements:
-            logger.debug("No review requirements for PR #%d", event.pr_number)
-            return
-
-        # Store in registry
-        req_dicts = [{"role": r.role, "count": r.count} for r in requirements]
-        await self.registry.set_pr_requirements(event.pr_number, req_dicts, sequence or None)
-
-        logger.info(
-            "Set up review requirements for PR #%d: %s (sequence=%s)",
-            event.pr_number,
-            [r.role for r in requirements],
-            sequence,
-        )
-
-    async def _handle_pr_synchronize(self, event: SquadronEvent) -> None:
-        """Handle PR synchronize — invalidate approvals when PR is updated.
-
-        When a PR is updated with new commits:
-        1. Invalidate all existing approvals (require full re-review)
-        2. Reset sequence state to first role only
-        3. Optionally respawn reviewer agents to re-check
-        """
-        if not event.pr_number:
-            return
-
-        policy = self.config.review_policy
-        if not policy.enabled:
-            return
-
-        sync_config = policy.on_synchronize
-
-        if sync_config.invalidate_approvals:
-            invalidated = await self.registry.invalidate_pr_approvals(event.pr_number)
-            if invalidated > 0:
-                logger.info(
-                    "PR #%d updated — invalidated %d approvals (full re-review required)",
-                    event.pr_number,
-                    invalidated,
-                )
-
-                # Post a comment about invalidation
-                try:
-                    await self.github.comment_on_issue(
-                        self.config.project.owner,
-                        self.config.project.repo,
-                        event.pr_number,
-                        "🔄 **PR Updated** — new commits detected. "
-                        f"Previous approvals ({invalidated}) have been invalidated. "
-                        "Full re-review required.",
-                    )
-                except Exception:
-                    logger.debug("Failed to post invalidation comment on PR #%d", event.pr_number)
-
-        # Note: Respawning reviewers is handled by config triggers with action: "wake"
-        # which are already registered via _register_trigger_handlers
-
     async def _handle_pr_review_submitted(self, event: SquadronEvent) -> None:
         """Handle PR review submission — deliver review context to the PR-owning agent.
 
-        This is a framework-level supplement to config-trigger based waking (issue #112).
-        When a review is submitted on a PR, we find all sleeping agents that own that PR
-        (identified by agent.pr_number) and queue a rich review notification into their
-        inbox.  The config trigger system remains responsible for actually waking the agent;
-        this handler enriches the inbox so the agent sees full review details when it calls
-        check_for_events after waking.
+        This is a framework-level handler (issue #112).  When a review is submitted on a
+        PR, we find all sleeping agents that own that PR (identified by agent.pr_number),
+        queue a rich review notification into their inbox, and wake them so they can
+        respond to reviewer feedback.
 
-        Design rationale: config triggers may match and call _trigger_wake independently,
-        but they don't populate the inbox — the inbox delivery here is additive.  Using the
-        message-passing system (agent_inboxes) ensures the review context is available to
-        the agent regardless of how it was woken (config trigger, command mention, etc.).
+        The inbox delivery ensures the review context is available to the agent via
+        check_for_events.  The wake call transitions the agent from SLEEPING → ACTIVE.
         """
         if not event.pr_number:
             return
@@ -2792,6 +2549,9 @@ class AgentManager:
                 review_state,
                 review.get("user", {}).get("login", "unknown"),
             )
+
+            # Wake the sleeping agent so it can respond to reviewer feedback
+            await self.wake_agent(agent.agent_id, event)
 
     async def _handle_pr_review_comment(self, event: SquadronEvent) -> None:
         """Handle inline PR review comment — queue it into the PR-owning agent's inbox.
@@ -3632,284 +3392,3 @@ class AgentManager:
             )
 
         return await self._run_git_in(worktree, *args, timeout=120, auth=True)
-
-    # ── Auto-Merge System ─────────────────────────────────────────────────
-
-    async def _auto_merge_pr(self, pr_number: int) -> None:
-        """Attempt to merge a PR after all required approvals are in place.
-
-        This is the callback for the auto-merge system. It:
-        1. Verifies all approvals are still valid
-        2. Optionally waits for CI to pass (if configured)
-        3. Merges the PR using the configured method
-        4. Handles failures via YAML-configured handlers
-        5. Deletes the branch after merge (if configured)
-
-        Args:
-            pr_number: The PR number to merge.
-        """
-        import httpx
-
-        policy = self.config.review_policy
-        if not policy.enabled or not policy.auto_merge.enabled:
-            logger.info("Auto-merge disabled — skipping PR #%d", pr_number)
-            return
-
-        owner = self.config.project.owner
-        repo = self.config.project.repo
-
-        # Double-check merge readiness (approvals could have changed)
-        is_ready, missing = await self.registry.check_pr_merge_ready(pr_number)
-        if not is_ready:
-            logger.warning("PR #%d not ready for merge: %s", pr_number, missing)
-            return
-
-        # Get PR details for branch info
-        try:
-            pr_data = await self.github.get_pull_request(owner, repo, pr_number)
-        except Exception:
-            logger.exception("Failed to get PR #%d details", pr_number)
-            return
-
-        head_branch = pr_data.get("head", {}).get("ref", "")
-        pr_title = pr_data.get("title", f"PR #{pr_number}")
-
-        # Optionally check CI status
-        if policy.auto_merge.require_ci_pass:
-            try:
-                sha = pr_data.get("head", {}).get("sha", "")
-                if sha:
-                    status = await self.github.get_combined_status(owner, repo, sha)
-                    state = status.get("state", "unknown")
-                    if state == "failure":
-                        logger.warning(
-                            "PR #%d CI failed — invoking on_ci_failed handler", pr_number
-                        )
-                        await self._handle_merge_failure(
-                            pr_number,
-                            "ci_failed",
-                            policy.auto_merge.on_ci_failed,
-                            pr_data,
-                        )
-                        return
-                    elif state == "pending":
-                        logger.info("PR #%d CI still pending — will retry later", pr_number)
-                        # TODO: schedule a retry instead of just returning
-                        return
-            except Exception:
-                logger.warning("Failed to check CI status for PR #%d", pr_number, exc_info=True)
-
-        # Attempt merge
-        logger.info(
-            "AUTO-MERGE — attempting to merge PR #%d (%s) via %s",
-            pr_number,
-            pr_title,
-            policy.auto_merge.method,
-        )
-
-        try:
-            await self.github.merge_pull_request(
-                owner,
-                repo,
-                pr_number,
-                merge_method=policy.auto_merge.method,
-                commit_title=f"{pr_title} (#{pr_number})",
-            )
-            logger.info("AUTO-MERGE SUCCESS — PR #%d merged", pr_number)
-
-            # Delete branch if configured
-            if policy.auto_merge.delete_branch and head_branch:
-                try:
-                    await self.github.delete_branch(owner, repo, head_branch)
-                    logger.info("Deleted branch %s after merge", head_branch)
-                except Exception:
-                    logger.warning("Failed to delete branch %s", head_branch, exc_info=True)
-
-            # Clean up PR tracking data
-            await self.registry.cleanup_pr_data(pr_number)
-
-            # Post merge comment
-            try:
-                issue_number = self._extract_issue_number(pr_data.get("body", "") or "")
-                if issue_number:
-                    await self.github.comment_on_issue(
-                        owner,
-                        repo,
-                        issue_number,
-                        f"🎉 **Auto-merged** — PR #{pr_number} has been merged to "
-                        f"`{pr_data.get('base', {}).get('ref', 'main')}`.",
-                    )
-            except Exception:
-                logger.debug("Failed to post merge comment")
-
-        except httpx.HTTPStatusError as e:
-            error_body = e.response.text
-            logger.warning(
-                "AUTO-MERGE FAILED — PR #%d: %s %s",
-                pr_number,
-                e.response.status_code,
-                error_body[:200],
-            )
-
-            # Determine failure type and invoke appropriate handler
-            if "merge conflict" in error_body.lower() or e.response.status_code == 409:
-                await self._handle_merge_failure(
-                    pr_number,
-                    "merge_conflict",
-                    policy.auto_merge.on_merge_conflict,
-                    pr_data,
-                )
-            else:
-                await self._handle_merge_failure(
-                    pr_number,
-                    "unknown_error",
-                    policy.auto_merge.on_unknown_error,
-                    pr_data,
-                    error_message=error_body[:500],
-                )
-
-        except Exception as e:
-            logger.exception("AUTO-MERGE ERROR — PR #%d", pr_number)
-            await self._handle_merge_failure(
-                pr_number,
-                "unknown_error",
-                policy.auto_merge.on_unknown_error,
-                pr_data,
-                error_message=str(e),
-            )
-
-    async def _handle_merge_failure(
-        self,
-        pr_number: int,
-        failure_type: str,
-        handler: "FailureAction",
-        pr_data: dict,
-        error_message: str = "",
-    ) -> None:
-        """Handle a merge failure according to the configured action.
-
-        Actions:
-        - spawn: Spawn an agent to fix the issue (e.g. merge-conflict agent)
-        - notify: Post a comment mentioning the configured human group
-        - escalate: Add escalation labels and notify maintainers
-        """
-
-        owner = self.config.project.owner
-        repo = self.config.project.repo
-
-        logger.info(
-            "Handling %s for PR #%d: action=%s, target=%s",
-            failure_type,
-            pr_number,
-            handler.action,
-            handler.target,
-        )
-
-        if handler.action == "spawn":
-            # Spawn an agent to handle the failure
-            role = handler.target
-            if role not in self.config.agent_roles:
-                logger.error(
-                    "Cannot spawn %s for %s — role not configured",
-                    role,
-                    failure_type,
-                )
-                # Fall back to notify if spawn target doesn't exist
-                if handler.fallback:
-                    await self._handle_merge_failure(
-                        pr_number, failure_type, handler.fallback, pr_data, error_message
-                    )
-                return
-
-            # Extract issue number from PR
-            issue_number = self._extract_issue_number(pr_data.get("body", "") or "")
-            if not issue_number:
-                issue_number = pr_number  # Use PR number as fallback
-
-            # Create a synthetic event for the agent
-            event = SquadronEvent(
-                event_type=SquadronEventType.PR_SYNCHRONIZED,
-                pr_number=pr_number,
-                issue_number=issue_number,
-                data={
-                    "payload": {"pull_request": pr_data},
-                    "failure_type": failure_type,
-                    "error_message": error_message,
-                },
-            )
-
-            await self.create_agent(role, issue_number, trigger_event=event)
-            logger.info("Spawned %s agent to handle %s on PR #%d", role, failure_type, pr_number)
-
-        elif handler.action == "notify":
-            # Post a comment mentioning the configured group
-            group_name = handler.target
-            mentions = self._resolve_human_group(group_name)
-
-            message_parts = [
-                f"⚠️ **Merge Failed** — PR #{pr_number} could not be auto-merged.",
-                f"**Reason:** {failure_type.replace('_', ' ').title()}",
-            ]
-            if error_message:
-                message_parts.append(f"```\n{error_message[:500]}\n```")
-            message_parts.append(f"\n{mentions} — please investigate and resolve.")
-
-            await self.github.comment_on_issue(
-                owner,
-                repo,
-                pr_number,
-                "\n".join(message_parts),
-            )
-            logger.info("Posted merge failure notification for PR #%d", pr_number)
-
-        elif handler.action == "escalate":
-            # Add escalation labels and notify
-            group_name = handler.target
-            mentions = self._resolve_human_group(group_name)
-
-            try:
-                await self.github.add_labels(
-                    owner,
-                    repo,
-                    pr_number,
-                    self.config.escalation.escalation_labels,
-                )
-            except Exception:
-                logger.warning("Failed to add escalation labels to PR #%d", pr_number)
-
-            message_parts = [
-                f"🚨 **Escalation** — PR #{pr_number} requires human intervention.",
-                f"**Failure:** {failure_type.replace('_', ' ').title()}",
-            ]
-            if error_message:
-                message_parts.append(f"```\n{error_message[:500]}\n```")
-            message_parts.append(f"\n{mentions}")
-
-            await self.github.comment_on_issue(
-                owner,
-                repo,
-                pr_number,
-                "\n".join(message_parts),
-            )
-            logger.info("Escalated PR #%d for human intervention", pr_number)
-
-        # Try fallback if primary action might have failed
-        if handler.fallback:
-            logger.debug("Fallback handler available but not needed")
-
-    def _resolve_human_group(self, group_name: str) -> str:
-        """Resolve a human group name to @mentions.
-
-        Looks up the group in config.human_groups. If not found,
-        returns @group_name as a team mention.
-        """
-        human_config = self.config.human_invocation
-        group_members = self.config.human_groups.get(group_name, [])
-
-        if group_members:
-            # Mention each member
-            mentions = [human_config.mention_format.format(username=u) for u in group_members]
-            return " ".join(mentions)
-        else:
-            # Assume it's a team name
-            return human_config.mention_format.format(username=group_name)

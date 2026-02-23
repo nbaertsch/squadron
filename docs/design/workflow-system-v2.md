@@ -1,5 +1,7 @@
 # Workflow System v2 — Design Document
 
+> **SUPERSEDED**: This design document has been superseded by the [Unified Pipeline System (AD-019)](unified-pipeline-system.md). The workflow engine, trigger system, and review policy described here have been entirely removed and replaced by the unified pipeline system. This document is retained for historical reference only.
+
 ## Overview
 
 The extended workflow system enables **deterministic multi-agent orchestration** while preserving the flexibility of prompt-driven autonomous agents. Workflows are optional — users can continue using agents with tools and prompts for maximum autonomy, or define strict workflows for predictable, auditable execution.

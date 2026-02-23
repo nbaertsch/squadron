@@ -23,7 +23,6 @@ import pytest_asyncio
 
 from squadron.config import (
     AgentRoleConfig,
-    AgentTrigger,
     ProjectConfig,
     SquadronConfig,
 )
@@ -58,7 +57,6 @@ def _minimal_config() -> SquadronConfig:
         agent_roles={
             "feat-dev": AgentRoleConfig(
                 agent_definition="agents/feat-dev.md",
-                triggers=[AgentTrigger(event="issues.labeled", label="feature")],
             ),
         },
     )
@@ -89,7 +87,6 @@ def _make_comment_event(
 
 @pytest_asyncio.fixture
 async def registry(tmp_path):
-
     db_path = str(tmp_path / "test_mail.db")
     reg = AgentRegistry(db_path)
     await reg.initialize()
