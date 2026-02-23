@@ -292,7 +292,7 @@ class PipelineEngine:
                     payload=payload,
                     issue_number=issue_number,
                     pr_number=pr_number,
-                    delivery_id=(squadron_event.delivery_id if squadron_event else None),
+                    delivery_id=(squadron_event.source_delivery_id if squadron_event else None),
                 )
                 started_run = run
 
