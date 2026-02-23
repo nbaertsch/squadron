@@ -227,8 +227,8 @@ class SquadronServer:
             repo=self.config.project.repo,
         )
 
-        # Register pipeline definitions from config
-        for name, defn in self.config.pipelines.items():
+        # Register pipeline definitions from config (convert dicts to PipelineDefinition)
+        for name, defn in self.config.get_pipeline_definitions().items():
             self.pipeline_engine.add_pipeline(name, defn)
 
         # Validate all pipelines at startup
@@ -547,7 +547,7 @@ class SquadronServer:
         if self.pipeline_engine:
             # Clear old definitions and re-register from new config
             self.pipeline_engine._pipelines.clear()
-            for name, defn in new_config.pipelines.items():
+            for name, defn in new_config.get_pipeline_definitions().items():
                 self.pipeline_engine.add_pipeline(name, defn)
 
             errors = self.pipeline_engine.validate_all_pipelines()
