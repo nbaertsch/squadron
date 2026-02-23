@@ -27,6 +27,11 @@ project:
   repo: "my-repo"
   default_branch: main
 
+# GitHub usernames authorized to trigger Squadron system events.
+# An empty list (the default) blocks all human-triggered processing.
+maintainers:
+  - alice
+
 human_groups:
   maintainers: ["alice"]
 ```
@@ -67,6 +72,49 @@ human_groups:
 - Usernames are GitHub handles (without `@`).
 
 ---
+
+### `maintainers` — Authorized Event Actors
+
+The list of GitHub usernames who are authorized to trigger Squadron system events
+(agent spawning, PM triage, command routing, label-triggered workflows, etc.).
+
+```yaml
+maintainers:
+  - alice        # GitHub username (without @)
+  - bob
+  - charlie-dev
+```
+
+**Security model:**
+
+- If a GitHub webhook event is sent by a user **not** in this list, it is **silently dropped** — no agent is spawned, no comment is posted, no side effects occur.
+- The Squadron bot identity (configured as `project.bot_username`, default: `squadron-dev[bot]`) is **always permitted** regardless of this list. This prevents self-blocking on bot-generated events (e.g. when the PM labels an issue to trigger a feature-dev agent).
+- An **empty list** (the default) means no human-originated events are processed. Add at least one maintainer username to enable event processing.
+
+**Behavior when omitted:**
+
+If the `maintainers` field is absent from `config.yaml`, it defaults to an empty list, which locks down all human-triggered event processing. Only bot-originated events from the configured `project.bot_username` are processed.
+
+**Notes:**
+
+- Usernames are GitHub handles (without `@`), matched case-insensitively.
+- Dropped events are logged at `INFO` level including: actor login, event type, and issue/PR number.
+- This is a flat allowlist — role-based access control (restricting which agents a maintainer can trigger) is a future enhancement.
+
+**Minimal example:**
+
+```yaml
+project:
+  name: my-project
+  owner: my-org
+  repo: my-repo
+
+maintainers:
+  - alice   # Only alice can trigger Squadron system events
+```
+
+---
+
 
 ### `labels` — Label Taxonomy
 

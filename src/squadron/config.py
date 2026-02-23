@@ -431,6 +431,35 @@ class SquadronConfig(BaseModel):
     labels: LabelsConfig = Field(default_factory=LabelsConfig)
     branch_naming: BranchNamingConfig = Field(default_factory=BranchNamingConfig)
     human_groups: dict[str, list[str]] = Field(default_factory=dict)
+    maintainers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "GitHub usernames authorized to trigger Squadron system events. "
+            "An empty list locks down all event processing (no non-bot events "
+            "will be processed). The Squadron bot identity is always permitted "
+            "regardless of this list."
+        ),
+    )
+
+    @field_validator("maintainers")
+    @classmethod
+    def _validate_maintainers(cls, v: list) -> list[str]:
+        """Validate maintainer username list.
+
+        Rejects non-string values and empty/whitespace-only usernames.
+        """
+        validated: list[str] = []
+        for i, entry in enumerate(v):
+            if not isinstance(entry, str):
+                raise ValueError(
+                )
+            username = entry.strip()
+            if not username:
+                raise ValueError(
+                    f"maintainers[{i}]: username must not be empty or whitespace-only"
+                )
+            validated.append(username)
+        return validated
     agent_roles: dict[str, AgentRoleConfig] = Field(default_factory=dict)
     circuit_breakers: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)

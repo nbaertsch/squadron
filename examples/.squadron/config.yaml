@@ -14,6 +14,13 @@ project:
   repo: "my-repo"             # GitHub repo name
   default_branch: main
 
+# REQUIRED — GitHub usernames authorized to trigger Squadron system events.
+# Without at least one entry, no human-triggered events (comments, labels, etc.)
+# will be processed. The Squadron bot identity is always permitted automatically.
+# See docs/configuration.md for full security model details.
+maintainers:
+  - your-github-username      # Replace with your actual GitHub username
+
 human_groups:
   maintainers: ["your-github-username"]   # REQUIRED — at least one human for escalations
 

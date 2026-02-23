@@ -69,9 +69,20 @@ project:
   repo: "my-repo"
   default_branch: main
 
+# IMPORTANT: List the GitHub usernames who may trigger Squadron.
+# An empty list (the default) blocks all human-triggered event processing.
+maintainers:
+  - your-github-username
+
 human_groups:
   maintainers: ["your-github-username"]
 ```
+
+> **Security note:** The `maintainers` field controls who can trigger Squadron system events
+> (agent spawning, PM triage, command routing). Only users listed here can activate Squadron
+> workflows. The Squadron bot identity (`squadron-dev[bot]`) is always permitted regardless
+> of this list. See the [Configuration Reference](docs/configuration.md#maintainers--authorized-event-actors)
+> for full details.
 
 ### 3. Create a GitHub App
 
