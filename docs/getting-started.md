@@ -320,20 +320,34 @@ tools:
 You maintain and improve project documentation...
 ```
 
-### Custom Labels and Triggers
+### Custom Labels and Pipelines
 
 ```yaml
 # .squadron/config.yaml
 labels:
   types: [feature, bug, enhancement, question]
   priorities: [p0, p1, p2, p3]
-  
-agents:
-  docs-dev:
-    triggers:
-      - issue_labeled: ["documentation"]
-      - issue_opened: ["docs"]
+
+pipelines:
+  docs-lifecycle:
+    description: "Documentation development lifecycle"
+    scope: issue
+    trigger:
+      event: issues.labeled
+      conditions:
+        label: documentation
+    stages:
+      - id: write-docs
+        type: agent
+        agent: docs-dev
+        action: "Write or update documentation as described in this issue"
+        timeout: 1h
+        on_error:
+          retry: 1
+          then: escalate
 ```
+
+See [Pipeline Configuration Reference](reference/pipeline-configuration.md) for the full pipeline YAML schema.
 
 ### Branch Protection Rules
 

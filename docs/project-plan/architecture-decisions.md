@@ -301,7 +301,7 @@ Decisions made during ideation, with rationale.
 
 ## AD-019: Unified Pipeline System — Single Orchestration Primitive
 
-**Status:** Proposed  
+**Status:** Implemented  
 **Decision:** Replace the three parallel orchestration systems (config-driven triggers, Workflow Engine v2, and Review Policy) with a single **unified pipeline system** where pipelines are the sole orchestration primitive. All legacy orchestration code (`triggers`, `review_policy`, `workflows`, Workflow Engine v2) is **removed entirely** — no backward-compatibility shim, no auto-conversion, no deprecation period.
 
 **Rationale:**
