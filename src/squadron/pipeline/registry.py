@@ -138,6 +138,53 @@ class PipelineRegistry:
         rows = await cursor.fetchall()
         return [_row_to_pipeline_run(r) for r in rows]
 
+    async def get_recent_pipeline_runs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status: PipelineRunStatus | None = None,
+        pipeline_name: str | None = None,
+    ) -> list[PipelineRun]:
+        """Get recent pipeline runs (newest first), with optional filters.
+
+        Useful for dashboard views that show both active and historical runs.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status.value)
+        if pipeline_name:
+            clauses.append("pipeline_name = ?")
+            params.append(pipeline_name)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT * FROM pipeline_runs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cursor = await self._db.execute(query, params)
+        rows = await cursor.fetchall()
+        return [_row_to_pipeline_run(r) for r in rows]
+
+    async def count_pipeline_runs(
+        self,
+        *,
+        status: PipelineRunStatus | None = None,
+        pipeline_name: str | None = None,
+    ) -> int:
+        """Count pipeline runs matching optional filters."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status.value)
+        if pipeline_name:
+            clauses.append("pipeline_name = ?")
+            params.append(pipeline_name)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        cursor = await self._db.execute(f"SELECT COUNT(*) FROM pipeline_runs{where}", params)
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
     async def get_child_pipelines(self, parent_run_id: str) -> list[PipelineRun]:
         """Get all child pipeline runs for a given parent run."""
         cursor = await self._db.execute(

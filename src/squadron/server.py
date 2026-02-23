@@ -202,8 +202,8 @@ class SquadronServer:
             expected_repo_full_name=repo_full_name,
         )
 
-        # 8a. Configure dashboard endpoints (activity logging + SSE + log buffer)
-        configure_dashboard(self.activity_logger, self.registry, self.log_buffer)
+        # 8a. Configure dashboard endpoints (activity logging + SSE + log buffer + pipelines)
+        # NOTE: Moved after pipeline engine setup so dashboard has pipeline visibility.
 
         # 8b. Create pipeline engine
         pipeline_db_path = str(data_dir / "pipeline.db")
@@ -254,6 +254,15 @@ class SquadronServer:
         recovered = await self.pipeline_engine.recover_active_pipelines()
         if recovered:
             logger.info("Recovered %d active pipeline(s) from previous run", recovered)
+
+        # 8a. Configure dashboard endpoints (with all dependencies now available)
+        configure_dashboard(
+            self.activity_logger,
+            self.registry,
+            self.log_buffer,
+            pipeline_engine=self.pipeline_engine,
+            pipeline_registry=self.pipeline_registry,
+        )
 
         # 9. Start background loops
         await self.router.start()
