@@ -426,7 +426,6 @@ pipelines:
           - check: command
             run: python -m pytest tests/
             expect: "exit_code == 0"
-        on_pass: complete
         on_fail:
           goto: implement
           max_iterations: 3
