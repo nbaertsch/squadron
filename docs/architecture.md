@@ -28,7 +28,8 @@ graph TB
         WEBHOOK_SERVER[Webhook Server<br/>FastAPI]
         EVENT_ROUTER[Event Router]
         AGENT_MANAGER[Agent Manager]
-        WORKFLOW_ENGINE[Workflow Engine]
+        PIPELINE_ENGINE[Pipeline Engine]
+        PIPELINE_REGISTRY[Pipeline Registry<br/>SQLite]
         RECOVERY[Recovery System]
         REGISTRY[Agent Registry<br/>SQLite]
     end
@@ -62,7 +63,7 @@ graph TB
     GITHUB_CLIENT --> GH_API
     
     AGENT_MANAGER --> REGISTRY
-    WORKFLOW_ENGINE --> REGISTRY
+    PIPELINE_ENGINE --> PIPELINE_REGISTRY
     RECOVERY --> AGENT_MANAGER
 ```
 
@@ -89,14 +90,14 @@ GET  /api/metrics      # Monitoring metrics
 
 ### 2. Event Router (`src/squadron/event_router.py`)
 
-Processes GitHub webhooks and determines which agents should handle each event.
+Processes GitHub webhooks and routes events to the pipeline engine and framework-level handlers.
 
 **Event Flow:**
 1. **Webhook Reception**: Receive and parse GitHub event
 2. **Event Classification**: Determine event type (issue_opened, pr_created, etc.)
-3. **Agent Selection**: Identify which agents should handle the event
-4. **Queue Management**: Route events to appropriate agent queues
-5. **Dependency Tracking**: Handle agent blocking and wake scenarios
+3. **Pipeline Evaluation**: Route to Pipeline Engine for trigger matching
+4. **Framework Handlers**: Handle cross-cutting concerns (command routing, issue lifecycle, inbox enrichment)
+5. **Reactive Events**: Notify running pipelines of relevant events
 
 **Supported Events:**
 - `issues.opened`, `issues.edited`, `issues.labeled`
@@ -122,15 +123,21 @@ class AgentLifecycle(Enum):
     PERSISTENT = "persistent"   # Can sleep/wake across sessions
 ```
 
-### 4. Workflow Engine (`src/squadron/workflow_engine.py`)
+### 4. Pipeline Engine (`src/squadron/pipeline/engine.py`)
 
-Handles complex multi-agent workflows and coordination.
+Unified orchestration engine that replaces triggers, review policy, and the legacy workflow engine. All agent spawning, review orchestration, approval tracking, and merge automation are expressed as YAML pipeline definitions.
 
 **Features:**
-- **Dependency Tracking**: Agents can block on other issues
-- **Cycle Detection**: BFS-based cycle detection in dependency graphs
-- **Escalation Flow**: Automatic escalation of stuck or failed agents
-- **State Recovery**: Resume workflows after system restarts
+- **Event-Driven Activation**: Pipelines trigger on GitHub webhook events
+- **Stage Execution**: Agent, gate, human, parallel, delay, action, webhook, and sub-pipeline stages
+- **Reactive Events**: Running pipelines respond to GitHub events (re-evaluate gates, invalidate/restart, cancel)
+- **Gate System**: Pluggable gate checks (CI status, PR approvals, commands, labels, custom)
+- **Human-in-the-Loop**: Human stages with approval tracking, reminders, and timeout
+- **Sub-Pipelines**: Compose pipelines from reusable sub-pipeline definitions
+- **Template Expressions**: `{{ }}` expressions resolved against pipeline context
+- **Recovery**: Active pipelines resume after server restart
+
+See [Pipeline Configuration Reference](reference/pipeline-configuration.md) and [Pipeline Monitoring](reference/pipeline-monitoring.md) for details.
 
 ### 5. Agent Registry (`src/squadron/registry.py`)
 
@@ -273,29 +280,23 @@ async def resume_persistent_agent(self, agent_record, new_context):
 ### Issue → Feature Implementation Flow
 
 1. **Issue Created**: User opens issue labeled "feature"
-2. **Webhook Reception**: Squadron receives `issues.opened` event
-3. **PM Invocation**: Event router triggers PM agent
-4. **Issue Triage**: PM agent:
-   - Reads issue details (`read_issue`)
-   - Checks recent history (`get_recent_history`)  
-   - Assigns to feature dev (`assign_issue`)
-   - Comments with plan (`comment_on_issue`)
-5. **Dev Agent Creation**: Agent manager spawns `feat-dev` agent
-6. **Implementation**: Dev agent:
+2. **Webhook Reception**: Squadron receives `issues.labeled` event
+3. **Pipeline Triggered**: Pipeline engine matches `feature-dev-lifecycle` pipeline
+4. **Agent Stage**: Pipeline spawns `feat-dev` agent
+5. **Implementation**: Dev agent:
    - Creates git worktree
    - Writes code and tests
    - Commits changes (`git_push`)
    - Opens pull request (`open_pr`)
-7. **Review Process**: Review agent:
-   - Analyzes PR (`get_pr_feedback`)
-   - Reviews code (`submit_pr_review`)
-   - Approves or requests changes
-8. **Merge**: If approved, auto-merge or human merge
+6. **PR Pipeline Triggered**: PR opening triggers `pr-lifecycle` pipeline
+7. **Review Stages**: Review agents analyze PR code
+8. **Gate Stage**: Approval gate checks PR reviews and CI status
+9. **Action Stage**: Auto-merge stage merges the PR
 
 ### Event Processing Pipeline
 
 ```python
-# Webhook → Event Router → Agent Manager
+# Webhook → Event Router → Pipeline Engine
 
 @app.post("/webhook")
 async def github_webhook(request: Request):
@@ -304,18 +305,15 @@ async def github_webhook(request: Request):
 
 class EventRouter:
     async def route_event(self, event: GitHubEvent):
-        if event.type == "issues.opened":
-            await self.handle_issue_opened(event)
-        elif event.type == "pull_request.opened":  
-            await self.handle_pr_opened(event)
-            
-    async def handle_issue_opened(self, event):
-        # Trigger PM agent for triage
-        await agent_manager.invoke_pm_agent(event.issue)
-        
-    async def handle_pr_opened(self, event):
-        # Trigger review agents
-        await agent_manager.invoke_review_agents(event.pr)
+        # Pipeline engine evaluates event against all triggers
+        run = await pipeline_engine.evaluate_event(
+            event.type, event.payload, event
+        )
+        if run:
+            logger.info("Pipeline '%s' started: %s", run.pipeline_name, run.run_id)
+
+        # Also notify running pipelines of reactive events
+        # (e.g. reevaluate gates when PR review is submitted)
 ```
 
 ## Configuration System

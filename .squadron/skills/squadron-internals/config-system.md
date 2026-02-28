@@ -1,5 +1,7 @@
 # Config System
 
+> **AD-019 MIGRATION NOTE:** The unified pipeline system (see `docs/design/unified-pipeline-system.md`) replaces the following config sections: `agent_roles.<role>.triggers`, `review_policy`, and `workflows`. These will be deleted and replaced by a single `pipelines:` top-level key. When implementing AD-019, **delete all legacy config models entirely** (`AgentTrigger`, `ReviewPolicyConfig`, `ReviewRequirement`, `ReviewRule`, `WorkflowConfig`, `StageDefinition`, `GateCondition`) — no backward-compatibility shims, no auto-conversion. The `SquadronConfig` model hierarchy below will change accordingly.
+
 ## Two-Layer Design
 
 Squadron uses two separate config artifacts:
@@ -82,6 +84,8 @@ SquadronConfig
 ```
 
 ## AgentTrigger
+
+> **LEGACY — will be removed by AD-019.** After the pipeline refactor, `agent_roles.<role>.triggers` no longer exists. Agent lifecycle actions are defined as stages within `pipelines:` definitions. The `AgentTrigger` model and all trigger-matching logic in `AgentManager` will be deleted.
 
 Defines when an agent is spawned/woken/completed/slept:
 

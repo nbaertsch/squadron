@@ -22,16 +22,6 @@ async def registry(tmp_path):
 
 @pytest.fixture
 def config():
-    """Config with 'alice' in the maintainers group for tests that use human senders."""
-    return SquadronConfig(
-        project={"name": "test"},
-        human_groups={"maintainers": ["alice"]},
-    )
-
-
-@pytest.fixture
-def config_no_maintainers():
-    """Config with no maintainers group — only bot events are permitted."""
     return SquadronConfig(project={"name": "test"})
 
 
@@ -39,13 +29,6 @@ def config_no_maintainers():
 async def router(registry, config):
     queue = asyncio.Queue()
     r = EventRouter(event_queue=queue, registry=registry, config=config)
-    yield r, queue
-
-
-@pytest_asyncio.fixture
-async def router_no_maintainers(registry, config_no_maintainers):
-    queue = asyncio.Queue()
-    r = EventRouter(event_queue=queue, registry=registry, config=config_no_maintainers)
     yield r, queue
 
 
@@ -61,7 +44,6 @@ class TestEventMapping:
             "pull_request.opened",
             "pull_request.closed",
             "pull_request.synchronize",
-            "pull_request.labeled",
             "pull_request_review.submitted",
             "pull_request_review_comment.created",
             "push",
@@ -74,11 +56,12 @@ class TestEventMapping:
 
 
 class TestBotEvents:
-    """Bot-originated events (squadron-dev[bot]) are always permitted regardless
-    of the maintainers list, to avoid self-blocking on bot-generated events."""
+    """All events — including from the bot — are routed.  Loop protection
+    relies on dedup, singleton, duplicate-agent, and circuit-breaker guards,
+    NOT on filtering the sender."""
 
     async def test_routes_bot_events(self, router, registry):
-        """Bot-originated events are always permitted — maintainer gate does not block them."""
+        """Bot-originated events are NOT filtered — they pass through."""
         r, _ = router
         handler_called = asyncio.Event()
 
@@ -92,15 +75,14 @@ class TestBotEvents:
             event_type="issues",
             action="opened",
             payload={
-                "sender": {"login": "squadron-dev[bot]", "type": "Bot"},
+                "sender": {"login": "squadron[bot]", "type": "Bot"},
                 "issue": {"number": 1, "labels": []},
             },
         )
         await r._route_event(event)
-        assert handler_called.is_set(), "Bot events must be routed (bot identity always permitted)"
+        assert handler_called.is_set(), "Bot events must be routed (no sender filtering)"
 
     async def test_passes_human_events(self, router, registry):
-        """Events from listed maintainers are permitted."""
         r, _ = router
         handler_called = asyncio.Event()
 
@@ -137,7 +119,7 @@ class TestBotEvents:
             event_type="issues",
             action="labeled",
             payload={
-                "sender": {"login": "squadron-dev[bot]", "type": "Bot"},
+                "sender": {"login": "squadron[bot]", "type": "Bot"},
                 "issue": {"number": 42, "labels": [{"name": "feature"}]},
                 "label": {"name": "feature"},
             },
@@ -163,314 +145,13 @@ class TestBotEvents:
             event_type="pull_request",
             action="opened",
             payload={
-                "sender": {"login": "squadron-dev[bot]", "type": "Bot"},
+                "sender": {"login": "squadron[bot]", "type": "Bot"},
                 "pull_request": {"number": 10, "labels": [], "head": {"ref": "feat/issue-42"}},
             },
         )
         await r._route_event(event)
 
         assert handler_called.is_set(), "Bot PR opened event must reach handlers"
-
-    async def test_bot_permitted_with_empty_maintainers_list(self, router_no_maintainers, registry):
-        """Bot identity is permitted even when maintainers list is empty."""
-        r, _ = router_no_maintainers
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
-
-        event = GitHubEvent(
-            delivery_id="d-bot-no-maint",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "squadron-dev[bot]", "type": "Bot"},
-                "issue": {"number": 5, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert handler_called.is_set(), "Bot must be permitted even with empty maintainers list"
-
-
-class TestMaintainerFilter:
-    """Tests for the inbound maintainer gate (issue #137)."""
-
-    async def test_listed_maintainer_event_is_processed(self, registry):
-        """Event from a listed maintainer is processed normally."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["alice", "bob"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
-
-        event = GitHubEvent(
-            delivery_id="m-listed-1",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "alice", "type": "User"},
-                "issue": {"number": 10, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert handler_called.is_set(), "Listed maintainer event must be processed"
-
-    async def test_unlisted_user_event_is_dropped(self, registry):
-        """Event from an unlisted user is dropped; no handler is called."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["alice"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
-
-        event = GitHubEvent(
-            delivery_id="m-unlisted-1",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "mallory", "type": "User"},
-                "issue": {"number": 11, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert not handler_called.is_set(), "Unlisted user event must be silently dropped"
-
-    async def test_unlisted_user_comment_is_dropped(self, registry):
-        """Comment from an unlisted user is dropped — no command spawning occurs."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["alice"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_COMMENT, mock_handler)
-
-        event = GitHubEvent(
-            delivery_id="m-unlisted-comment-1",
-            event_type="issue_comment",
-            action="created",
-            payload={
-                "sender": {"login": "attacker", "type": "User"},
-                "issue": {"number": 42, "labels": []},
-                "comment": {"body": "@squadron-dev pm: please spawn an agent"},
-            },
-        )
-        await r._route_event(event)
-        assert not handler_called.is_set(), "Unlisted user command must be silently dropped"
-
-    async def test_unlisted_user_label_event_is_dropped(self, registry):
-        """Label event from an unlisted user does not trigger agent spawning."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["alice"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_LABELED, mock_handler)
-
-        event = GitHubEvent(
-            delivery_id="m-unlisted-label-1",
-            event_type="issues",
-            action="labeled",
-            payload={
-                "sender": {"login": "external-contributor", "type": "User"},
-                "issue": {"number": 20, "labels": [{"name": "feature"}]},
-                "label": {"name": "feature"},
-            },
-        )
-        await r._route_event(event)
-        assert not handler_called.is_set(), "Label event from unlisted user must be dropped"
-
-    async def test_bot_identity_always_permitted(self, registry):
-        """The squadron-dev[bot] identity is always permitted regardless of maintainers list."""
-        # Even with empty maintainers, bot events pass through
-        config = SquadronConfig(project={"name": "test"})
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
-
-        event = GitHubEvent(
-            delivery_id="m-bot-always-1",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "squadron-dev[bot]", "type": "Bot"},
-                "issue": {"number": 30, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert handler_called.is_set(), "Bot identity must always be permitted"
-
-    async def test_empty_maintainers_list_drops_all_human_events(self, registry):
-        """With no maintainers group, all non-bot human events are dropped."""
-        config = SquadronConfig(project={"name": "test"})
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
-
-        event = GitHubEvent(
-            delivery_id="m-empty-1",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "any-human-user", "type": "User"},
-                "issue": {"number": 50, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert not handler_called.is_set(), "Empty maintainers list must drop all human events"
-
-    async def test_maintainer_username_matching_is_case_insensitive(self, registry):
-        """Maintainer username matching is case-insensitive."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["Alice"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
-
-        # Sender login is lowercase, config has uppercase — should still match
-        event = GitHubEvent(
-            delivery_id="m-case-1",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "alice", "type": "User"},
-                "issue": {"number": 60, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert handler_called.is_set(), "Maintainer matching must be case-insensitive"
-
-    async def test_none_sender_event_is_dropped(self, registry):
-        """Events with no sender key in payload are dropped (sender is None)."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["alice"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        handler_called = asyncio.Event()
-
-        async def mock_handler(event: SquadronEvent):
-            handler_called.set()
-
-        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
-
-        # Payload has no "sender" key — event.sender returns None
-        event = GitHubEvent(
-            delivery_id="m-none-sender-1",
-            event_type="issues",
-            action="opened",
-            payload={
-                "issue": {"number": 70, "labels": []},
-            },
-        )
-        await r._route_event(event)
-        assert not handler_called.is_set(), "Event with no sender must be dropped"
-
-    def test_is_actor_permitted_listed_user(self, registry):
-        """_is_actor_permitted returns True for a listed maintainer."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["alice", "bob"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        event = GitHubEvent(
-            delivery_id="perm-1",
-            event_type="issues",
-            action="opened",
-            payload={"sender": {"login": "alice", "type": "User"}, "issue": {"number": 1}},
-        )
-        assert r._is_actor_permitted(event) is True
-
-    def test_is_actor_permitted_unlisted_user(self, registry):
-        """_is_actor_permitted returns False for an unlisted user."""
-        config = SquadronConfig(
-            project={"name": "test"},
-            human_groups={"maintainers": ["alice"]},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        event = GitHubEvent(
-            delivery_id="perm-2",
-            event_type="issues",
-            action="opened",
-            payload={"sender": {"login": "mallory", "type": "User"}, "issue": {"number": 1}},
-        )
-        assert r._is_actor_permitted(event) is False
-
-    def test_is_actor_permitted_bot_identity(self, registry):
-        """_is_actor_permitted returns True for the configured bot identity."""
-        config = SquadronConfig(
-            project={"name": "test", "bot_username": "squadron-dev[bot]"},
-        )
-        queue = asyncio.Queue()
-        r = EventRouter(event_queue=queue, registry=registry, config=config)
-
-        event = GitHubEvent(
-            delivery_id="perm-3",
-            event_type="issues",
-            action="opened",
-            payload={
-                "sender": {"login": "squadron-dev[bot]", "type": "Bot"},
-                "issue": {"number": 1},
-            },
-        )
-        assert r._is_actor_permitted(event) is True
 
 
 class TestDeduplication:

@@ -22,10 +22,7 @@ import pytest_asyncio
 from squadron.agent_manager import AgentManager
 from squadron.config import (
     AgentRoleConfig,
-    AgentTrigger,
     ProjectConfig,
-    ReviewPolicyConfig,
-    ReviewRequirement,
     SquadronConfig,
 )
 from squadron.event_router import EventRouter
@@ -53,7 +50,7 @@ async def registry(tmp_path):
 
 
 def _config_with_commented_trigger() -> SquadronConfig:
-    """Config that includes both changes_requested AND commented triggers."""
+    """Config with feat-dev and pr-review roles."""
     return SquadronConfig(
         project=ProjectConfig(
             name="test-project",
@@ -61,43 +58,12 @@ def _config_with_commented_trigger() -> SquadronConfig:
             repo="testrepo",
             default_branch="main",
         ),
-        human_groups={"maintainers": ["pr-review-bot"]},
-        review_policy=ReviewPolicyConfig(
-            enabled=True,
-            default_requirements=[ReviewRequirement(role="pr-review", count=1)],
-        ),
         agent_roles={
             "feat-dev": AgentRoleConfig(
                 agent_definition="agents/feat-dev.md",
-                triggers=[
-                    AgentTrigger(event="issues.labeled", label="feature"),
-                    AgentTrigger(event="pull_request.opened", action="sleep"),
-                    AgentTrigger(
-                        event="pull_request_review.submitted",
-                        condition={"review_state": "changes_requested"},
-                        action="wake",
-                    ),
-                    AgentTrigger(
-                        event="pull_request_review.submitted",
-                        condition={"review_state": "commented"},
-                        action="wake",
-                    ),
-                    AgentTrigger(
-                        event="pull_request.closed",
-                        condition={"merged": True},
-                        action="complete",
-                    ),
-                ],
             ),
             "pr-review": AgentRoleConfig(
                 agent_definition="agents/pr-review.md",
-                triggers=[
-                    AgentTrigger(
-                        event="pull_request.opened",
-                        condition={"approval_flow": True},
-                    ),
-                    AgentTrigger(event="pull_request.closed", action="complete"),
-                ],
             ),
         },
     )

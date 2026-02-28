@@ -65,6 +65,13 @@ class ActivityEventType(str, enum.Enum):
     WARNING = "warning"
     INFO = "info"
 
+    # Agent session lifecycle (fills diagnostic blind spot between spawn and first tool call)
+    SESSION_CREATED = "session_created"
+    PROMPT_READY = "prompt_ready"
+    MODEL_REQUEST_STARTED = "model_request_started"
+    MODEL_REQUEST_COMPLETED = "model_request_completed"
+    AGENT_HEARTBEAT = "agent_heartbeat"
+
     # Circuit breaker
     CIRCUIT_BREAKER_WARNING = "circuit_breaker_warning"
     CIRCUIT_BREAKER_TRIGGERED = "circuit_breaker_triggered"

@@ -259,22 +259,34 @@ def _infer_role_from_labels(
 ) -> str | None:
     """Try to match issue labels to a configured agent role.
 
-    Uses the trigger config: if a role has a trigger on ``issues.labeled``
-    with a specific label, and the issue has that label, we return the role.
-    Falls back to common label→role mappings.
+    Checks pipeline trigger conditions for label matches first, then falls
+    back to a static label→role heuristic map.
     """
-    # Check configured trigger labels first
-    for role_name, role_config in config.agent_roles.items():
-        for trigger in role_config.triggers:
-            if trigger.label and trigger.label in labels:
-                return role_name
+    # Check pipeline trigger labels — pipelines define triggers with
+    # conditions like {label: "feature"} which map to specific agent stages.
+    # We scan pipeline definitions to find label→role associations.
+    pipeline_defs = config.get_pipeline_definitions()
+    for _name, pdef in pipeline_defs.items():
+        trigger = pdef.get("trigger", {}) if isinstance(pdef, dict) else None
+        if not trigger:
+            continue
+        trigger_label = trigger.get("conditions", {}).get("label")
+        if trigger_label and trigger_label in labels:
+            # Find the first agent stage to determine the role
+            stages = pdef.get("stages", []) if isinstance(pdef, dict) else []
+            for stage in stages:
+                if isinstance(stage, dict) and stage.get("type") == "agent":
+                    agent_role = stage.get("agent")
+                    if agent_role and agent_role in config.agent_roles:
+                        return agent_role
 
-    # Fallback heuristics
+    # Static heuristic — covers common label→role mappings
     LABEL_ROLE_MAP = {
         "feature": "feat-dev",
         "bug": "bug-fix",
         "security": "security-review",
         "docs": "docs-dev",
+        "documentation": "docs-dev",
     }
     for label, role in LABEL_ROLE_MAP.items():
         if label in labels and role in config.agent_roles:

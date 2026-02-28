@@ -362,7 +362,6 @@ class SquadronTools:
         pre_sleep_hook: Callable[[AgentRecord], Awaitable[None]] | None = None,
         git_push_callback: Callable[[AgentRecord, bool], Awaitable[tuple[int, str, str]]]
         | None = None,
-        auto_merge_callback: Callable[[int], Awaitable[None]] | None = None,
         activity_logger: ActivityLogger | None = None,
     ):
         self.registry = registry
@@ -374,7 +373,6 @@ class SquadronTools:
         self.agent_definitions = agent_definitions or {}
         self._pre_sleep_hook = pre_sleep_hook
         self._git_push_callback = git_push_callback
-        self._auto_merge_callback = auto_merge_callback
         self.activity_logger = activity_logger
 
     def _agent_signature(self, role: str) -> str:
@@ -862,39 +860,9 @@ class SquadronTools:
         # Overwrite with normalised value so state_map lookup works
         params = params.model_copy(update={"event": event_upper})
 
-        # Map GitHub event to our approval state
-        state_map = {
-            "APPROVE": "approved",
-            "REQUEST_CHANGES": "changes_requested",
-            "COMMENT": None,  # Comments don't affect approval state
-        }
-        approval_state = state_map.get(params.event.upper())
-
-        # Record approval in database if it's an approval-relevant review
-        merge_status = ""
-        if approval_state:
-            agent = await self.registry.get_agent(agent_id)
-            if agent:
-                await self.registry.record_pr_approval(
-                    pr_number=params.pr_number,
-                    agent_role=agent.role,
-                    agent_id=agent_id,
-                    state=approval_state,
-                    review_body=params.body,
-                )
-
-                # Check if PR is now ready for auto-merge
-                is_ready, missing = await self.registry.check_pr_merge_ready(params.pr_number)
-                if is_ready and self._auto_merge_callback:
-                    logger.info("PR #%d ready for auto-merge, triggering merge", params.pr_number)
-                    try:
-                        await self._auto_merge_callback(params.pr_number)
-                        merge_status = " PR is ready for merge — auto-merge triggered."
-                    except Exception as e:
-                        logger.exception("Auto-merge failed for PR #%d", params.pr_number)
-                        merge_status = f" Auto-merge failed: {e}"
-                elif not is_ready:
-                    merge_status = f" Merge blocked: {', '.join(missing)}"
+        # AD-019: Approval tracking is now handled by pipeline gate checks.
+        # The pipeline registry records approvals and checks merge readiness
+        # through gate stages, not through the submit_pr_review tool.
 
         # Log activity
         agent = await self.registry.get_agent(agent_id)
@@ -909,7 +877,7 @@ class SquadronTools:
             review_id=review_id,
         )
 
-        return f"Submitted {params.event} review (id={review_id}) on PR #{params.pr_number}.{merge_status}"
+        return f"Submitted {params.event} review (id={review_id}) on PR #{params.pr_number}."
 
     async def open_pr(self, agent_id: str, params: OpenPRParams) -> str:
         """Open a new pull request.
@@ -1117,13 +1085,8 @@ class SquadronTools:
         for role_name, role_config in self.config.agent_roles.items():
             lifecycle = role_config.lifecycle if hasattr(role_config, "lifecycle") else "persistent"
             singleton = "yes" if role_config.singleton else "no"
-            trigger_info = ", ".join(
-                f"{t.event}" + (f"[{t.label}]" if t.label else "") for t in role_config.triggers
-            )
             lines.append(f"- **{role_name}** (lifecycle={lifecycle}, singleton={singleton})")
             lines.append(f"  Mention: `@{role_name}` or `/{role_name}`")
-            if trigger_info:
-                lines.append(f"  Triggers: {trigger_info}")
             if role_config.subagents:
                 lines.append(f"  Subagents: {', '.join(role_config.subagents)}")
         return "\n".join(lines)

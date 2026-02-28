@@ -23,7 +23,6 @@ import pytest_asyncio
 
 from squadron.config import (
     AgentRoleConfig,
-    AgentTrigger,
     ProjectConfig,
     SquadronConfig,
 )
@@ -58,7 +57,6 @@ def _minimal_config() -> SquadronConfig:
         agent_roles={
             "feat-dev": AgentRoleConfig(
                 agent_definition="agents/feat-dev.md",
-                triggers=[AgentTrigger(event="issues.labeled", label="feature")],
             ),
         },
     )
@@ -89,7 +87,6 @@ def _make_comment_event(
 
 @pytest_asyncio.fixture
 async def registry(tmp_path):
-
     db_path = str(tmp_path / "test_mail.db")
     reg = AgentRegistry(db_path)
     await reg.initialize()
@@ -264,9 +261,7 @@ class TestDrainMailQueue:
         msg1 = MailMessage(
             sender="alice",
             body="First message",
-            provenance=MessageProvenance(
-                type=MessageProvenanceType.ISSUE_COMMENT, issue_number=42
-            ),
+            provenance=MessageProvenance(type=MessageProvenanceType.ISSUE_COMMENT, issue_number=42),
         )
         msg2 = MailMessage(
             sender="bob",
@@ -286,9 +281,7 @@ class TestDrainMailQueue:
         msg = MailMessage(
             sender="alice",
             body="Test",
-            provenance=MessageProvenance(
-                type=MessageProvenanceType.ISSUE_COMMENT, issue_number=42
-            ),
+            provenance=MessageProvenance(type=MessageProvenanceType.ISSUE_COMMENT, issue_number=42),
         )
         manager.agent_mail_queues[agent_id] = [msg]
 
@@ -378,9 +371,7 @@ class TestFormatMailMessages:
         msg = MailMessage(
             sender="alice",
             body="hello",
-            provenance=MessageProvenance(
-                type=MessageProvenanceType.ISSUE_COMMENT, issue_number=1
-            ),
+            provenance=MessageProvenance(type=MessageProvenanceType.ISSUE_COMMENT, issue_number=1),
         )
         result = manager._format_mail_messages([msg])
         assert "Inbound Messages" in result
@@ -423,9 +414,7 @@ class TestPushDeliveryIntegration:
 
         assert "feat-dev-issue-99" in manager.agent_mail_queues
 
-    async def test_mention_to_active_agent_goes_to_mail_queue(
-        self, manager, registry, tmp_path
-    ):
+    async def test_mention_to_active_agent_goes_to_mail_queue(self, manager, registry, tmp_path):
         """When an ACTIVE agent is mentioned, the message goes to mail_queues."""
         agent = AgentRecord(
             agent_id="feat-dev-issue-42",
@@ -445,7 +434,9 @@ class TestPushDeliveryIntegration:
             sender="alice",
             comment_id=555,
         )
-        await manager._command_wake_or_spawn("feat-dev", manager.config.agent_roles["feat-dev"], event)
+        await manager._command_wake_or_spawn(
+            "feat-dev", manager.config.agent_roles["feat-dev"], event
+        )
 
         # Mail queue should have one message
         mail_queue = manager.agent_mail_queues.get("feat-dev-issue-42", [])
@@ -524,9 +515,7 @@ class TestPushDeliveryIntegration:
             MailMessage(
                 sender="bob",
                 body="Msg 2",
-                provenance=MessageProvenance(
-                    type=MessageProvenanceType.PR_COMMENT, pr_number=3
-                ),
+                provenance=MessageProvenance(type=MessageProvenanceType.PR_COMMENT, pr_number=3),
             ),
         ]
 

@@ -1,5 +1,7 @@
 # Module Map
 
+> **AD-019 MIGRATION NOTE:** The unified pipeline system (see `docs/design/unified-pipeline-system.md`) will delete `src/squadron/workflow/` entirely and replace it with `src/squadron/pipeline/`. The new `pipeline/` module contains: `engine.py` (PipelineEngine), `registry.py` (UnifiedRegistry — merges AgentRegistry + WorkflowRegistryV2), `gates.py` (pluggable gate evaluators), and `stages.py` (stage type executors). When implementing AD-019, delete the entire `workflow/` directory — no backward-compatibility shims.
+
 Every module in `src/squadron/` with its purpose and key exports.
 
 ## Core Modules
@@ -64,6 +66,9 @@ Key exports: `ReconciliationLoop`.
 Server restart recovery — restores agents that were active before the server crashed.
 
 ### `src/squadron/workflow/`
+
+> **LEGACY — will be deleted by AD-019.** This entire directory is replaced by `src/squadron/pipeline/`. The `WorkflowEngine`, `WorkflowRun`, and `WorkflowRegistryV2` are all superseded by the new PipelineEngine and UnifiedRegistry.
+
 Deterministic multi-agent workflow engine.
 Key exports: `WorkflowEngine`, `WorkflowRun`.
 

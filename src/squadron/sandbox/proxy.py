@@ -139,6 +139,7 @@ class ToolProxy:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         """Handle one client connection — reads one JSON request, writes one JSON response."""
+        response: dict[str, Any] = {"ok": False, "error": "no response"}
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=30.0)
             if not line:

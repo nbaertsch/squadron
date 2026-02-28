@@ -284,7 +284,7 @@ class EphemeralWorktree:
                 str(git_worktree),
                 str(info.merged_dir),
                 dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns(".git"),
+                ignore=shutil.ignore_patterns(".git", ".squadron-data"),
             )
         except Exception:
             logger.exception("tmpfs copy failed, sandbox worktree may be incomplete")

@@ -135,3 +135,9 @@ approval_flows:
     - name: security-review
       match_labels: [security]
       reviewers: [security-review]
+
+# Sandbox — namespace-based isolation for agent subprocesses.
+# Requires Linux kernel >= 3.8.  Strongly recommended for any deployment
+# where agents have bash tool access.
+sandbox:
+  enabled: true

@@ -296,3 +296,39 @@ Decisions made during ideation, with rationale.
 - **Iteration detection:** Heuristic — count test runner invocations (pytest, npm test, etc.) via `on_pre_tool_use` hook.
 
 **Detailed research:** [Circuit Breaker Design](research/circuit-breakers.md)
+
+---
+
+## AD-019: Unified Pipeline System — Single Orchestration Primitive
+
+**Status:** Implemented  
+**Decision:** Replace the three parallel orchestration systems (config-driven triggers, Workflow Engine v2, and Review Policy) with a single **unified pipeline system** where pipelines are the sole orchestration primitive. All legacy orchestration code (`triggers`, `review_policy`, `workflows`, Workflow Engine v2) is **removed entirely** — no backward-compatibility shim, no auto-conversion, no deprecation period.
+
+**Rationale:**
+- Three independent systems (triggers, workflow engine, review policy) evolved separately and don't communicate — creating fragmented state, duplicated logic, and critical gaps.
+- Human PR reviews are not tracked by the approval system (`_handle_pr_review_submitted` doesn't call `record_pr_approval()`).
+- The `pr_approval` gate type is declared in the schema but never implemented in the engine.
+- No post-review feedback loop exists: review requests changes → agent woken without structured context.
+- Auto-merge is a callback, not a pipeline stage, making it hard to compose with gates and retries.
+- Two separate registries (`AgentRegistry` + `WorkflowRegistryV2`) with no cross-references.
+- Clean replacement is the correct pattern for refactors — maintaining parallel legacy code creates maintenance burden and confusion.
+
+**Key design elements:**
+- **Seven stage types** — `agent`, `gate`, `human`, `parallel`, `delay`, `action`, `webhook`. The `human` stage is a first-class primitive for human-in-the-loop interactions with notification lifecycle and reminders.
+- **Sub-pipeline composition** — pipelines can invoke other pipelines via `type: pipeline` stages. Max nesting depth of 3. Cycle detection at config load.
+- **Multi-PR pipelines** — `scope: multi-pr` enables cross-PR and cross-repo orchestration with per-PR gate checks.
+- **Pluggable gate check registry** — built-in checks (`pr_approvals_met`, `ci_status`, `command`, `file_exists`, `label_present`, `no_changes_requested`, `human_approved`, `branch_up_to_date`) plus user-extensible via Python modules.
+- **Reactive event subscriptions** — running pipelines react to events (e.g., `pull_request_review.submitted` re-evaluates gate conditions) instead of being fire-and-forget.
+- **Framework-level approval recording** — both agent and human reviews are tracked, closing the human review tracking gap.
+- **Unified `PipelineRegistry`** — single SQLite database for agents, pipeline runs, stages, gate checks, and PR approvals.
+- **Pipeline versioning** — definition snapshotted on start; in-flight pipelines unaffected by config changes.
+- **Configurable gate timeouts** — each gate independently specifies fail, escalate, extend, notify, or cancel behavior.
+
+**Legacy code removed:**
+- `agent_roles.<role>.triggers` config and dispatch logic
+- `review_policy` config section and all related Pydantic models
+- `_auto_merge_pr` callback and `_handle_merge_failure`
+- `src/squadron/workflow/` directory (WorkflowEngine, WorkflowRegistryV2)
+- Old PR approval SQL tables in `registry.py`
+
+**Detailed design:** [Unified Pipeline System](../design/unified-pipeline-system.md)

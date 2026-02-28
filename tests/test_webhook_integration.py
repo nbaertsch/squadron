@@ -51,13 +51,7 @@ async def registry(tmp_path):
 @pytest.fixture
 def config():
     return SquadronConfig(
-        project=ProjectConfig(
-            name="squadron",
-            owner="noahbaertsch",
-            repo="squadron",
-            bot_username="squadron[bot]",
-        ),
-        human_groups={"maintainers": ["noahbaertsch", "reviewer-human"]},
+        project=ProjectConfig(name="squadron", owner="noahbaertsch", repo="squadron"),
     )
 
 

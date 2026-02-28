@@ -5,7 +5,6 @@ Issue #56: Dashboard API endpoints do not enforce authentication
 
 from __future__ import annotations
 
-import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,7 +19,6 @@ from fastapi.testclient import TestClient
 def dashboard_app():
     """Create a FastAPI test app with dashboard router configured."""
     # Import fresh copy of dashboard to avoid module-level state issues
-    import importlib
     import squadron.dashboard as dashboard_mod
 
     # Setup mocks for registry and activity logger
@@ -32,13 +30,15 @@ def dashboard_app():
     mock_activity = MagicMock()
     mock_activity.get_recent_activity = AsyncMock(return_value=[])
     mock_activity.get_agent_activity = AsyncMock(return_value=[])
-    mock_activity.get_agent_stats = AsyncMock(return_value={
-        "agent_id": "test-agent",
-        "total_events": 0,
-        "tool_calls": 0,
-        "errors": 0,
-        "avg_tool_duration_ms": 0.0,
-    })
+    mock_activity.get_agent_stats = AsyncMock(
+        return_value={
+            "agent_id": "test-agent",
+            "total_events": 0,
+            "tool_calls": 0,
+            "errors": 0,
+            "avg_tool_duration_ms": 0.0,
+        }
+    )
 
     dashboard_mod.configure(mock_activity, mock_registry)
 
@@ -128,8 +128,7 @@ class TestAuthEnforcedWhenKeyConfigured:
             headers={"Authorization": "Bearer test-secret-key-12345"},
         )
         assert response.status_code == 200, (
-            f"Expected 200 OK, got {response.status_code}. "
-            "Valid token must be accepted."
+            f"Expected 200 OK, got {response.status_code}. Valid token must be accepted."
         )
 
     def test_activity_succeeds_with_correct_token(self, client_with_key):
@@ -186,7 +185,9 @@ class TestEmptyStringApiKeyBypassRegression:
             "An empty-string key must not bypass authentication."
         )
 
-    def test_security_config_consistent_with_auth_behavior_empty_string(self, client_empty_key, monkeypatch):
+    def test_security_config_consistent_with_auth_behavior_empty_string(
+        self, client_empty_key, monkeypatch
+    ):
         """security config and actual auth behavior must be consistent for empty string.
 
         get_security_config() returns authentication_required: True for empty string
