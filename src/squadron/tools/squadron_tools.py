@@ -912,7 +912,22 @@ class SquadronTools:
         return f"Submitted {params.event} review (id={review_id}) on PR #{params.pr_number}.{merge_status}"
 
     async def open_pr(self, agent_id: str, params: OpenPRParams) -> str:
-        """Open a new pull request."""
+        """Open a new pull request.
+
+        Guard (issue #143): if the agent record already has a pr_number set, an open PR
+        for this issue already exists.  Refuse to create a duplicate and return an
+        explanatory message so the agent pushes to the existing branch instead.
+        """
+        # C3 guard: prevent duplicate PR creation when an existing PR already exists.
+        agent = await self.registry.get_agent(agent_id)
+        if agent and agent.pr_number:
+            return (
+                f"Error: a pull request already exists for this issue "
+                f"(PR #{agent.pr_number}). "
+                "Do NOT open a new PR. Push your commits to the current branch — "
+                "the existing PR will be updated automatically."
+            )
+
         result = await self.github.create_pull_request(
             self.owner,
             self.repo,
@@ -921,11 +936,21 @@ class SquadronTools:
             head=params.head,
             base=params.base,
         )
-        pr_number = result.get("number", "unknown")
+        pr_number = result.get("number")
+        if not isinstance(pr_number, int):
+            logger.error(
+                "GitHub create_pull_request response missing 'number' for agent %s: %r",
+                agent_id,
+                result,
+            )
+            return (
+                "Error: PR was created but GitHub response did not include a PR number. "
+                "Check the repository for a newly opened PR and report this to a maintainer."
+            )
 
-        # Record the PR number on the agent so sleep/wake triggers can match
-        agent = await self.registry.get_agent(agent_id)
-        if agent and isinstance(pr_number, int):
+        # Record the PR number on the agent so sleep/wake triggers can match.
+        # Reuse `agent` from the duplicate-PR guard above (no second get_agent call).
+        if agent:
             agent.pr_number = pr_number
             await self.registry.update_agent(agent)
 
