@@ -148,6 +148,7 @@ class TestSquadronEvent:
             SquadronEventType.PR_REVIEW_SUBMITTED,
             SquadronEventType.PR_REVIEW_COMMENT,
             SquadronEventType.PR_SYNCHRONIZED,
+            SquadronEventType.PR_LABELED,  # pull_request.labeled (issue #141)
             SquadronEventType.PUSH,
         }
         internal_types = {
