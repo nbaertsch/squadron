@@ -99,15 +99,22 @@ def _run_in_ns(cmd: str, ns: str = _NS_NAME) -> tuple[int, str, str]:
     return _run_sync(f"ip netns exec {ns} {cmd}")
 
 
-async def _run_async(cmd: str) -> tuple[int, str, str]:
+async def _run_async(cmd: str, timeout: float = 30) -> tuple[int, str, str]:
     """Run a shell command asynchronously."""
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
-    return proc.returncode, stdout.decode(), stderr.decode()
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    return proc.returncode or 0, stdout.decode(), stderr.decode()
+
+
+async def _run_in_ns_async(
+    cmd: str, ns: str = _NS_NAME, timeout: float = 30
+) -> tuple[int, str, str]:
+    """Run a command inside the network namespace, without blocking the event loop."""
+    return await _run_async(f"ip netns exec {ns} {cmd}", timeout=timeout)
 
 
 class NamespaceFixture:
@@ -400,7 +407,7 @@ class TestNamespaceInfrastructure:
                 driver_path = f.name
 
             try:
-                rc, out, err = _run_in_ns(f"python3 {driver_path}")
+                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip())
@@ -462,7 +469,7 @@ class TestNamespaceInfrastructure:
                 driver_path = f.name
 
             try:
-                rc, out, err = _run_in_ns(f"python3 {driver_path}")
+                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip())
@@ -588,7 +595,7 @@ class TestProxyFromNamespace:
                 driver_path = f.name
 
             try:
-                rc, out, err = _run_in_ns(f"python3 {driver_path}")
+                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip())
@@ -963,7 +970,7 @@ class TestSDKInNamespace:
                 driver_path = f.name
 
             try:
-                rc, out, err = _run_in_ns(f"python3 {driver_path}")
+                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip().split("\n")[-1])
