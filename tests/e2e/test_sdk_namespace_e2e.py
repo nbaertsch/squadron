@@ -185,8 +185,10 @@ class NamespaceFixture:
         # MASQUERADE: allow namespace traffic to reach the internet.
         _run_sync(f"iptables -t nat -A POSTROUTING -s {_SUBNET} ! -d {_SUBNET} -j MASQUERADE")
         # FORWARD: explicitly allow traffic from/to namespace subnet.
-        _run_sync(f"iptables -A FORWARD -s {_SUBNET} -j ACCEPT")
-        _run_sync(f"iptables -A FORWARD -d {_SUBNET} -j ACCEPT")
+        _run_sync(f"iptables -I FORWARD 1 -s {_SUBNET} -j ACCEPT")
+        _run_sync(f"iptables -I FORWARD 1 -d {_SUBNET} -j ACCEPT")
+        # INPUT: allow traffic from namespace to host (bridge IP services).
+        _run_sync(f"iptables -I INPUT 1 -s {_SUBNET} -j ACCEPT")
 
         self._ns_up = True
 
@@ -201,6 +203,7 @@ class NamespaceFixture:
             _run_sync(f"iptables -t nat -D POSTROUTING -s {_SUBNET} ! -d {_SUBNET} -j MASQUERADE")
             _run_sync(f"iptables -D FORWARD -s {_SUBNET} -j ACCEPT")
             _run_sync(f"iptables -D FORWARD -d {_SUBNET} -j ACCEPT")
+            _run_sync(f"iptables -D INPUT -s {_SUBNET} -j ACCEPT")
 
             # Delete namespace (also removes agent end of veth).
             _run_sync(f"ip netns delete {_NS_NAME}")
@@ -231,6 +234,7 @@ class NamespaceFixture:
         _run_sync(f"iptables -t nat -D POSTROUTING -s {_SUBNET} ! -d {_SUBNET} -j MASQUERADE")
         _run_sync(f"iptables -D FORWARD -s {_SUBNET} -j ACCEPT")
         _run_sync(f"iptables -D FORWARD -d {_SUBNET} -j ACCEPT")
+        _run_sync(f"iptables -D INPUT -s {_SUBNET} -j ACCEPT")
 
         # Delete stale namespace / bridge.
         _run_sync(f"ip netns delete {_NS_NAME}")
