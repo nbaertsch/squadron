@@ -750,6 +750,95 @@ class SquadronTools:
             )
             # Surface the error clearly to the agent so it can adapt
             if status_code == 403:
+                # GitHub rejects REQUEST_CHANGES when the reviewer is the PR author
+                # (all Squadron agents share the same bot identity). For REQUEST_CHANGES,
+                # fall back to the label-based blocking strategy: apply a 'needs-changes'
+                # label to the PR and record changes_requested in the internal DB so that
+                # both the GitHub label and the Squadron auto-merge gate block the merge.
+                # Fix for issue #139.
+                if event_upper == "REQUEST_CHANGES":
+                    fallback_parts: list[str] = []
+                    label_applied = False
+
+                    # 1. Ensure 'needs-changes' label exists in the repo, then apply it.
+                    try:
+                        await self.github.ensure_labels_exist(
+                            self.owner,
+                            self.repo,
+                            ["needs-changes"],
+                        )
+                        await self.github.add_labels(
+                            self.owner,
+                            self.repo,
+                            params.pr_number,
+                            ["needs-changes"],
+                        )
+                        fallback_parts.append("applied 'needs-changes' label to the PR")
+                        label_applied = True
+                    except Exception as label_exc:
+                        logger.warning(
+                            "Failed to apply 'needs-changes' label to PR #%d: %s",
+                            params.pr_number,
+                            label_exc,
+                        )
+
+                    # 2. Record changes_requested in the internal DB so auto-merge is blocked.
+                    agent = None
+                    try:
+                        agent = await self.registry.get_agent(agent_id)
+                        if agent:
+                            await self.registry.record_pr_approval(
+                                pr_number=params.pr_number,
+                                agent_role=agent.role,
+                                agent_id=agent_id,
+                                state="changes_requested",
+                                review_body=params.body,
+                            )
+                            fallback_parts.append("recorded changes_requested in internal DB")
+                    except Exception as db_exc:
+                        logger.warning(
+                            "Failed to record changes_requested in DB for PR #%d: %s",
+                            params.pr_number,
+                            db_exc,
+                        )
+
+                    # 3. Log activity (reuse agent from step 2)
+                    try:
+                        await self._log_activity(
+                            agent_id=agent_id,
+                            event_type="github_review",
+                            issue_number=agent.issue_number if agent else None,
+                            pr_number=params.pr_number,
+                            content=(
+                                f"REQUEST_CHANGES rejected (bot-authored PR) — "
+                                f"fallback applied: {', '.join(fallback_parts)}"
+                            ),
+                            tool_name="submit_pr_review",
+                            review_event="REQUEST_CHANGES",
+                            review_id="fallback",
+                        )
+                    except Exception:
+                        pass
+
+                    fallback_summary = (
+                        "; ".join(fallback_parts)
+                        if fallback_parts
+                        else "no fallback actions succeeded"
+                    )
+                    merge_note = (
+                        " The 'needs-changes' label will prevent auto-merge."
+                        if label_applied
+                        else ""
+                    )
+                    return (
+                        f"GitHub rejected REQUEST_CHANGES review on PR #{params.pr_number} "
+                        f"because the reviewer cannot review their own PR (HTTP 403 — "
+                        f"all Squadron agents share the same bot identity). "
+                        f"Fallback applied: {fallback_summary}.{merge_note} "
+                        f"You should notify the PR author via comment_on_pr with "
+                        f"your review feedback."
+                    )
+                # For other events (APPROVE, COMMENT) that get 403, surface as error.
                 return (
                     f"GitHub API error (403 Forbidden) submitting {event_upper} review on "
                     f"PR #{params.pr_number}. The GitHub App may lack 'pull-requests: write' "
@@ -791,7 +880,22 @@ class SquadronTools:
         return f"Submitted {params.event} review (id={review_id}) on PR #{params.pr_number}."
 
     async def open_pr(self, agent_id: str, params: OpenPRParams) -> str:
-        """Open a new pull request."""
+        """Open a new pull request.
+
+        Guard (issue #143): if the agent record already has a pr_number set, an open PR
+        for this issue already exists.  Refuse to create a duplicate and return an
+        explanatory message so the agent pushes to the existing branch instead.
+        """
+        # C3 guard: prevent duplicate PR creation when an existing PR already exists.
+        agent = await self.registry.get_agent(agent_id)
+        if agent and agent.pr_number:
+            return (
+                f"Error: a pull request already exists for this issue "
+                f"(PR #{agent.pr_number}). "
+                "Do NOT open a new PR. Push your commits to the current branch — "
+                "the existing PR will be updated automatically."
+            )
+
         result = await self.github.create_pull_request(
             self.owner,
             self.repo,
@@ -800,11 +904,21 @@ class SquadronTools:
             head=params.head,
             base=params.base,
         )
-        pr_number = result.get("number", "unknown")
+        pr_number = result.get("number")
+        if not isinstance(pr_number, int):
+            logger.error(
+                "GitHub create_pull_request response missing 'number' for agent %s: %r",
+                agent_id,
+                result,
+            )
+            return (
+                "Error: PR was created but GitHub response did not include a PR number. "
+                "Check the repository for a newly opened PR and report this to a maintainer."
+            )
 
-        # Record the PR number on the agent so sleep/wake triggers can match
-        agent = await self.registry.get_agent(agent_id)
-        if agent and isinstance(pr_number, int):
+        # Record the PR number on the agent so sleep/wake triggers can match.
+        # Reuse `agent` from the duplicate-PR guard above (no second get_agent call).
+        if agent:
             agent.pr_number = pr_number
             await self.registry.update_agent(agent)
 

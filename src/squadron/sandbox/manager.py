@@ -2,24 +2,28 @@
 
 Responsibilities:
 1. Start/stop the single AuthBroker instance.
-2. For each agent spawn:
+2. Start/stop the NetworkBridge + InferenceProxy (Issue #146).
+3. Generate and manage the ephemeral CA (Issue #146).
+4. For each agent spawn:
    a. Generate a cryptographic session token.
    b. Register it with the AuthBroker.
    c. Create a ToolProxy (per-agent Unix socket).
-   d. Create an ephemeral sandbox worktree (overlayfs/tmpfs).
-   e. Set up Linux namespaces for the agent subprocess.
-   f. Log the session start to the audit log.
-3. On normal exit:
+   d. Create a veth pair + named network namespace (Issue #146).
+   e. Create an ephemeral sandbox worktree (overlayfs/tmpfs).
+   f. Set up Linux namespaces for the agent subprocess.
+   g. Build a sanitized environment (strip all secrets).
+   h. Log the session start to the audit log.
+5. On normal exit:
    a. Collect and inspect the agent diff.
    b. Log the diff hash to the audit log.
    c. Push via the auth broker (if diff passes inspection).
    d. Wipe the sandbox worktree.
-   e. Tear down the tool proxy.
+   e. Tear down the tool proxy + veth pair.
    f. Unregister the session token.
-4. On abnormal exit:
+6. On abnormal exit:
    a. Preserve the worktree in forensic retention storage.
    b. Log the abnormal event.
-   c. Tear down proxy and unregister token.
+   c. Tear down proxy, veth, and unregister token.
 """
 
 from __future__ import annotations
@@ -27,14 +31,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from squadron.sandbox.audit import SandboxAuditLogger
 from squadron.sandbox.broker import AuthBroker
+from squadron.sandbox.ca import SandboxCA
+from squadron.sandbox.env_scrub import build_sanitized_env, get_dynamic_byok_vars
+from squadron.sandbox.inference_proxy import InferenceProxy, build_credentials_from_env
 from squadron.sandbox.inspector import DiffInspector, InspectionResult, OutputInspector
 from squadron.sandbox.namespace import SandboxNamespace
+from squadron.sandbox.net_bridge import NetworkBridge, VethPair
 from squadron.sandbox.proxy import ToolProxy
 from squadron.sandbox.worktree import EphemeralWorktree, WorktreeInfo
 
@@ -55,14 +63,17 @@ class SandboxSession:
     proxy: ToolProxy
     worktree: WorktreeInfo | None
     namespace: SandboxNamespace
+    veth: VethPair | None = None
+    sanitized_env: dict[str, str] = field(default_factory=dict)
 
 
 class SandboxManager:
     """Manages sandbox sessions for all active agents.
 
-    A single instance is shared by the AgentManager.  The AuthBroker
-    is a long-running async service (started once, stopped with the
-    process).  Everything else is per-agent-session.
+    A single instance is shared by the AgentManager.  The AuthBroker,
+    NetworkBridge, InferenceProxy, and SandboxCA are long-running
+    services (started once, stopped with the process).  Everything else
+    is per-agent-session.
     """
 
     def __init__(
@@ -72,12 +83,17 @@ class SandboxManager:
         repo_root: Path,
         owner: str,
         repo: str,
+        *,
+        provider_type: str = "copilot",
+        provider_api_key_env: str = "",
     ) -> None:
         self._config = config
         self._repo_root = repo_root
         self._owner = owner
         self._repo = repo
         self._enabled = config.enabled
+        self._provider_type = provider_type
+        self._provider_api_key_env = provider_api_key_env
 
         # Shared services (single instances)
         self._broker = AuthBroker(github) if self._enabled else None
@@ -93,20 +109,54 @@ class SandboxManager:
             repo_root / ".squadron-data" / "sandboxes",
         )
 
+        # Issue #146: Network isolation + MitM proxy
+        self._ca = SandboxCA(config.ca_dir, config.ca_validity_days) if self._enabled else None
+        self._bridge = NetworkBridge(config) if self._enabled else None
+        self._inference_proxy: InferenceProxy | None = None
+
         # Active sessions keyed by agent_id
         self._sessions: dict[str, SandboxSession] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start shared services (auth broker, audit log)."""
+        """Start shared services (auth broker, CA, bridge, inference proxy, audit)."""
         if not self._enabled:
             logger.info("SandboxManager: sandbox disabled, using legacy execution")
             return
 
         await self._audit.start()
+
         if self._broker:
             await self._broker.start()
+
+        # Issue #146: Initialize CA, network bridge, and inference proxy.
+        if self._ca:
+            self._ca.ensure_ca()
+            logger.info("SandboxManager: ephemeral CA ready at %s", self._ca.cert_path)
+
+        if self._bridge:
+            bridge_ok = await self._bridge.setup_bridge()
+            if bridge_ok:
+                logger.info("SandboxManager: network bridge up")
+            else:
+                logger.warning(
+                    "SandboxManager: network bridge setup failed — "
+                    "falling back to bare network namespace isolation"
+                )
+
+        # Start inference proxy (only if bridge + CA are active).
+        if self._bridge and self._bridge.is_available and self._ca:
+            credentials = build_credentials_from_env(
+                self._provider_type, self._provider_api_key_env
+            )
+            self._inference_proxy = InferenceProxy(
+                config=self._config,
+                ca=self._ca,
+                credentials=credentials,
+            )
+            await self._inference_proxy.start()
+
         logger.info("SandboxManager started")
 
     async def stop(self) -> None:
@@ -120,6 +170,14 @@ class SandboxManager:
                 await self.teardown_session(agent_id, abnormal=True, reason="manager stopped")
             except Exception:
                 logger.exception("Error tearing down session %s on shutdown", agent_id)
+
+        # Stop inference proxy.
+        if self._inference_proxy:
+            await self._inference_proxy.stop()
+
+        # Tear down network bridge.
+        if self._bridge:
+            await self._bridge.teardown_bridge()
 
         if self._broker:
             await self._broker.stop()
@@ -173,7 +231,7 @@ class SandboxManager:
             issue_number=issue_number,
             session_token=token,
             allowed_tools=allowed_tools,
-            broker=self._broker,
+            broker=self._broker,  # type: ignore[arg-type]  # guaranteed non-None when enabled
             audit=self._audit,
             output_inspector=self._output_inspector,
             config=self._config,
@@ -182,7 +240,16 @@ class SandboxManager:
         )
         await proxy.start()
 
-        # 4. Create ephemeral sandbox worktree
+        # 4. Create veth pair + network namespace (Issue #146)
+        veth: VethPair | None = None
+        use_bridge_net = False
+        if self._bridge and self._bridge.is_available:
+            agent_index = self._bridge.allocate_index()
+            veth = await self._bridge.create_veth(agent_id, agent_index)
+            if veth:
+                use_bridge_net = True
+
+        # 5. Create ephemeral sandbox worktree
         worktree_info = await self._worktree_mgr.create(
             agent_id=agent_id,
             repo_root=self._repo_root,
@@ -190,10 +257,21 @@ class SandboxManager:
             agents_dir=agents_dir,
         )
 
-        # 5. Namespace isolation (applied at subprocess spawn time)
-        namespace = SandboxNamespace(self._config)
+        # 6. Namespace isolation (applied at subprocess spawn time)
+        # When bridge is active, --net is omitted (bridge provides network ns).
+        namespace = SandboxNamespace(self._config, use_bridge_net=use_bridge_net)
 
-        # 6. Audit: log session start
+        # 7. Build sanitized environment (Issue #146 — strip all secrets)
+        extra_strip = get_dynamic_byok_vars(self._provider_api_key_env)
+        sanitized_env = build_sanitized_env(
+            self._config,
+            ca_cert_path=self._ca.cert_path if self._ca else None,
+            socket_path=proxy.socket_path,
+            session_token_hex=token.hex(),
+            extra_strip=extra_strip,
+        )
+
+        # 8. Audit: log session start
         await self._audit.log_session_event(
             agent_id=agent_id,
             session_token=token,
@@ -203,6 +281,9 @@ class SandboxManager:
                 "allowed_tools": allowed_tools,
                 "worktree": str(worktree_info.merged_dir) if worktree_info else None,
                 "socket": str(proxy.socket_path),
+                "veth": veth.host_iface if veth else None,
+                "netns": veth.netns_name if veth else None,
+                "env_scrubbed": True,
             },
         )
 
@@ -213,9 +294,16 @@ class SandboxManager:
             proxy=proxy,
             worktree=worktree_info,
             namespace=namespace,
+            veth=veth,
+            sanitized_env=sanitized_env,
         )
         self._sessions[agent_id] = session
-        logger.info("Sandbox session created for %s", agent_id)
+        logger.info(
+            "Sandbox session created for %s (veth=%s, netns=%s, env_scrubbed=True)",
+            agent_id,
+            veth.host_iface if veth else "none",
+            veth.netns_name if veth else "none",
+        )
         return session
 
     async def inspect_diff_before_push(self, agent_id: str) -> InspectionResult:
@@ -292,6 +380,10 @@ class SandboxManager:
         if session.proxy:
             await session.proxy.stop()
 
+        # Destroy veth pair + network namespace (Issue #146)
+        if session.veth and self._bridge:
+            await self._bridge.destroy_veth(session.veth)
+
         # Unregister session token from broker
         if self._broker and session.session_token:
             self._broker.unregister_session(session.session_token)
@@ -320,12 +412,56 @@ class SandboxManager:
             return session.worktree.merged_dir
         return fallback
 
-    def wrap_agent_command(self, agent_id: str, cmd: list[str]) -> list[str]:
-        """Wrap an agent command with namespace isolation if enabled."""
+    def get_sanitized_env(self, agent_id: str) -> dict[str, str] | None:
+        """Return the sanitized env dict for an agent, or None if no session."""
         session = self._sessions.get(agent_id)
-        if session:
-            return session.namespace.wrap_command(cmd)
-        return cmd
+        if session and session.sanitized_env:
+            return dict(session.sanitized_env)  # defensive copy
+        return None
+
+    def build_standalone_sanitized_env(self) -> dict[str, str] | None:
+        """Build a sanitized env without requiring a full sandbox session.
+
+        Used for lightweight agents (e.g. workflow review agents) that don't
+        need full worktree/proxy isolation but still shouldn't inherit secrets.
+        Returns None when sandbox is disabled.
+        """
+        if not self._enabled:
+            return None
+        extra_strip = get_dynamic_byok_vars(self._provider_api_key_env)
+        return build_sanitized_env(
+            self._config,
+            ca_cert_path=self._ca.cert_path if self._ca else None,
+            extra_strip=extra_strip,
+        )
+
+    def wrap_agent_command(self, agent_id: str, cmd: list[str]) -> list[str]:
+        """Wrap an agent command with namespace + network isolation if enabled.
+
+        When the network bridge is active, the command is first wrapped in
+        ``ip netns exec <netns>`` (network namespace), then in ``unshare``
+        (mount/pid/ipc/uts namespaces — without --net).
+
+        NOTE: This method is currently not called for CopilotClient subprocesses
+        because the Copilot SDK builds and executes the subprocess command
+        internally (no wrapping hook).  Network isolation is provided by the
+        veth bridge + iptables DNAT.  Process namespace isolation requires
+        either a wrapper-script approach or SDK enhancement (tracked as
+        follow-up work).  Env scrubbing + network mediation provide the
+        primary security boundary.
+        """
+        session = self._sessions.get(agent_id)
+        if not session:
+            return cmd
+
+        # Apply other namespace isolation (mount, pid, ipc, uts — no --net).
+        wrapped = session.namespace.wrap_command(cmd)
+
+        # Wrap in network namespace if veth is active.
+        if session.veth and self._bridge:
+            wrapped = self._bridge.wrap_command_in_netns(session.veth, wrapped)
+
+        return wrapped
 
     def get_socket_path(self, agent_id: str) -> Path | None:
         """Return the Unix socket path for an agent proxy (for env injection)."""

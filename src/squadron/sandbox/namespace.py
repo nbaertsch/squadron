@@ -2,6 +2,10 @@
 
 Uses native Linux kernel interfaces only - no third-party dependencies.
 Requires Linux kernel >= 3.8 for namespaces, >= 3.5 for seccomp-bpf.
+
+When a NetworkBridge is active (Issue #146), the ``--net`` namespace flag
+is omitted from ``unshare`` — network isolation is handled by the named
+network namespace (``ip netns exec``) created by the bridge module.
 """
 
 from __future__ import annotations
@@ -194,9 +198,12 @@ class SandboxNamespace:
     original command unchanged.
     """
 
-    def __init__(self, config: SandboxConfig) -> None:
+    def __init__(self, config: SandboxConfig, *, use_bridge_net: bool = False) -> None:
         self._config = config
         self._available = unshare_available() and config.enabled
+        # When True, --net is omitted from unshare because the NetworkBridge
+        # provides network isolation via a named netns instead.
+        self._use_bridge_net = use_bridge_net
 
     def wrap_command(self, cmd: list[str]) -> list[str]:
         """Wrap a command to run inside the configured namespaces.
@@ -219,7 +226,10 @@ class SandboxNamespace:
         if self._config.namespace_pid:
             unshare_args.append("--pid")
             unshare_args.append("--fork")
-        if self._config.namespace_net:
+        if self._config.namespace_net and not self._use_bridge_net:
+            # Only add --net when we're NOT using the bridge-based network
+            # namespace.  When bridge is active, network isolation is
+            # provided by ``ip netns exec`` wrapping (see net_bridge.py).
             unshare_args.append("--net")
         if self._config.namespace_ipc:
             unshare_args.append("--ipc")

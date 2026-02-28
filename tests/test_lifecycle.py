@@ -754,9 +754,14 @@ class TestWipCommitAndPush:
         config.project.owner = "testowner"
         config.project.repo = "testrepo"
         config.agent_roles = {}
+        from squadron.config import ProviderConfig
+
         config.runtime = MagicMock(spec=RuntimeConfig)
         config.runtime.max_concurrent_agents = 5
         config.runtime.worktree_dir = None
+        config.runtime.provider = MagicMock(spec=ProviderConfig)
+        config.runtime.provider.type = "copilot"
+        config.runtime.provider.api_key_env = ""
         config.skills = _SkillsConfig()
 
         registry_mock = AsyncMock(spec=AgentRegistry)
