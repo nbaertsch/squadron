@@ -813,3 +813,602 @@ class TestToolProxy:
         )
         assert not result["ok"]
         assert "sensitive token detected" in result["error"]
+
+
+# -- SandboxCA (Issue #146) ------------------------------------------------
+
+
+class TestSandboxCA:
+    def test_generate_ca(self, tmp_path: Path):
+        from squadron.sandbox.ca import SandboxCA
+
+        ca = SandboxCA(str(tmp_path / "ca"), validity_days=1)
+        ca.ensure_ca()
+        assert ca.cert_path.exists()
+        assert ca.key_path.exists()
+        # Cert should be PEM-encoded
+        cert_content = ca.cert_path.read_text()
+        assert "BEGIN CERTIFICATE" in cert_content
+
+    def test_load_existing_ca(self, tmp_path: Path):
+        from squadron.sandbox.ca import SandboxCA
+
+        ca = SandboxCA(str(tmp_path / "ca"), validity_days=1)
+        ca.ensure_ca()
+        # Load again — should reuse existing files
+        ca2 = SandboxCA(str(tmp_path / "ca"), validity_days=1)
+        ca2.ensure_ca()
+        assert ca2.cert_path.read_bytes() == ca.cert_path.read_bytes()
+
+    def test_sign_leaf_cert(self, tmp_path: Path):
+        from squadron.sandbox.ca import SandboxCA
+
+        ca = SandboxCA(str(tmp_path / "ca"), validity_days=1)
+        ca.ensure_ca()
+        cert_pem, key_pem = ca.sign_leaf("api.anthropic.com")
+        assert b"BEGIN CERTIFICATE" in cert_pem
+        assert b"BEGIN PRIVATE KEY" in key_pem
+
+    def test_sign_leaf_without_init_raises(self, tmp_path: Path):
+        from squadron.sandbox.ca import SandboxCA
+
+        ca = SandboxCA(str(tmp_path / "ca"))
+        with pytest.raises(RuntimeError, match="CA not initialised"):
+            ca.sign_leaf("example.com")
+
+    def test_ca_key_permissions(self, tmp_path: Path):
+        from squadron.sandbox.ca import SandboxCA
+
+        ca = SandboxCA(str(tmp_path / "ca"), validity_days=1)
+        ca.ensure_ca()
+        key_mode = oct(ca.key_path.stat().st_mode)[-3:]
+        assert key_mode == "600", f"CA key should be owner-only, got {key_mode}"
+
+
+# -- NetworkBridge (Issue #146) ---------------------------------------------
+
+
+class TestNetworkBridge:
+    def test_unavailable_on_non_linux(self, tmp_path: Path):
+        from squadron.sandbox.net_bridge import NetworkBridge
+
+        cfg = SandboxConfig(enabled=True)
+        bridge = NetworkBridge(cfg)
+        # On non-Linux (WSL/Windows test runner), bridge may or may not be available.
+        # We test the interface contract: if unavailable, create_veth returns None.
+        if not bridge.is_available:
+            import asyncio
+
+            result = asyncio.get_event_loop().run_until_complete(bridge.create_veth("agent-1", 1))
+            assert result is None
+
+    def test_wrap_command_in_netns_when_unavailable(self, tmp_path: Path):
+        from squadron.sandbox.net_bridge import NetworkBridge, VethPair
+
+        cfg = SandboxConfig(enabled=False)
+        bridge = NetworkBridge(cfg)
+        veth = VethPair(
+            agent_id="test",
+            agent_index=1,
+            host_iface="sq-vh-test",
+            agent_iface="sq-va-test",
+            agent_ip="10.146.1.2",
+            netns_name="sq-ns-test",
+        )
+        cmd = ["python", "agent.py"]
+        # When unavailable, returns original command
+        assert bridge.wrap_command_in_netns(veth, cmd) == cmd
+
+    def test_wrap_command_in_netns_when_available(self, tmp_path: Path):
+        from squadron.sandbox.net_bridge import NetworkBridge, VethPair
+
+        cfg = SandboxConfig(enabled=True)
+        bridge = NetworkBridge(cfg)
+        bridge._available = True  # force available for test
+        veth = VethPair(
+            agent_id="test",
+            agent_index=1,
+            host_iface="sq-vh-test",
+            agent_iface="sq-va-test",
+            agent_ip="10.146.1.2",
+            netns_name="sq-ns-test",
+        )
+        cmd = ["python", "agent.py"]
+        wrapped = bridge.wrap_command_in_netns(veth, cmd)
+        assert wrapped[:4] == ["ip", "netns", "exec", "sq-ns-test"]
+        assert wrapped[4:] == cmd
+
+    def test_allocate_index_monotonic(self, tmp_path: Path):
+        from squadron.sandbox.net_bridge import NetworkBridge
+
+        cfg = SandboxConfig(enabled=True)
+        bridge = NetworkBridge(cfg)
+        assert bridge.allocate_index() == 1
+        assert bridge.allocate_index() == 2
+        assert bridge.allocate_index() == 3
+
+
+# -- Environment Scrubbing (Issue #146) ------------------------------------
+
+
+class TestEnvScrubbing:
+    def test_strips_static_secrets(self, monkeypatch, tmp_path: Path):
+        from squadron.sandbox.env_scrub import build_sanitized_env
+
+        cfg = SandboxConfig()
+        monkeypatch.setenv("GITHUB_APP_ID", "12345")
+        monkeypatch.setenv("GITHUB_PRIVATE_KEY", "secret-key-data")
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghu_abc123")
+        monkeypatch.setenv("SQUADRON_DASHBOARD_API_KEY", "dashboard-key")
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        env = build_sanitized_env(cfg)
+        assert "GITHUB_APP_ID" not in env
+        assert "GITHUB_PRIVATE_KEY" not in env
+        assert "COPILOT_GITHUB_TOKEN" not in env
+        assert "SQUADRON_DASHBOARD_API_KEY" not in env
+        assert env.get("PATH") == "/usr/bin"
+
+    def test_strips_dynamic_byok_vars(self, monkeypatch, tmp_path: Path):
+        from squadron.sandbox.env_scrub import build_sanitized_env
+
+        cfg = SandboxConfig()
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xxx")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-xxx")
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        env = build_sanitized_env(cfg, extra_strip=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"])
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "OPENAI_API_KEY" not in env
+
+    def test_pattern_based_stripping(self, monkeypatch, tmp_path: Path):
+        from squadron.sandbox.env_scrub import build_sanitized_env
+
+        cfg = SandboxConfig()
+        monkeypatch.setenv("CUSTOM_API_KEY", "some-value")
+        monkeypatch.setenv("MY_SECRET_KEY", "hidden")
+        monkeypatch.setenv("SAFE_VARIABLE", "visible")
+
+        env = build_sanitized_env(cfg)
+        assert "CUSTOM_API_KEY" not in env
+        assert "MY_SECRET_KEY" not in env
+        assert "SAFE_VARIABLE" in env
+
+    def test_injects_ca_cert_path(self, tmp_path: Path):
+        from squadron.sandbox.env_scrub import build_sanitized_env
+
+        cfg = SandboxConfig()
+        cert_path = tmp_path / "ca.crt"
+        cert_path.write_text("cert data")
+
+        env = build_sanitized_env(cfg, ca_cert_path=cert_path)
+        assert env["SSL_CERT_FILE"] == str(cert_path)
+        assert env["NODE_EXTRA_CA_CERTS"] == str(cert_path)
+        assert env["REQUESTS_CA_BUNDLE"] == str(cert_path)
+
+    def test_injects_socket_and_token(self, tmp_path: Path):
+        from squadron.sandbox.env_scrub import build_sanitized_env
+
+        cfg = SandboxConfig()
+        socket_path = tmp_path / "agent.sock"
+
+        env = build_sanitized_env(cfg, socket_path=socket_path, session_token_hex="deadbeef")
+        assert env["SQUADRON_PROXY_SOCKET"] == str(socket_path)
+        assert env["SQUADRON_SESSION_TOKEN"] == "deadbeef"
+
+    def test_get_dynamic_byok_vars(self, monkeypatch):
+        from squadron.sandbox.env_scrub import get_dynamic_byok_vars
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+        monkeypatch.setenv("OPENAI_API_KEY", "key2")
+
+        result = get_dynamic_byok_vars("MY_CUSTOM_KEY")
+        assert "MY_CUSTOM_KEY" in result
+        assert "ANTHROPIC_API_KEY" in result
+        assert "OPENAI_API_KEY" in result
+
+    def test_does_not_mutate_os_environ(self, monkeypatch, tmp_path: Path):
+        from squadron.sandbox.env_scrub import build_sanitized_env
+
+        cfg = SandboxConfig()
+        monkeypatch.setenv("GITHUB_APP_ID", "12345")
+        original_id = os.environ.get("GITHUB_APP_ID")
+
+        build_sanitized_env(cfg)
+        # os.environ should be unchanged
+        assert os.environ.get("GITHUB_APP_ID") == original_id
+
+
+# -- InferenceProxy (Issue #146) -------------------------------------------
+
+
+class TestInferenceProxy:
+    def test_credential_injection_anthropic(self):
+        from squadron.sandbox.inference_proxy import InferenceProxy
+
+        cfg = SandboxConfig(enabled=True)
+        mock_ca = MagicMock()
+        proxy = InferenceProxy(
+            config=cfg,
+            ca=mock_ca,
+            credentials={"anthropic_key": "sk-ant-test"},
+        )
+        headers = proxy._inject_credentials(
+            "api.anthropic.com", {"host": "api.anthropic.com", "content-type": "application/json"}
+        )
+        assert headers["x-api-key"] == "sk-ant-test"
+        assert "authorization" not in headers
+
+    def test_credential_injection_openai(self):
+        from squadron.sandbox.inference_proxy import InferenceProxy
+
+        cfg = SandboxConfig(enabled=True)
+        proxy = InferenceProxy(
+            config=cfg, ca=MagicMock(), credentials={"openai_key": "sk-openai-test"}
+        )
+        headers = proxy._inject_credentials("api.openai.com", {"host": "api.openai.com"})
+        assert headers["authorization"] == "Bearer sk-openai-test"
+
+    def test_credential_injection_copilot(self):
+        from squadron.sandbox.inference_proxy import InferenceProxy
+
+        cfg = SandboxConfig(enabled=True)
+        proxy = InferenceProxy(
+            config=cfg, ca=MagicMock(), credentials={"copilot_token": "ghu_test"}
+        )
+        headers = proxy._inject_credentials(
+            "api.githubcopilot.com", {"host": "api.githubcopilot.com"}
+        )
+        assert headers["authorization"] == "Bearer ghu_test"
+
+    def test_strips_existing_auth_headers(self):
+        from squadron.sandbox.inference_proxy import InferenceProxy
+
+        cfg = SandboxConfig(enabled=True)
+        proxy = InferenceProxy(config=cfg, ca=MagicMock(), credentials={})
+        headers = proxy._inject_credentials(
+            "unknown.host.com",
+            {"authorization": "Bearer leaked-token", "x-api-key": "leaked-key"},
+        )
+        # Without credentials for this host, auth headers should be stripped
+        assert "authorization" not in headers
+        assert "x-api-key" not in headers
+
+    def test_byok_fallback_injection(self):
+        from squadron.sandbox.inference_proxy import InferenceProxy
+
+        cfg = SandboxConfig(enabled=True)
+        proxy = InferenceProxy(
+            config=cfg, ca=MagicMock(), credentials={"byok_key": "sk-custom-123"}
+        )
+        headers = proxy._inject_credentials(
+            "custom-provider.example.com", {"host": "custom-provider.example.com"}
+        )
+        assert headers["authorization"] == "Bearer sk-custom-123"
+
+    def test_build_credentials_from_env(self, monkeypatch):
+        from squadron.sandbox.inference_proxy import build_credentials_from_env
+
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghu_copilot")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xxx")
+
+        creds = build_credentials_from_env("copilot", "")
+        assert creds["copilot_token"] == "ghu_copilot"
+        assert creds["anthropic_key"] == "sk-ant-xxx"
+
+    def test_build_credentials_byok_anthropic(self, monkeypatch):
+        from squadron.sandbox.inference_proxy import build_credentials_from_env
+
+        monkeypatch.setenv("MY_KEY", "sk-ant-custom")
+        monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        creds = build_credentials_from_env("anthropic", "MY_KEY")
+        assert creds["anthropic_key"] == "sk-ant-custom"
+        assert "copilot_token" not in creds
+
+    def test_build_credentials_byok_openai(self, monkeypatch):
+        from squadron.sandbox.inference_proxy import build_credentials_from_env
+
+        monkeypatch.setenv("MY_KEY", "sk-openai-custom")
+        monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        creds = build_credentials_from_env("openai", "MY_KEY")
+        assert creds["openai_key"] == "sk-openai-custom"
+
+
+# -- SandboxNamespace (Issue #146 — bridge integration) --------------------
+
+
+class TestSandboxNamespaceBridge:
+    """Tests for the bridge_net flag added in Issue #146."""
+
+    def test_bridge_net_omits_net_flag(self):
+        cfg = SandboxConfig(
+            enabled=True,
+            namespace_net=True,
+        )
+        ns = SandboxNamespace(cfg, use_bridge_net=True)
+        ns._available = True
+        wrapped = ns.wrap_command(["python", "agent.py"])
+        # --net should NOT be in the command when bridge handles networking
+        assert "--net" not in wrapped
+        # Other ns flags should still be present
+        assert "--mount" in wrapped
+        assert "--pid" in wrapped
+
+    def test_no_bridge_net_includes_net_flag(self):
+        cfg = SandboxConfig(
+            enabled=True,
+            namespace_net=True,
+        )
+        ns = SandboxNamespace(cfg, use_bridge_net=False)
+        ns._available = True
+        wrapped = ns.wrap_command(["python", "agent.py"])
+        # --net SHOULD be present when bridge is not active
+        assert "--net" in wrapped
+
+
+# -- SandboxConfig (Issue #146 — new fields) --------------------------------
+
+
+class TestSandboxConfigIssue146:
+    def test_new_defaults(self):
+        cfg = SandboxConfig()
+        assert cfg.bridge_name == "sq-br0"
+        assert cfg.bridge_subnet == "10.146.0.0/16"
+        assert cfg.bridge_ip == "10.146.0.1"
+        assert cfg.proxy_port == 8443
+        assert cfg.ca_dir == "/tmp/squadron-ca"
+        assert cfg.ca_validity_days == 1
+        assert "GITHUB_APP_ID" in cfg.secret_env_vars
+        assert "COPILOT_GITHUB_TOKEN" in cfg.secret_env_vars
+        assert "SQUADRON_DASHBOARD_API_KEY" in cfg.secret_env_vars
+
+    def test_custom_bridge_config(self):
+        cfg = SandboxConfig(
+            bridge_name="custom-br0",
+            bridge_subnet="172.20.0.0/24",
+            bridge_ip="172.20.0.1",
+            proxy_port=9443,
+        )
+        assert cfg.bridge_name == "custom-br0"
+        assert cfg.bridge_subnet == "172.20.0.0/24"
+        assert cfg.proxy_port == 9443
+
+
+# -- SandboxManager (Issue #146 — integration) -----------------------------
+
+
+class TestSandboxManagerIssue146:
+    @pytest.mark.asyncio
+    async def test_session_creates_sanitized_env(self, tmp_path: Path, monkeypatch):
+        """When sandbox is enabled, sessions should have sanitized env."""
+        monkeypatch.setenv("GITHUB_APP_ID", "12345")
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghu_test")
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        cfg = SandboxConfig(
+            enabled=True,
+            retention_path=str(tmp_path / "forensics"),
+            socket_dir=str(tmp_path / "sockets"),
+            use_overlayfs=False,
+            ca_dir=str(tmp_path / "ca"),
+        )
+        mock_github = MagicMock()
+        from squadron.sandbox.manager import SandboxManager
+
+        mgr = SandboxManager(
+            config=cfg,
+            github=mock_github,
+            repo_root=tmp_path,
+            owner="org",
+            repo="repo",
+            provider_type="copilot",
+            provider_api_key_env="",
+        )
+
+        # Mock infrastructure so we don't need real Linux networking.
+        mgr._bridge = MagicMock()
+        mgr._bridge.is_available = False  # Skip bridge/proxy creation
+        mgr._bridge.setup_bridge = AsyncMock(return_value=False)
+        mgr._bridge.teardown_bridge = AsyncMock()
+
+        # Start manager (CA will init; bridge/proxy are mocked).
+        await mgr.start()
+        try:
+            # Mock the components that create_session calls internally.
+            # ToolProxy — mock so it doesn't bind a real Unix socket.
+            mock_proxy = MagicMock()
+            mock_proxy.start = AsyncMock()
+            mock_proxy.stop = AsyncMock()
+            mock_proxy.socket_path = str(tmp_path / "sockets" / "test-agent-1.sock")
+            monkeypatch.setattr(
+                "squadron.sandbox.manager.ToolProxy",
+                lambda **kwargs: mock_proxy,
+            )
+
+            # EphemeralWorktree — mock so it doesn't create real overlayfs.
+            mgr._worktree_mgr = MagicMock()
+            mgr._worktree_mgr.create = AsyncMock(return_value=None)
+            mgr._worktree_mgr.wipe = AsyncMock()
+
+            # AuthBroker — mock registration.
+            mgr._broker = MagicMock()
+            mgr._broker.register_session = MagicMock()
+            mgr._broker.unregister_session = MagicMock()
+            mgr._broker.stop = AsyncMock()
+
+            worktree_dir = tmp_path / "worktree"
+            worktree_dir.mkdir()
+            agents_dir = tmp_path / "agents"
+            agents_dir.mkdir()
+
+            session = await mgr.create_session(
+                agent_id="test-agent-1",
+                issue_number=42,
+                allowed_tools=["read_issue"],
+                git_worktree=worktree_dir,
+                agents_dir=agents_dir,
+            )
+
+            # Session should have sanitized env
+            assert session.sanitized_env
+            assert "GITHUB_APP_ID" not in session.sanitized_env
+            assert "COPILOT_GITHUB_TOKEN" not in session.sanitized_env
+            assert session.sanitized_env.get("PATH") == "/usr/bin"
+            # CA cert should be injected
+            assert "SSL_CERT_FILE" in session.sanitized_env
+
+            # get_sanitized_env should return a copy
+            env = mgr.get_sanitized_env("test-agent-1")
+            assert env is not None
+            assert "GITHUB_APP_ID" not in env
+        finally:
+            await mgr.teardown_session("test-agent-1")
+            await mgr.stop()
+
+    @pytest.mark.asyncio
+    async def test_disabled_sandbox_no_env(self, tmp_path: Path):
+        """When sandbox is disabled, sessions have empty sanitized env."""
+        cfg = SandboxConfig(
+            enabled=False,
+            retention_path=str(tmp_path / "forensics"),
+            socket_dir=str(tmp_path / "sockets"),
+        )
+        from squadron.sandbox.manager import SandboxManager
+
+        mgr = SandboxManager(
+            config=cfg,
+            github=MagicMock(),
+            repo_root=tmp_path,
+            owner="org",
+            repo="repo",
+        )
+        await mgr.start()
+        try:
+            session = await mgr.create_session(
+                agent_id="test-agent-2",
+                issue_number=42,
+                allowed_tools=[],
+                git_worktree=tmp_path,
+                agents_dir=tmp_path,
+            )
+            # Disabled sandbox: empty sanitized_env (passthrough)
+            assert session.sanitized_env == {}
+        finally:
+            await mgr.teardown_session("test-agent-2")
+            await mgr.stop()
+
+
+# -- CopilotAgent env parameter (Issue #146) --------------------------------
+
+
+class TestCopilotAgentEnv:
+    def test_env_parameter_stored(self):
+        from unittest.mock import MagicMock
+
+        from squadron.copilot import CopilotAgent
+
+        mock_config = MagicMock()
+        agent = CopilotAgent(
+            runtime_config=mock_config,
+            working_directory="/tmp/test",
+            env={"PATH": "/usr/bin", "HOME": "/home/agent"},
+        )
+        assert agent._env is not None
+        assert agent._env["PATH"] == "/usr/bin"
+        assert "GITHUB_APP_ID" not in agent._env
+
+    def test_env_none_by_default(self):
+        from unittest.mock import MagicMock
+
+        from squadron.copilot import CopilotAgent
+
+        agent = CopilotAgent(
+            runtime_config=MagicMock(),
+            working_directory="/tmp/test",
+        )
+        assert agent._env is None
+
+    def test_github_token_captured_from_host_env(self, monkeypatch):
+        """CopilotAgent should capture COPILOT_GITHUB_TOKEN from host env."""
+        from unittest.mock import MagicMock
+
+        from squadron.copilot import CopilotAgent
+
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghu_test_token_123")
+        agent = CopilotAgent(
+            runtime_config=MagicMock(),
+            working_directory="/tmp/test",
+            env={"PATH": "/usr/bin"},  # sanitized env without token
+        )
+        # Token should be captured from host env, not from sanitized env
+        assert agent._github_token == "ghu_test_token_123"
+        # But should NOT be in the sanitized subprocess env
+        assert "COPILOT_GITHUB_TOKEN" not in agent._env
+
+    def test_github_token_none_when_unset(self, monkeypatch):
+        """When COPILOT_GITHUB_TOKEN is not set, _github_token should be None."""
+        from unittest.mock import MagicMock
+
+        from squadron.copilot import CopilotAgent
+
+        monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
+        agent = CopilotAgent(
+            runtime_config=MagicMock(),
+            working_directory="/tmp/test",
+        )
+        assert agent._github_token is None
+
+
+class TestStandaloneSanitizedEnv:
+    """Test build_standalone_sanitized_env() for lightweight agents."""
+
+    def test_returns_none_when_disabled(self, tmp_path: Path):
+        from squadron.sandbox.manager import SandboxManager
+
+        cfg = SandboxConfig(
+            enabled=False,
+            retention_path=str(tmp_path / "forensics"),
+            socket_dir=str(tmp_path / "sockets"),
+        )
+        mgr = SandboxManager(
+            config=cfg,
+            github=MagicMock(),
+            repo_root=tmp_path,
+            owner="org",
+            repo="repo",
+        )
+        assert mgr.build_standalone_sanitized_env() is None
+
+    def test_returns_scrubbed_env_when_enabled(self, tmp_path: Path, monkeypatch):
+        from squadron.sandbox.manager import SandboxManager
+
+        monkeypatch.setenv("GITHUB_APP_ID", "12345")
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "ghu_secret")
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        cfg = SandboxConfig(
+            enabled=True,
+            retention_path=str(tmp_path / "forensics"),
+            socket_dir=str(tmp_path / "sockets"),
+            ca_dir=str(tmp_path / "ca"),
+        )
+        mgr = SandboxManager(
+            config=cfg,
+            github=MagicMock(),
+            repo_root=tmp_path,
+            owner="org",
+            repo="repo",
+            provider_type="copilot",
+            provider_api_key_env="",
+        )
+        env = mgr.build_standalone_sanitized_env()
+        assert env is not None
+        assert "GITHUB_APP_ID" not in env
+        assert "COPILOT_GITHUB_TOKEN" not in env
+        assert env.get("PATH") == "/usr/bin"

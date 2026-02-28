@@ -23,9 +23,15 @@ WORKDIR /app
 # Install system dependencies
 # git: needed for worktree operations
 # ripgrep: fast code search used by agents (rg) - closes #98
+# util-linux: unshare for namespace isolation (sandbox)
+# iproute2: ip/veth for network namespace bridge (sandbox)
+# iptables: traffic redirection to MitM proxy (sandbox)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         ripgrep \
+        util-linux \
+        iproute2 \
+        iptables \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy venv from builder

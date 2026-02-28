@@ -112,6 +112,8 @@ class AgentManager:
             repo_root=repo_root,
             owner=config.project.owner,
             repo=config.project.repo,
+            provider_type=config.runtime.provider.type,
+            provider_api_key_env=config.runtime.provider.api_key_env,
         )
 
         # Track watchdog success/failure for monitoring (fix for issue #51)
@@ -943,9 +945,12 @@ class AgentManager:
         )
 
         # Create CopilotAgent instance (one CLI subprocess per agent)
+        # Issue #146: pass sanitized env to isolate secrets from agent subprocess.
+        sanitized_env = self._sandbox.get_sanitized_env(agent_id)
         copilot = CopilotAgent(
             runtime_config=self.config.runtime,
             working_directory=str(sandbox_working_dir),
+            env=sanitized_env,
         )
         await copilot.start()
         self._copilot_agents[agent_id] = copilot
@@ -1043,6 +1048,7 @@ class AgentManager:
             copilot = CopilotAgent(
                 runtime_config=self.config.runtime,
                 working_directory=str(working_directory),
+                env=self._sandbox.get_sanitized_env(agent_id),
             )
             await copilot.start()
             self._copilot_agents[agent_id] = copilot
@@ -1186,6 +1192,7 @@ class AgentManager:
         copilot = CopilotAgent(
             runtime_config=self.config.runtime,
             working_directory=str(self.repo_root),
+            env=self._sandbox.build_standalone_sanitized_env(),
         )
         await copilot.start()
         self._copilot_agents[agent_id] = copilot

@@ -409,7 +409,7 @@ workflows:
       event: issues.labeled
 
 sandbox:
-  enabled: false  # Set to true in production; requires Linux kernel >= 3.8
+  enabled: true  # Requires Linux kernel >= 3.8
   # Namespace isolation (native Linux kernel, no third-party deps)
   namespace_mount: true
   namespace_pid: true

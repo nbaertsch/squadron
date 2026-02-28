@@ -38,6 +38,10 @@ from squadron.config import RuntimeConfig
 logger = logging.getLogger(__name__)
 
 
+# Environment variable holding the Copilot GitHub token.
+COPILOT_GITHUB_TOKEN_ENV = "COPILOT_GITHUB_TOKEN"
+
+
 class CopilotAgent:
     """Manages a CopilotClient instance for a single agent.
 
@@ -45,9 +49,21 @@ class CopilotAgent:
     Handles session creation, resumption, and cleanup.
     """
 
-    def __init__(self, runtime_config: RuntimeConfig, working_directory: str):
+    def __init__(
+        self,
+        runtime_config: RuntimeConfig,
+        working_directory: str,
+        env: dict[str, str] | None = None,
+    ):
         self.runtime_config = runtime_config
         self.working_directory = working_directory
+        self._env = env  # Sanitized env for subprocess (Issue #146)
+        # Capture the GitHub token from the *host* process env before it
+        # gets stripped from the sanitized subprocess env.  The SDK passes
+        # this to the CLI binary via COPILOT_SDK_AUTH_TOKEN (a different
+        # env var name), so it works even when COPILOT_GITHUB_TOKEN is
+        # stripped from the agent namespace.  (Issue #146 / #124)
+        self._github_token: str | None = os.environ.get(COPILOT_GITHUB_TOKEN_ENV)
         self._client: CopilotClient | None = None
         self._session: SDKSession | None = None
 
@@ -56,13 +72,27 @@ class CopilotAgent:
 
         Includes retry logic for transient ping verification timeouts
         during startup (Issue #38).
+
+        When a sanitized env dict is provided (Issue #146), it is passed
+        to the CopilotClient so the CLI subprocess inherits only the
+        scrubbed environment — no API keys, tokens, or secrets.
+
+        The github_token is passed separately via the SDK's built-in
+        mechanism (--auth-token-env COPILOT_SDK_AUTH_TOKEN), so it does
+        NOT need to be in the subprocess env.
         """
         max_retries = 3
         retry_delay = 2.0  # seconds
 
+        client_opts: dict[str, Any] = {"cwd": self.working_directory}
+        if self._env is not None:
+            client_opts["env"] = self._env
+        if self._github_token:
+            client_opts["github_token"] = self._github_token
+
         for attempt in range(max_retries + 1):
             try:
-                self._client = CopilotClient({"cwd": self.working_directory})
+                self._client = CopilotClient(client_opts)
                 await self._client.start()
                 logger.info("CopilotClient started (cwd=%s)", self.working_directory)
                 return
