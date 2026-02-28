@@ -54,6 +54,7 @@ def _example_config() -> SquadronConfig:
             repo="testrepo",
             default_branch="main",
         ),
+        human_groups={"maintainers": ["humanuser", "humandev"]},
         approval_flows=ApprovalFlowConfig(
             enabled=True,
             default_reviewers=["pr-review"],
@@ -318,7 +319,7 @@ class TestHappyPathFlow:
                 action="opened",
                 pr_number=10,
                 issue_number=42,
-                sender="squadron[bot]",
+                sender="squadron-dev[bot]",
             )
             await router._route_event(event)
 

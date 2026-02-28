@@ -22,13 +22,16 @@ async def registry(tmp_path):
 
 @pytest.fixture
 def config():
-    """Config with 'alice' in the maintainers list for tests that use human senders."""
-    return SquadronConfig(project={"name": "test"}, maintainers=["alice"])
+    """Config with 'alice' in the maintainers group for tests that use human senders."""
+    return SquadronConfig(
+        project={"name": "test"},
+        human_groups={"maintainers": ["alice"]},
+    )
 
 
 @pytest.fixture
 def config_no_maintainers():
-    """Config with an empty maintainers list — only bot events are permitted."""
+    """Config with no maintainers group — only bot events are permitted."""
     return SquadronConfig(project={"name": "test"})
 
 
@@ -167,9 +170,7 @@ class TestBotEvents:
 
         assert handler_called.is_set(), "Bot PR opened event must reach handlers"
 
-    async def test_bot_permitted_with_empty_maintainers_list(
-        self, router_no_maintainers, registry
-    ):
+    async def test_bot_permitted_with_empty_maintainers_list(self, router_no_maintainers, registry):
         """Bot identity is permitted even when maintainers list is empty."""
         r, _ = router_no_maintainers
         handler_called = asyncio.Event()
@@ -197,7 +198,10 @@ class TestMaintainerFilter:
 
     async def test_listed_maintainer_event_is_processed(self, registry):
         """Event from a listed maintainer is processed normally."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=["alice", "bob"])
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["alice", "bob"]},
+        )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -222,7 +226,10 @@ class TestMaintainerFilter:
 
     async def test_unlisted_user_event_is_dropped(self, registry):
         """Event from an unlisted user is dropped; no handler is called."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=["alice"])
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["alice"]},
+        )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -247,7 +254,10 @@ class TestMaintainerFilter:
 
     async def test_unlisted_user_comment_is_dropped(self, registry):
         """Comment from an unlisted user is dropped — no command spawning occurs."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=["alice"])
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["alice"]},
+        )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -273,7 +283,10 @@ class TestMaintainerFilter:
 
     async def test_unlisted_user_label_event_is_dropped(self, registry):
         """Label event from an unlisted user does not trigger agent spawning."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=["alice"])
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["alice"]},
+        )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -300,7 +313,7 @@ class TestMaintainerFilter:
     async def test_bot_identity_always_permitted(self, registry):
         """The squadron-dev[bot] identity is always permitted regardless of maintainers list."""
         # Even with empty maintainers, bot events pass through
-        config = SquadronConfig(project={"name": "test"}, maintainers=[])
+        config = SquadronConfig(project={"name": "test"})
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -324,8 +337,8 @@ class TestMaintainerFilter:
         assert handler_called.is_set(), "Bot identity must always be permitted"
 
     async def test_empty_maintainers_list_drops_all_human_events(self, registry):
-        """With an empty maintainers list, all non-bot human events are dropped."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=[])
+        """With no maintainers group, all non-bot human events are dropped."""
+        config = SquadronConfig(project={"name": "test"})
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -350,7 +363,10 @@ class TestMaintainerFilter:
 
     async def test_maintainer_username_matching_is_case_insensitive(self, registry):
         """Maintainer username matching is case-insensitive."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=["Alice"])
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["Alice"]},
+        )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -374,9 +390,40 @@ class TestMaintainerFilter:
         await r._route_event(event)
         assert handler_called.is_set(), "Maintainer matching must be case-insensitive"
 
+    async def test_none_sender_event_is_dropped(self, registry):
+        """Events with no sender key in payload are dropped (sender is None)."""
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["alice"]},
+        )
+        queue = asyncio.Queue()
+        r = EventRouter(event_queue=queue, registry=registry, config=config)
+
+        handler_called = asyncio.Event()
+
+        async def mock_handler(event: SquadronEvent):
+            handler_called.set()
+
+        r.on(SquadronEventType.ISSUE_OPENED, mock_handler)
+
+        # Payload has no "sender" key — event.sender returns None
+        event = GitHubEvent(
+            delivery_id="m-none-sender-1",
+            event_type="issues",
+            action="opened",
+            payload={
+                "issue": {"number": 70, "labels": []},
+            },
+        )
+        await r._route_event(event)
+        assert not handler_called.is_set(), "Event with no sender must be dropped"
+
     def test_is_actor_permitted_listed_user(self, registry):
         """_is_actor_permitted returns True for a listed maintainer."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=["alice", "bob"])
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["alice", "bob"]},
+        )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -390,7 +437,10 @@ class TestMaintainerFilter:
 
     def test_is_actor_permitted_unlisted_user(self, registry):
         """_is_actor_permitted returns False for an unlisted user."""
-        config = SquadronConfig(project={"name": "test"}, maintainers=["alice"])
+        config = SquadronConfig(
+            project={"name": "test"},
+            human_groups={"maintainers": ["alice"]},
+        )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)
 
@@ -405,7 +455,7 @@ class TestMaintainerFilter:
     def test_is_actor_permitted_bot_identity(self, registry):
         """_is_actor_permitted returns True for the configured bot identity."""
         config = SquadronConfig(
-            project={"name": "test", "bot_username": "squadron-dev[bot]"}, maintainers=[]
+            project={"name": "test", "bot_username": "squadron-dev[bot]"},
         )
         queue = asyncio.Queue()
         r = EventRouter(event_queue=queue, registry=registry, config=config)

@@ -83,6 +83,19 @@ class EventRouter:
             commands=config.commands,
         )
 
+        # Pre-compute lowercased maintainers set for fast permit checks
+        self._maintainers_lower: frozenset[str] = frozenset(m.lower() for m in config.maintainers)
+
+        # Warn at startup if no maintainers are configured — all human events
+        # will be silently dropped, which is a common misconfiguration.
+        if not self._maintainers_lower:
+            logger.warning(
+                "human_groups.maintainers is empty — all human-triggered events "
+                "will be dropped. Add at least one username to "
+                "human_groups.maintainers in .squadron/config.yaml to allow "
+                "human interaction."
+            )
+
         # Handler callbacks, registered by the Agent Manager
         self._handlers: dict[
             SquadronEventType, list[Callable[[SquadronEvent], Awaitable[None]]]
@@ -140,12 +153,15 @@ class EventRouter:
         Permit rules (in order):
         1. The configured bot identity (project.bot_username) is **always** permitted
            to avoid self-blocking on bot-generated events.
-        2. Any actor whose login appears in the maintainers list is permitted.
+        2. Any actor whose login appears in human_groups.maintainers is permitted.
         3. All other actors are denied — the event is silently dropped.
 
-        When the maintainers list is empty, only the bot identity is permitted;
-        all human-originated events are dropped until at least one maintainer is added
-        to the config.
+        When human_groups.maintainers is empty (or absent), only the bot identity
+        is permitted; all human-originated events are dropped until at least one
+        maintainer is added to the config.
+
+        Note: events with no sender (e.g. some CI integrations) are treated as
+        unauthorized and silently dropped.
 
         Args:
             event: The raw GitHub event containing sender information.
@@ -160,16 +176,14 @@ class EventRouter:
         if bot_username and sender_login == bot_username:
             return True
 
-        # Rule 2: actor must be in the maintainers list
-        maintainers_lower = {m.lower() for m in self.config.maintainers}
-        if sender_login in maintainers_lower:
+        # Rule 2: actor must be in the maintainers list (cached frozenset)
+        if sender_login and sender_login in self._maintainers_lower:
             return True
 
         # Rule 3: denied — log and drop
-        issue_or_pr = (
-            event.payload.get("issue", {}).get("number")
-            or event.payload.get("pull_request", {}).get("number")
-        )
+        issue_or_pr = event.payload.get("issue", {}).get("number") or event.payload.get(
+            "pull_request", {}
+        ).get("number")
         logger.info(
             "Dropping event: actor not in maintainers list "
             "(actor=%s, event_type=%s, issue/pr=#%s, reason=actor not in maintainers list)",
@@ -181,6 +195,9 @@ class EventRouter:
 
     async def _route_event(self, event: GitHubEvent) -> None:
         """Route a single GitHub event.
+
+        Events from senders not in human_groups.maintainers (or the configured
+        bot identity) are silently dropped before routing.
 
         Structural events (PR, label, issue lifecycle) are routed via
         config-driven triggers.  Comment events are routed via command
