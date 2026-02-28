@@ -328,3 +328,65 @@ class TestRequestChangesFallbackPartialFailure:
             f"Return message must not claim label blocks merges when no fallback "
             f"actions succeeded. Got: {result!r}"
         )
+
+
+class TestReturnMessageAccuracy:
+    """Additional regression tests for issue #140: return message accuracy."""
+
+    async def test_return_message_does_not_claim_phantom_notification(self, registry):
+        """The return message must NOT claim the PR author will be notified
+        via comment_on_pr when no such call is made in the fallback code path."""
+        github = _make_github_mock()
+        github.submit_pr_review = AsyncMock(side_effect=_make_403_error())
+
+        tools = _make_tools(registry, github)
+        await _register_agent(registry, pr_number=42)
+
+        result = await tools.submit_pr_review(
+            "pr-review-issue-99",
+            SubmitPRReviewParams(
+                pr_number=42,
+                body="Issues found.",
+                event="REQUEST_CHANGES",
+            ),
+        )
+
+        # Must NOT claim the author will be notified — no such call is made
+        phantom_phrases = [
+            "will be notified via comment_on_pr",
+            "author agent will be notified",
+        ]
+        for phrase in phantom_phrases:
+            assert phrase not in result, (
+                f"Return message must NOT claim '{phrase}' — no comment_on_pr call is "
+                f"made in the 403 fallback path (issue #140). "
+                f"Got: {result!r}"
+            )
+
+        # Verify comment_on_pr was never called in the fallback
+        github.comment_on_pr.assert_not_called()
+
+    async def test_lowercase_event_reaches_403_fallback(self, registry):
+        """Guard against LLM case variation: 'request_changes' (lowercase) must
+        also trigger the 403 fallback, not the APPROVE/COMMENT 403 path."""
+        github = _make_github_mock()
+        github.submit_pr_review = AsyncMock(side_effect=_make_403_error())
+
+        tools = _make_tools(registry, github)
+        await _register_agent(registry, pr_number=42)
+
+        result = await tools.submit_pr_review(
+            "pr-review-issue-99",
+            SubmitPRReviewParams(
+                pr_number=42,
+                body="Issues found.",
+                event="request_changes",  # lowercase variant
+            ),
+        )
+
+        # The 403 fallback should have fired (label applied)
+        github.add_labels.assert_called_once()
+        # And message should describe the fallback, not the generic 403 error
+        assert "fallback" in result.lower(), (
+            f"Lowercase 'request_changes' event should reach the 403 fallback path. Got: {result!r}"
+        )
