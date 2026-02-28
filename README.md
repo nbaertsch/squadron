@@ -73,6 +73,14 @@ human_groups:
   maintainers: ["your-github-username"]
 ```
 
+> **Security note:** The `human_groups.maintainers` list controls who can trigger Squadron
+> system events (agent spawning, PM triage, command routing). Only users listed here can
+> activate Squadron workflows. The Squadron bot identity (`squadron-dev[bot]`) is always
+> permitted regardless of this list. An empty or missing `maintainers` group blocks all
+> human-triggered event processing. See the
+> [Configuration Reference](docs/configuration.md#human_groups--human-contact-groups)
+> for full details.
+
 ### 3. Create a GitHub App
 
 Follow the [GitHub App setup guide](deploy/github-app-setup.md) to create a GitHub App for your repository and obtain:

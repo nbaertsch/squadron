@@ -430,7 +430,54 @@ class SquadronConfig(BaseModel):
     project: ProjectConfig
     labels: LabelsConfig = Field(default_factory=LabelsConfig)
     branch_naming: BranchNamingConfig = Field(default_factory=BranchNamingConfig)
-    human_groups: dict[str, list[str]] = Field(default_factory=dict)
+    human_groups: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Named groups of GitHub usernames. The 'maintainers' group is "
+            "required: it controls who can trigger Squadron system events "
+            "(agent spawning, PM triage, command routing) and who receives "
+            "escalation notifications. An empty or missing 'maintainers' "
+            "group locks down all human-triggered event processing."
+        ),
+    )
+
+    @field_validator("human_groups")
+    @classmethod
+    def _validate_human_groups(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        """Validate human_groups entries.
+
+        Rejects non-string values and empty/whitespace-only usernames within
+        each group. Strips surrounding whitespace from valid entries.
+        """
+        validated: dict[str, list[str]] = {}
+        for group_name, members in v.items():
+            clean: list[str] = []
+            for i, entry in enumerate(members):
+                if not isinstance(entry, str):
+                    raise ValueError(
+                        f"human_groups.{group_name}[{i}]: expected a string, "
+                        f"got {type(entry).__name__}"
+                    )
+                username = entry.strip()
+                if not username:
+                    raise ValueError(
+                        f"human_groups.{group_name}[{i}]: username must not be "
+                        "empty or whitespace-only"
+                    )
+                clean.append(username)
+            validated[group_name] = clean
+        return validated
+
+    @property
+    def maintainers(self) -> list[str]:
+        """GitHub usernames authorized to trigger Squadron system events.
+
+        Reads from ``human_groups["maintainers"]``. Returns an empty list
+        when the group is absent, which locks down all human-triggered
+        event processing (only the bot identity is permitted).
+        """
+        return self.human_groups.get("maintainers", [])
+
     agent_roles: dict[str, AgentRoleConfig] = Field(default_factory=dict)
     circuit_breakers: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)

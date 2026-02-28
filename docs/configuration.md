@@ -28,7 +28,7 @@ project:
   default_branch: main
 
 human_groups:
-  maintainers: ["alice"]
+  maintainers: ["alice"]   # REQUIRED — controls event access and escalation
 ```
 
 ---
@@ -54,19 +54,44 @@ project:
 
 ### `human_groups` — Human Contact Groups
 
-Groups of GitHub usernames used for escalation and review assignment:
+Named groups of GitHub usernames used for escalation, review assignment, and — most
+importantly — **event access control**.
 
 ```yaml
 human_groups:
-  maintainers: ["alice", "bob"]   # REQUIRED: Receives escalation notifications
-  reviewers: ["charlie", "diana"] # Optional: Can be used in review assignments
+  maintainers: ["alice", "bob"]   # REQUIRED — authorized event actors + escalation targets
+  reviewers: ["charlie", "diana"] # Optional — can be used in review assignments
 ```
 
+**The `maintainers` group is required.** It serves two purposes:
+
+1. **Event gate (security):** Only users listed in `human_groups.maintainers` can trigger
+   Squadron system events (agent spawning, PM triage, command routing, label-triggered
+   workflows). Events from all other users are **silently dropped**.
+2. **Escalation target:** When agents encounter issues requiring human judgment, they
+   escalate to the `maintainers` group.
+
+**Security model:**
+
+- If a GitHub webhook event is sent by a user **not** in `human_groups.maintainers`, it is
+  **silently dropped** — no agent is spawned, no comment is posted, no side effects occur.
+- The Squadron bot identity (configured as `project.bot_username`, default:
+  `squadron-dev[bot]`) is **always permitted** regardless of this list. This prevents
+  self-blocking on bot-generated events (e.g. when the PM labels an issue to trigger a
+  feature-dev agent).
+- An **empty or missing** `maintainers` group means no human-originated events are
+  processed. A warning is logged at startup in this case.
+
 **Notes:**
-- At least one `maintainers` entry is required for escalation to work.
-- Usernames are GitHub handles (without `@`).
+
+- Usernames are GitHub handles (without `@`), matched case-insensitively.
+- Dropped events are logged at `INFO` level including: actor login, event type, and issue/PR number.
+- At least one `maintainers` entry is required for Squadron to process human events.
+- This is a flat allowlist — role-based access control (restricting which agents a
+  maintainer can trigger) is a future enhancement.
 
 ---
+
 
 ### `labels` — Label Taxonomy
 
