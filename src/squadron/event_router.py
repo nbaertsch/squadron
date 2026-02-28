@@ -29,11 +29,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Awaitable
 
 from squadron.models import (
-    CommandParser,
     GitHubEvent,
     ParsedCommand,
     SquadronEvent,
     SquadronEventType,
+    parse_command,
 )
 
 if TYPE_CHECKING:
@@ -52,8 +52,8 @@ EVENT_MAP: dict[str, SquadronEventType] = {
     "issue_comment.created": SquadronEventType.ISSUE_COMMENT,
     "pull_request.opened": SquadronEventType.PR_OPENED,
     "pull_request.closed": SquadronEventType.PR_CLOSED,
+    "pull_request.labeled": SquadronEventType.PR_LABELED,
     "pull_request.synchronize": SquadronEventType.PR_SYNCHRONIZED,
-    "pull_request.labeled": SquadronEventType.PR_LABELED,  # label applied to PR (e.g. needs-changes fallback)
     "pull_request_review.submitted": SquadronEventType.PR_REVIEW_SUBMITTED,
     "pull_request_review_comment.created": SquadronEventType.PR_REVIEW_COMMENT,
     "push": SquadronEventType.PUSH,
@@ -76,26 +76,6 @@ class EventRouter:
         self.event_queue = event_queue
         self.registry = registry
         self.config = config
-
-        # Command parser — initialized from config for config-driven agent lookup
-        self._command_parser = CommandParser(
-            command_prefix=config.command_prefix,
-            known_agents=set(config.agent_roles.keys()),
-            commands=config.commands,
-        )
-
-        # Pre-compute lowercased maintainers set for fast permit checks
-        self._maintainers_lower: frozenset[str] = frozenset(m.lower() for m in config.maintainers)
-
-        # Warn at startup if no maintainers are configured — all human events
-        # will be silently dropped, which is a common misconfiguration.
-        if not self._maintainers_lower:
-            logger.warning(
-                "human_groups.maintainers is empty — all human-triggered events "
-                "will be dropped. Add at least one username to "
-                "human_groups.maintainers in .squadron/config.yaml to allow "
-                "human interaction."
-            )
 
         # Handler callbacks, registered by the Agent Manager
         self._handlers: dict[
@@ -148,57 +128,8 @@ class EventRouter:
             except Exception:
                 logger.exception("Error routing event %s", event.delivery_id)
 
-    def _is_actor_permitted(self, event: GitHubEvent) -> bool:
-        """Check whether the event actor is permitted to trigger Squadron system events.
-
-        Permit rules (in order):
-        1. The configured bot identity (project.bot_username) is **always** permitted
-           to avoid self-blocking on bot-generated events.
-        2. Any actor whose login appears in human_groups.maintainers is permitted.
-        3. All other actors are denied — the event is silently dropped.
-
-        When human_groups.maintainers is empty (or absent), only the bot identity
-        is permitted; all human-originated events are dropped until at least one
-        maintainer is added to the config.
-
-        Note: events with no sender (e.g. some CI integrations) are treated as
-        unauthorized and silently dropped.
-
-        Args:
-            event: The raw GitHub event containing sender information.
-
-        Returns:
-            True if the actor may trigger system events, False otherwise.
-        """
-        sender_login = (event.sender or "").lower()
-
-        # Rule 1: bot identity is always permitted (by configured username)
-        bot_username = (self.config.project.bot_username or "").lower()
-        if bot_username and sender_login == bot_username:
-            return True
-
-        # Rule 2: actor must be in the maintainers list (cached frozenset)
-        if sender_login and sender_login in self._maintainers_lower:
-            return True
-
-        # Rule 3: denied — log and drop
-        issue_or_pr = event.payload.get("issue", {}).get("number") or event.payload.get(
-            "pull_request", {}
-        ).get("number")
-        logger.info(
-            "Dropping event: actor not in maintainers list "
-            "(actor=%s, event_type=%s, issue/pr=#%s, reason=actor not in maintainers list)",
-            event.sender,
-            event.full_type,
-            issue_or_pr,
-        )
-        return False
-
     async def _route_event(self, event: GitHubEvent) -> None:
         """Route a single GitHub event.
-
-        Events from senders not in human_groups.maintainers (or the configured
-        bot identity) are silently dropped before routing.
 
         Structural events (PR, label, issue lifecycle) are routed via
         config-driven triggers.  Comment events are routed via command
@@ -211,10 +142,6 @@ class EventRouter:
             logger.debug("Duplicate event filtered: %s", event.delivery_id)
             return
         await self.registry.mark_event_seen(event.delivery_id, event.full_type)
-
-        # 2. Maintainer gate — drop events from unauthorized actors
-        if not self._is_actor_permitted(event):
-            return
 
         # 3. Map to internal event type
         internal_type = EVENT_MAP.get(event.full_type)
@@ -248,11 +175,10 @@ class EventRouter:
             pr_number = event.payload["issue"]["number"]
 
         # Parse @squadron-dev command syntax from comment body
-        # Use config-driven CommandParser for accurate agent roster lookup
         command: ParsedCommand | None = None
         if event_type == SquadronEventType.ISSUE_COMMENT:
             comment_body = (event.comment or {}).get("body", "")
-            command = self._command_parser.parse(comment_body)
+            command = parse_command(comment_body)
 
         # Build event data
         data = {

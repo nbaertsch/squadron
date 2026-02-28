@@ -54,10 +54,14 @@ _IS_LINUX = sys.platform == "linux"
 _HAS_IP = shutil.which("ip") is not None
 _HAS_IPTABLES = shutil.which("iptables") is not None
 _IS_ROOT = os.getuid() == 0 if _IS_LINUX else False
+# WSL2 has a known issue with TLS handshakes over veth bridges inside
+# network namespaces — the handshake times out even though plain TCP works.
+# These tests pass on real Linux (GitHub Actions) but not on WSL2.
+_IS_WSL2 = _IS_LINUX and "microsoft" in os.uname().release.lower()
 
 pytestmark = pytest.mark.skipif(
-    not (_IS_LINUX and _HAS_IP and _HAS_IPTABLES and _IS_ROOT),
-    reason="Requires Linux, root, ip, and iptables",
+    not (_IS_LINUX and _HAS_IP and _HAS_IPTABLES and _IS_ROOT) or _IS_WSL2,
+    reason="Requires Linux, root, ip, and iptables (skipped on WSL2 — TLS over veth issue)",
 )
 
 

@@ -84,13 +84,16 @@ class SandboxCA:
         )
 
         now = datetime.datetime.now(datetime.timezone.utc)
+        # Backdate not_valid_before by 1 minute to tolerate clock skew
+        # between cert generation and first TLS handshake.
+        not_before = now - datetime.timedelta(seconds=60)
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(now)
+            .not_valid_before(not_before)
             .not_valid_after(now + datetime.timedelta(days=self._validity_days))
             .add_extension(
                 x509.BasicConstraints(ca=True, path_length=0),
@@ -146,13 +149,15 @@ class SandboxCA:
         )
 
         now = datetime.datetime.now(datetime.timezone.utc)
+        # Backdate not_valid_before by 1 minute to tolerate clock skew
+        not_before = now - datetime.timedelta(seconds=60)
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
             .issuer_name(self._ca_cert.subject)
             .public_key(leaf_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(now)
+            .not_valid_before(not_before)
             .not_valid_after(now + datetime.timedelta(days=self._validity_days))
             .add_extension(
                 x509.SubjectAlternativeName([x509.DNSName(hostname)]),
