@@ -1061,6 +1061,21 @@ class TestInferenceProxy:
         )
         assert headers["authorization"] == "Bearer ghu_test"
 
+    def test_credential_injection_github_auth_hosts(self):
+        from squadron.sandbox.inference_proxy import InferenceProxy
+
+        cfg = SandboxConfig(enabled=True)
+        proxy = InferenceProxy(
+            config=cfg, ca=MagicMock(), credentials={"copilot_token": "ghu_test"}
+        )
+        # api.github.com — used by CLI during auth token exchange
+        headers = proxy._inject_credentials("api.github.com", {"host": "api.github.com"})
+        assert headers["authorization"] == "Bearer ghu_test"
+
+        # github.com — also used during auth flow
+        headers = proxy._inject_credentials("github.com", {"host": "github.com"})
+        assert headers["authorization"] == "Bearer ghu_test"
+
     def test_strips_existing_auth_headers(self):
         from squadron.sandbox.inference_proxy import InferenceProxy
 

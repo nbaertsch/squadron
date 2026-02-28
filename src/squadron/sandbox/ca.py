@@ -113,6 +113,10 @@ class SandboxCA:
                 ),
                 critical=True,
             )
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+                critical=False,
+            )
             .sign(key, hashes.SHA256())
         )
         self._ca_cert = cert
@@ -166,6 +170,14 @@ class SandboxCA:
             .add_extension(
                 x509.BasicConstraints(ca=False, path_length=None),
                 critical=True,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self._ca_key.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()),
+                critical=False,
             )
             .sign(self._ca_key, hashes.SHA256())
         )

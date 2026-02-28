@@ -1,0 +1,33 @@
+# E2E test image — runs as root with namespace + iptables support
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# System deps for sandbox: iproute2 (ip/veth/netns), iptables (DNAT)
+# Also need iputils-ping for connectivity checks in tests
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 \
+        iptables \
+        iputils-ping \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast dependency resolution
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Copy project
+COPY pyproject.toml README.md ./
+COPY src/ src/
+COPY tests/ tests/
+
+# Install project + dev deps
+RUN uv venv /app/.venv \
+    && uv pip install --python /app/.venv/bin/python -e ".[dev]"
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Fix Copilot CLI binary permissions
+RUN chmod +x /app/.venv/lib/python*/site-packages/copilot/bin/copilot || true
+
+# Default: run E2E tests
+ENTRYPOINT ["pytest", "tests/e2e/", "-v", "--tb=long"]

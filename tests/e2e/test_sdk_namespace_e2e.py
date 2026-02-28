@@ -29,10 +29,10 @@ Test classes:
 Run::
 
     # Infrastructure + proxy tests (no live API calls):
-    pytest tests/e2e/test_sdk_namespace_e2e.py -m "not live" -v
+    sudo pytest tests/e2e/test_sdk_namespace_e2e.py -m "not live" -v
 
     # Include live SDK test (requires COPILOT_GITHUB_TOKEN):
-    pytest tests/e2e/test_sdk_namespace_e2e.py -v
+    sudo pytest tests/e2e/test_sdk_namespace_e2e.py -v
 """
 
 from __future__ import annotations
@@ -40,9 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import subprocess
-import sys
 import tempfile
 import textwrap
 from pathlib import Path
@@ -53,235 +51,22 @@ from squadron.sandbox.ca import SandboxCA
 from squadron.sandbox.config import SandboxConfig
 from squadron.sandbox.inference_proxy import InferenceProxy
 
-
-# ── Skip conditions ──────────────────────────────────────────────────────────
-
-_IS_LINUX = sys.platform == "linux"
-_HAS_IP = shutil.which("ip") is not None
-_HAS_IPTABLES = shutil.which("iptables") is not None
-_IS_ROOT = os.getuid() == 0 if _IS_LINUX else False
-# WSL2 has a known issue with TLS handshakes over veth bridges inside
-# network namespaces — the handshake times out even though plain TCP works.
-# These tests pass on real Linux (GitHub Actions) but not on WSL2.
-_IS_WSL2 = _IS_LINUX and "microsoft" in os.uname().release.lower()
-
-pytestmark = pytest.mark.skipif(
-    not (_IS_LINUX and _HAS_IP and _HAS_IPTABLES and _IS_ROOT) or _IS_WSL2,
-    reason="Requires Linux, root, ip, and iptables (skipped on WSL2 — TLS over veth issue)",
+from .conftest import (
+    AGENT_IP,
+    AGENT_VETH,
+    BRIDGE_IP,
+    CAN_RUN_NAMESPACE_TESTS,
+    NS_NAME,
+    NamespaceFixture,
+    run_in_ns,
+    run_in_ns_async,
+    run_sync,
 )
 
-
-# ── Constants ────────────────────────────────────────────────────────────────
-
-_NS_NAME = "sq-ns-e2e"
-_BRIDGE_NAME = "sq-br-e2e"
-_HOST_VETH = "sq-ve2e-h"
-_AGENT_VETH = "sq-ve2e-a"
-_BRIDGE_IP = "10.147.0.1"
-_AGENT_IP = "10.147.1.2"
-_SUBNET = "10.147.0.0/16"
-_SUBNET_BITS = "16"
-
-
-# ── Infrastructure helpers ───────────────────────────────────────────────────
-
-
-def _run_sync(cmd: str, check: bool = False) -> tuple[int, str, str]:
-    """Run a shell command synchronously."""
-    proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
-    if check and proc.returncode != 0:
-        raise RuntimeError(f"Command failed: {cmd}\nstderr: {proc.stderr}")
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-def _run_in_ns(cmd: str, ns: str = _NS_NAME) -> tuple[int, str, str]:
-    """Run a command inside the network namespace."""
-    return _run_sync(f"ip netns exec {ns} {cmd}")
-
-
-async def _run_async(cmd: str, timeout: float = 30) -> tuple[int, str, str]:
-    """Run a shell command asynchronously."""
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    return proc.returncode or 0, stdout.decode(), stderr.decode()
-
-
-async def _run_in_ns_async(
-    cmd: str, ns: str = _NS_NAME, timeout: float = 30
-) -> tuple[int, str, str]:
-    """Run a command inside the network namespace, without blocking the event loop."""
-    return await _run_async(f"ip netns exec {ns} {cmd}", timeout=timeout)
-
-
-class NamespaceFixture:
-    """Manages the E2E network namespace + bridge + DNAT rules.
-
-    Two-phase setup:
-        Phase 1 (setup_bridge): Creates the bridge so the bridge IP exists
-            on the host — the proxy can then bind to it.
-        Phase 2 (setup_namespace): After the proxy is started and we know
-            its port, creates the namespace + veth + DNAT rules.
-
-    Teardown:
-        - Removes all iptables rules
-        - Deletes namespace (auto-removes veth agent end)
-        - Deletes bridge
-    """
-
-    def __init__(self) -> None:
-        self.proxy_port: int = 0
-        self._bridge_up = False
-        self._ns_up = False
-
-    def setup_bridge(self) -> None:
-        """Phase 1: Create bridge so the bridge IP exists for proxy binding."""
-        self._cleanup_stale()
-
-        # Create bridge.
-        _run_sync(f"ip link add name {_BRIDGE_NAME} type bridge", check=True)
-        _run_sync(f"ip addr add {_BRIDGE_IP}/{_SUBNET_BITS} dev {_BRIDGE_NAME}")
-        _run_sync(f"ip link set {_BRIDGE_NAME} up", check=True)
-
-        # Enable IP forwarding.
-        _run_sync("sysctl -w net.ipv4.ip_forward=1")
-
-        self._bridge_up = True
-
-    def setup_namespace(self, proxy_port: int) -> None:
-        """Phase 2: Create namespace + veth + DNAT (after proxy is running)."""
-        assert self._bridge_up, "Must call setup_bridge() first"
-        self.proxy_port = proxy_port
-
-        # Create namespace.
-        _run_sync(f"ip netns add {_NS_NAME}", check=True)
-
-        # Create veth pair.
-        _run_sync(
-            f"ip link add {_HOST_VETH} type veth peer name {_AGENT_VETH}",
-            check=True,
-        )
-
-        # Attach host end to bridge + bring up.
-        _run_sync(f"ip link set {_HOST_VETH} master {_BRIDGE_NAME}")
-        _run_sync(f"ip link set {_HOST_VETH} up")
-
-        # Move agent end into namespace.
-        _run_sync(f"ip link set {_AGENT_VETH} netns {_NS_NAME}")
-
-        # Configure namespace networking.
-        _run_in_ns(f"ip addr add {_AGENT_IP}/{_SUBNET_BITS} dev {_AGENT_VETH}")
-        _run_in_ns(f"ip link set {_AGENT_VETH} up")
-        _run_in_ns("ip link set lo up")
-        _run_in_ns(f"ip route add default via {_BRIDGE_IP}")
-
-        # DNS inside namespace.
-        ns_dir = Path(f"/etc/netns/{_NS_NAME}")
-        ns_dir.mkdir(parents=True, exist_ok=True)
-        (ns_dir / "resolv.conf").write_text("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-
-        # iptables rules.
-        # DNAT: redirect all :443 from namespace → proxy.
-        _run_sync(
-            f"iptables -t nat -A PREROUTING -s {_SUBNET} "
-            f"-p tcp --dport 443 -j DNAT --to-destination {_BRIDGE_IP}:{self.proxy_port}"
-        )
-        # MASQUERADE: allow namespace traffic to reach the internet.
-        _run_sync(f"iptables -t nat -A POSTROUTING -s {_SUBNET} ! -d {_SUBNET} -j MASQUERADE")
-        # FORWARD: explicitly allow traffic from/to namespace subnet.
-        _run_sync(f"iptables -I FORWARD 1 -s {_SUBNET} -j ACCEPT")
-        _run_sync(f"iptables -I FORWARD 1 -d {_SUBNET} -j ACCEPT")
-        # INPUT: allow traffic from namespace to host (bridge IP services).
-        _run_sync(f"iptables -I INPUT 1 -s {_SUBNET} -j ACCEPT")
-
-        self._ns_up = True
-
-    def teardown(self) -> None:
-        """Remove all infrastructure (best-effort)."""
-        if self._ns_up:
-            # Remove iptables rules (best-effort, ignore errors).
-            _run_sync(
-                f"iptables -t nat -D PREROUTING -s {_SUBNET} "
-                f"-p tcp --dport 443 -j DNAT --to-destination {_BRIDGE_IP}:{self.proxy_port}"
-            )
-            _run_sync(f"iptables -t nat -D POSTROUTING -s {_SUBNET} ! -d {_SUBNET} -j MASQUERADE")
-            _run_sync(f"iptables -D FORWARD -s {_SUBNET} -j ACCEPT")
-            _run_sync(f"iptables -D FORWARD -d {_SUBNET} -j ACCEPT")
-            _run_sync(f"iptables -D INPUT -s {_SUBNET} -j ACCEPT")
-
-            # Delete namespace (also removes agent end of veth).
-            _run_sync(f"ip netns delete {_NS_NAME}")
-            # Delete host veth (may already be gone).
-            _run_sync(f"ip link delete {_HOST_VETH}")
-
-            # Clean up DNS config.
-            ns_dir = Path(f"/etc/netns/{_NS_NAME}")
-            if ns_dir.exists():
-                _run_sync(f"rm -rf {ns_dir}")
-
-            self._ns_up = False
-
-        if self._bridge_up:
-            # Delete bridge.
-            _run_sync(f"ip link set {_BRIDGE_NAME} down")
-            _run_sync(f"ip link delete {_BRIDGE_NAME} type bridge")
-            self._bridge_up = False
-
-    def _cleanup_stale(self) -> None:
-        """Remove leftover resources from previous test runs."""
-        # Flush stale iptables rules referencing our subnet (try multiple ports).
-        for port in [0, 8443, self.proxy_port]:
-            _run_sync(
-                f"iptables -t nat -D PREROUTING -s {_SUBNET} "
-                f"-p tcp --dport 443 -j DNAT --to-destination {_BRIDGE_IP}:{port}"
-            )
-        _run_sync(f"iptables -t nat -D POSTROUTING -s {_SUBNET} ! -d {_SUBNET} -j MASQUERADE")
-        _run_sync(f"iptables -D FORWARD -s {_SUBNET} -j ACCEPT")
-        _run_sync(f"iptables -D FORWARD -d {_SUBNET} -j ACCEPT")
-        _run_sync(f"iptables -D INPUT -s {_SUBNET} -j ACCEPT")
-
-        # Delete stale namespace / bridge.
-        _run_sync(f"ip netns delete {_NS_NAME}")
-        _run_sync(f"ip link delete {_HOST_VETH}")
-        _run_sync(f"ip link set {_BRIDGE_NAME} down")
-        _run_sync(f"ip link delete {_BRIDGE_NAME} type bridge")
-
-        # Clean up DNS config.
-        ns_dir = Path(f"/etc/netns/{_NS_NAME}")
-        if ns_dir.exists():
-            _run_sync(f"rm -rf {ns_dir}")
-
-        self._bridge_up = False
-
-
-# ── Fixtures ─────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture
-def ca_dir(tmp_path: Path) -> Path:
-    d = tmp_path / "ca"
-    d.mkdir()
-    return d
-
-
-@pytest.fixture
-def ca(ca_dir: Path) -> SandboxCA:
-    ca = SandboxCA(str(ca_dir), validity_days=1)
-    ca.ensure_ca()
-    return ca
-
-
-@pytest.fixture
-def proxy_config(ca_dir: Path) -> SandboxConfig:
-    return SandboxConfig(
-        enabled=True,
-        bridge_ip=_BRIDGE_IP,
-        proxy_port=0,  # OS assigns free port
-        ca_dir=str(ca_dir),
-    )
+pytestmark = pytest.mark.skipif(
+    not CAN_RUN_NAMESPACE_TESTS,
+    reason="Requires Linux, root, ip, and iptables (not available on this platform)",
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -297,6 +82,7 @@ class TestNamespaceInfrastructure:
     ) -> None:
         """Create namespace, verify basic connectivity to bridge IP."""
         ns = NamespaceFixture()
+        proxy: InferenceProxy | None = None
         try:
             # Phase 1: bridge (so bridge IP exists).
             ns.setup_bridge()
@@ -311,19 +97,20 @@ class TestNamespaceInfrastructure:
             ns.setup_namespace(port)
 
             # Verify namespace exists.
-            rc, out, _ = _run_sync("ip netns list")
-            assert _NS_NAME in out
+            rc, out, _ = run_sync("ip netns list")
+            assert NS_NAME in out
 
             # Verify agent can ping bridge IP.
-            rc, _, _ = _run_in_ns(f"ping -c 1 -W 2 {_BRIDGE_IP}")
+            rc, _, _ = run_in_ns(f"ping -c 1 -W 2 {BRIDGE_IP}")
             assert rc == 0, "Agent cannot ping bridge IP"
 
             # Verify agent has correct IP.
-            rc, out, _ = _run_in_ns("ip addr show dev " + _AGENT_VETH)
-            assert _AGENT_IP in out
+            rc, out, _ = run_in_ns("ip addr show dev " + AGENT_VETH)
+            assert AGENT_IP in out
 
-            await proxy.stop()
         finally:
+            if proxy:
+                await proxy.stop()
             ns.teardown()
 
     async def test_dns_resolution_from_namespace(
@@ -331,6 +118,7 @@ class TestNamespaceInfrastructure:
     ) -> None:
         """Verify DNS resolution works inside the namespace."""
         ns = NamespaceFixture()
+        proxy: InferenceProxy | None = None
         try:
             ns.setup_bridge()
 
@@ -342,15 +130,16 @@ class TestNamespaceInfrastructure:
             ns.setup_namespace(port)
 
             # Try to resolve a well-known hostname.
-            rc, out, err = _run_in_ns(
+            rc, out, err = run_in_ns(
                 "python3 -c \"import socket; print(socket.getaddrinfo('api.github.com', 443)[0][4][0])\""
             )
             assert rc == 0, f"DNS resolution failed: {err}"
             # Should get an IP address back.
             assert out.strip(), "No DNS result"
 
-            await proxy.stop()
         finally:
+            if proxy:
+                await proxy.stop()
             ns.teardown()
 
     async def test_dnat_tcp_redirect(
@@ -380,7 +169,7 @@ class TestNamespaceInfrastructure:
                 await writer.drain()
                 writer.close()
 
-            echo_server = await asyncio.start_server(echo_handler, host=_BRIDGE_IP, port=0)
+            echo_server = await asyncio.start_server(echo_handler, host=BRIDGE_IP, port=0)
             echo_port = echo_server.sockets[0].getsockname()[1]
 
             # Set up namespace with DNAT pointing :443 → echo server.
@@ -407,7 +196,7 @@ class TestNamespaceInfrastructure:
                 driver_path = f.name
 
             try:
-                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
+                rc, out, err = await run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip())
@@ -437,6 +226,7 @@ class TestNamespaceInfrastructure:
         TLS path (DNAT is verified separately by test_dnat_tcp_redirect).
         """
         ns = NamespaceFixture()
+        proxy: InferenceProxy | None = None
         try:
             ns.setup_bridge()
 
@@ -453,7 +243,7 @@ class TestNamespaceInfrastructure:
                 try:
                     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                     ctx.load_verify_locations("{ca_dir / "ca.crt"}")
-                    sock = socket.create_connection(("{_BRIDGE_IP}", {port}), timeout=10)
+                    sock = socket.create_connection(("{BRIDGE_IP}", {port}), timeout=10)
                     wrapped = ctx.wrap_socket(sock, server_hostname="api.anthropic.com")
                     peer = wrapped.getpeercert()
                     cn = dict(x[0] for x in peer["subject"])["commonName"]
@@ -469,7 +259,7 @@ class TestNamespaceInfrastructure:
                 driver_path = f.name
 
             try:
-                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
+                rc, out, err = await run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip())
@@ -479,8 +269,9 @@ class TestNamespaceInfrastructure:
             finally:
                 os.unlink(driver_path)
 
-            await proxy.stop()
         finally:
+            if proxy:
+                await proxy.stop()
             ns.teardown()
 
 
@@ -511,12 +302,13 @@ class TestProxyFromNamespace:
         creds = {"anthropic_key": "sk-ant-ns-test-key"}
         config = SandboxConfig(
             enabled=True,
-            bridge_ip=_BRIDGE_IP,
+            bridge_ip=BRIDGE_IP,
             proxy_port=0,
             ca_dir=str(ca_dir),
         )
 
         ns = NamespaceFixture()
+        proxy: InferenceProxy | None = None
         try:
             ns.setup_bridge()
 
@@ -533,7 +325,7 @@ class TestProxyFromNamespace:
                 try:
                     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                     ctx.load_verify_locations("{ca_dir / "ca.crt"}")
-                    sock = socket.create_connection(("{_BRIDGE_IP}", {port}), timeout=15)
+                    sock = socket.create_connection(("{BRIDGE_IP}", {port}), timeout=15)
                     wrapped = ctx.wrap_socket(sock, server_hostname="api.anthropic.com")
 
                     # Send a minimal HTTP request.
@@ -595,21 +387,29 @@ class TestProxyFromNamespace:
                 driver_path = f.name
 
             try:
-                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
+                rc, out, err = await run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip())
                 assert result["ok"] is True, f"Driver error: {result.get('error')}"
                 assert result["has_http"] is True, "No HTTP response received"
-                # We expect either a proxy error (502 if upstream fails) or
-                # a real upstream response. Either proves the proxy chain works.
-                assert result["status_code"] > 0, "No valid HTTP status code"
+                # The proxy MUST inject credentials successfully for the
+                # upstream to return a non-error response.  We accept both
+                # Anthropic 4xx auth errors (no real Anthropic key in this
+                # test — we use a dummy "sk-ant-ns-test-key") and 200 if
+                # the key happened to be valid.  But we reject 502 (proxy
+                # failed to connect upstream) and 400 (proxy's own error).
+                assert result["status_code"] not in {0, 400, 500, 502}, (
+                    f"Proxy error (status {result['status_code']}): "
+                    f"proxy failed to forward request to upstream"
+                )
 
             finally:
                 os.unlink(driver_path)
 
-            await proxy.stop()
         finally:
+            if proxy:
+                await proxy.stop()
             ns.teardown()
 
     async def test_env_scrub_in_namespace(self, ca: SandboxCA, ca_dir: Path) -> None:
@@ -622,12 +422,13 @@ class TestProxyFromNamespace:
 
         config = SandboxConfig(
             enabled=True,
-            bridge_ip=_BRIDGE_IP,
+            bridge_ip=BRIDGE_IP,
             proxy_port=0,
             ca_dir=str(ca_dir),
         )
 
         ns = NamespaceFixture()
+        proxy: InferenceProxy | None = None
         try:
             ns.setup_bridge()
 
@@ -638,7 +439,6 @@ class TestProxyFromNamespace:
 
             ns.setup_namespace(port)
 
-            # Build sanitized env (as SandboxManager would).
             sanitized = build_sanitized_env(
                 config,
                 ca_cert_path=ca.cert_path,
@@ -669,7 +469,7 @@ class TestProxyFromNamespace:
 
             try:
                 proc = subprocess.run(
-                    ["ip", "netns", "exec", _NS_NAME, "python3", driver_path],
+                    ["ip", "netns", "exec", NS_NAME, "python3", driver_path],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -686,8 +486,9 @@ class TestProxyFromNamespace:
             finally:
                 os.unlink(driver_path)
 
-            await proxy.stop()
         finally:
+            if proxy:
+                await proxy.stop()
             ns.teardown()
 
 
@@ -729,11 +530,12 @@ class TestSDKInNamespace:
         # Start proxy with real Copilot credentials.
         config = SandboxConfig(
             enabled=True,
-            bridge_ip=_BRIDGE_IP,
+            bridge_ip=BRIDGE_IP,
             proxy_port=0,
             ca_dir=str(ca_dir),
         )
 
+        proxy: InferenceProxy | None = None
         ns = NamespaceFixture()
         try:
             ns.setup_bridge()
@@ -763,7 +565,7 @@ class TestSDKInNamespace:
 
                 async def main():
                     try:
-                        from copilot import CopilotClient
+                        from copilot import CopilotClient, PermissionHandler
 
                         token = sys.argv[1]
                         cwd = sys.argv[2]
@@ -780,7 +582,9 @@ class TestSDKInNamespace:
                         await client.start()
 
                         try:
-                            session = await client.create_session({})
+                            session = await client.create_session({
+                                "on_permission_request": PermissionHandler.approve_all,
+                            })
                             try:
                                 event = await session.send_and_wait(
                                     {"prompt": "Reply with exactly the word PONG and nothing else."},
@@ -822,25 +626,33 @@ class TestSDKInNamespace:
                 # Run the driver inside the namespace with sanitized env.
                 # Pass the token as a CLI argument (not env var — this is
                 # how CopilotAgent passes it to the SDK via client_opts).
-                proc = subprocess.run(
-                    [
-                        "ip",
-                        "netns",
-                        "exec",
-                        _NS_NAME,
-                        "python3",
-                        driver_path,
-                        copilot_token,
-                        str(ca_dir),  # cwd for CopilotClient
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=90,
+                # Use async subprocess so the event loop stays responsive
+                # and the proxy can serve CLI requests during startup.
+                proc = await asyncio.create_subprocess_exec(
+                    "ip",
+                    "netns",
+                    "exec",
+                    NS_NAME,
+                    "python3",
+                    driver_path,
+                    copilot_token,
+                    str(ca_dir),  # cwd for CopilotClient
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                     env=sanitized,
                 )
 
-                stdout = proc.stdout.strip()
-                stderr = proc.stderr.strip()
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        proc.communicate(), timeout=90
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    raise
+
+                stdout = (stdout_bytes or b"").decode().strip()
+                stderr = (stderr_bytes or b"").decode().strip()
 
                 # Parse result.
                 assert proc.returncode == 0, (
@@ -858,8 +670,9 @@ class TestSDKInNamespace:
             finally:
                 os.unlink(driver_path)
 
-            await proxy.stop()
         finally:
+            if proxy:
+                await proxy.stop()
             ns.teardown()
 
     async def test_live_raw_http_through_namespace(self, ca: SandboxCA, ca_dir: Path) -> None:
@@ -873,11 +686,12 @@ class TestSDKInNamespace:
 
         config = SandboxConfig(
             enabled=True,
-            bridge_ip=_BRIDGE_IP,
+            bridge_ip=BRIDGE_IP,
             proxy_port=0,
             ca_dir=str(ca_dir),
         )
 
+        proxy: InferenceProxy | None = None
         ns = NamespaceFixture()
         try:
             ns.setup_bridge()
@@ -894,7 +708,7 @@ class TestSDKInNamespace:
                 try:
                     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                     ctx.load_verify_locations("{ca_dir / "ca.crt"}")
-                    sock = socket.create_connection(("{_BRIDGE_IP}", {port}), timeout=30)
+                    sock = socket.create_connection(("{BRIDGE_IP}", {port}), timeout=30)
                     wrapped = ctx.wrap_socket(sock, server_hostname="api.githubcopilot.com")
 
                     body = json.dumps({{
@@ -970,21 +784,24 @@ class TestSDKInNamespace:
                 driver_path = f.name
 
             try:
-                rc, out, err = await _run_in_ns_async(f"python3 {driver_path}")
+                rc, out, err = await run_in_ns_async(f"python3 {driver_path}")
                 assert rc == 0, f"Driver failed (rc={rc}): stdout={out}, stderr={err}"
 
                 result = json.loads(out.strip().split("\n")[-1])
                 assert result["ok"] is True, f"Driver error: {result.get('error')}"
-                # 200 = success, 401 = token expired, 429 = rate limited.
-                # All prove the proxy chain works.
-                assert result["status_code"] in {200, 401, 403, 429}, (
-                    f"Unexpected status {result['status_code']}: "
+                # 200 is the only acceptable success — 401/403 would mean
+                # credential injection is broken (proxy failed to inject the
+                # Copilot token or injected the wrong one).
+                assert result["status_code"] == 200, (
+                    f"Expected 200 but got {result['status_code']} — credential "
+                    f"injection may be broken: "
                     f"{result.get('response_preview', '')[:300]}"
                 )
 
             finally:
                 os.unlink(driver_path)
 
-            await proxy.stop()
         finally:
+            if proxy:
+                await proxy.stop()
             ns.teardown()

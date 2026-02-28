@@ -11,6 +11,8 @@ connect to ``api.anthropic.com:443`` which gets DNAT'd to our proxy.
 
 Credential injection rules:
 - Copilot endpoints: inject ``COPILOT_GITHUB_TOKEN`` as Bearer token
+- GitHub API endpoints (``api.github.com``, ``github.com``): inject
+  ``COPILOT_GITHUB_TOKEN`` as Bearer token (needed for CLI auth exchange)
 - Anthropic endpoints: inject ``x-api-key`` header
 - OpenAI endpoints: inject ``Authorization: Bearer <key>`` header
 - Custom providers: inject ``Authorization: Bearer <key>`` (fallback)
@@ -43,7 +45,19 @@ _OPENAI_HOSTS = frozenset({"api.openai.com"})
 _COPILOT_HOSTS = frozenset(
     {
         "api.githubcopilot.com",
+        "api.individual.githubcopilot.com",
+        "api.business.githubcopilot.com",
+        "api.enterprise.githubcopilot.com",
         "copilot-proxy.githubusercontent.com",
+    }
+)
+# GitHub API hosts used by the Copilot CLI during auth token exchange.
+# The CLI connects to api.github.com to swap the GitHub PAT for a
+# short-lived Copilot session token.  These need the same copilot_token.
+_GITHUB_AUTH_HOSTS = frozenset(
+    {
+        "api.github.com",
+        "github.com",
     }
 )
 
@@ -110,7 +124,7 @@ class InferenceProxy:
             _use_http2 = False
         self._upstream_client = httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=30.0),
-            follow_redirects=True,
+            follow_redirects=False,
             http2=_use_http2,
         )
 
@@ -210,35 +224,67 @@ class InferenceProxy:
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Handle one proxied HTTPS connection from an agent."""
+        """Handle a proxied HTTPS connection from an agent.
+
+        Supports HTTP/1.1 keep-alive: loops reading requests on the same
+        TCP+TLS connection until the client sends ``Connection: close``,
+        the connection is idle too long, or EOF is reached.  This is
+        critical because the Copilot CLI binary (undici) reuses
+        connections for multiple requests (auth → GraphQL → inference).
+        """
         try:
-            # Read the HTTP request.
-            request_data = await asyncio.wait_for(self._read_http_request(reader), timeout=30.0)
-            if not request_data:
-                return
+            while True:
+                # Read the next HTTP request (with idle timeout).
+                try:
+                    request_data = await asyncio.wait_for(
+                        self._read_http_request(reader), timeout=60.0
+                    )
+                except asyncio.TimeoutError:
+                    break  # Idle timeout — close the connection.
+                except ValueError as exc:
+                    # Malformed / oversized request — return 4xx and close.
+                    logger.warning("InferenceProxy: bad request: %s", exc)
+                    try:
+                        await self._send_error(writer, 400, str(exc))
+                    except Exception:
+                        pass
+                    break
 
-            method, path, headers, body = request_data
+                if not request_data:
+                    break  # EOF / client closed.
 
-            # Determine upstream host from Host header or original destination.
-            host = self._extract_host(headers)
-            if not host:
-                await self._send_error(writer, 400, "Missing Host header")
-                return
+                method, path, headers, body = request_data
 
-            # Inject credentials based on destination.
-            injected_headers = self._inject_credentials(host, headers)
+                # Determine upstream host from Host header.
+                host = self._extract_host(headers)
+                if not host:
+                    await self._send_error(writer, 400, "Missing Host header")
+                    break
 
-            # Forward to upstream.
-            upstream_url = f"https://{host}{path}"
-            response = await self._forward_upstream(method, upstream_url, injected_headers, body)
+                # Check if client wants to close after this request.
+                connection_header = headers.get("connection", "").lower()
+                close_after = connection_header == "close"
 
-            if response:
-                await self._send_response(writer, response)
-            else:
-                await self._send_error(writer, 502, "Upstream connection failed")
+                # Inject credentials based on destination.
+                injected_headers = self._inject_credentials(host, headers)
 
-        except asyncio.TimeoutError:
-            await self._send_error(writer, 408, "Request timeout")
+                # Forward to upstream.
+                upstream_url = f"https://{host}{path}"
+                response = await self._forward_upstream(
+                    method, upstream_url, injected_headers, body
+                )
+
+                if response:
+                    await self._send_response(writer, response, keep_alive=not close_after)
+                else:
+                    await self._send_error(writer, 502, "Upstream connection failed")
+                    break  # Can't reliably continue after a proxy error.
+
+                if close_after:
+                    break
+
+        except (ConnectionResetError, BrokenPipeError):
+            pass  # Client disconnected — normal for keep-alive.
         except Exception:
             logger.exception("InferenceProxy: error handling connection")
             try:
@@ -252,12 +298,20 @@ class InferenceProxy:
             except Exception:
                 pass
 
+    # Maximum allowed request body size (50 MB).
+    _MAX_BODY_SIZE = 50 * 1024 * 1024
+    # Maximum number of request headers.
+    _MAX_HEADERS = 200
+    # Maximum length of a single header line (16 KB).
+    _MAX_HEADER_LINE = 16 * 1024
+
     async def _read_http_request(
         self, reader: asyncio.StreamReader
     ) -> tuple[str, str, dict[str, str], bytes] | None:
         """Read and parse an HTTP/1.1 request.
 
         Returns (method, path, headers, body) or None on EOF.
+        Raises ValueError for malformed/oversized requests.
         """
         # Read request line.
         request_line = await reader.readline()
@@ -272,25 +326,44 @@ class InferenceProxy:
         method = parts[0]
         path = parts[1]
 
-        # Read headers.
+        # Read headers (bounded by count and line length).
         headers: dict[str, str] = {}
-        while True:
+        for _ in range(self._MAX_HEADERS):
             line = await reader.readline()
             if not line or line == b"\r\n" or line == b"\n":
                 break
+            if len(line) > self._MAX_HEADER_LINE:
+                raise ValueError(f"Header line too long ({len(line)} bytes)")
             decoded = line.decode("latin-1").strip()
             if ":" in decoded:
                 key, _, value = decoded.partition(":")
                 headers[key.strip().lower()] = value.strip()
+        else:
+            raise ValueError(f"Too many headers (>{self._MAX_HEADERS})")
+
+        # Reject chunked Transfer-Encoding — we only support Content-Length.
+        if "chunked" in headers.get("transfer-encoding", "").lower():
+            raise ValueError("Chunked Transfer-Encoding not supported")
 
         # Read body based on content-length.
         body = b""
         content_length = headers.get("content-length")
         if content_length:
             try:
-                body = await reader.readexactly(int(content_length))
-            except (asyncio.IncompleteReadError, ValueError):
-                pass
+                cl = int(content_length)
+            except ValueError:
+                raise ValueError(f"Invalid Content-Length: {content_length}")
+            if cl > self._MAX_BODY_SIZE:
+                raise ValueError(f"Request body too large ({cl} bytes, max {self._MAX_BODY_SIZE})")
+            try:
+                body = await reader.readexactly(cl)
+            except asyncio.IncompleteReadError as exc:
+                logger.warning(
+                    "InferenceProxy: client disconnected mid-body (%d/%d bytes received)",
+                    len(exc.partial),
+                    cl,
+                )
+                return None  # Client disconnected — abort this request.
 
         return method, path, headers, body
 
@@ -316,6 +389,13 @@ class InferenceProxy:
         result.pop("x-api-key", None)
 
         if host in _COPILOT_HOSTS:
+            token = self._credentials.get("copilot_token")
+            if token:
+                result["authorization"] = f"Bearer {token}"
+
+        elif host in _GITHUB_AUTH_HOSTS:
+            # GitHub API hosts — the CLI uses these during auth token
+            # exchange.  Inject the same copilot_token as Bearer.
             token = self._credentials.get("copilot_token")
             if token:
                 result["authorization"] = f"Bearer {token}"
@@ -352,9 +432,17 @@ class InferenceProxy:
         headers: dict[str, str],
         body: bytes,
     ) -> httpx.Response | None:
-        """Forward the request to the real upstream provider."""
+        """Forward the request to the real upstream provider.
+
+        Redirects are followed manually (up to 5 hops) so we can strip
+        sensitive headers (Authorization, x-api-key) on cross-origin
+        redirects.  This prevents credential leakage if an upstream
+        returns a 3xx to a different host.
+        """
         if not self._upstream_client:
             return None
+
+        _MAX_REDIRECTS = 5
 
         try:
             # Build httpx-compatible headers (remove hop-by-hop headers).
@@ -370,34 +458,109 @@ class InferenceProxy:
                 headers=fwd_headers,
                 content=body,
             )
+
+            # Manually follow redirects, stripping auth on cross-origin.
+            for _ in range(_MAX_REDIRECTS):
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    break
+
+                redirect_url = response.headers.get("location")
+                if not redirect_url:
+                    break
+
+                # Resolve relative URLs.
+                if redirect_url.startswith("/"):
+                    from urllib.parse import urlparse
+
+                    parsed = urlparse(url)
+                    redirect_url = f"{parsed.scheme}://{parsed.netloc}{redirect_url}"
+
+                # Strip auth headers if the redirect goes to a different host.
+                from urllib.parse import urlparse
+
+                orig_host = urlparse(url).netloc
+                new_host = urlparse(redirect_url).netloc
+                if orig_host != new_host:
+                    fwd_headers.pop("authorization", None)
+                    fwd_headers.pop("x-api-key", None)
+                    logger.info(
+                        "InferenceProxy: cross-origin redirect %s → %s, stripping auth headers",
+                        orig_host,
+                        new_host,
+                    )
+
+                # 303: always GET with no body; 307/308: preserve method+body.
+                if response.status_code == 303:
+                    method = "GET"
+                    body = b""
+
+                url = redirect_url
+                response = await self._upstream_client.request(
+                    method=method,
+                    url=url,
+                    headers=fwd_headers,
+                    content=body,
+                )
+
             return response
         except Exception:
             logger.exception("InferenceProxy: upstream request failed for %s", url)
             return None
 
-    async def _send_response(self, writer: asyncio.StreamWriter, response: httpx.Response) -> None:
-        """Send the upstream response back to the agent."""
+    async def _send_response(
+        self, writer: asyncio.StreamWriter, response: httpx.Response, *, keep_alive: bool = True
+    ) -> None:
+        """Send the upstream response back to the agent.
+
+        Important: httpx automatically decompresses gzip/br/deflate bodies,
+        so ``response.content`` is always uncompressed.  We must strip the
+        upstream ``Content-Encoding`` and ``Content-Length`` headers and
+        set our own ``Content-Length`` based on the actual (decompressed)
+        body size.  Forwarding the original ``Content-Encoding: gzip``
+        with a decompressed body would cause the client to either fail
+        decompression or hang waiting for more data.
+        """
         status_line = f"HTTP/1.1 {response.status_code} {response.reason_phrase}\r\n"
         writer.write(status_line.encode("latin-1"))
 
+        # Hop-by-hop and content-encoding headers that must NOT be forwarded.
+        # httpx decodes content-encoding transparently, so we send the raw body.
+        _skip_headers = {
+            "transfer-encoding",
+            "connection",
+            "keep-alive",
+            "content-encoding",
+            "content-length",
+        }
+
         # Forward response headers.
         for key, value in response.headers.items():
-            if key.lower() in {"transfer-encoding", "connection"}:
+            if key.lower() in _skip_headers:
                 continue
             writer.write(f"{key}: {value}\r\n".encode("latin-1"))
 
         body = response.content
         writer.write(f"content-length: {len(body)}\r\n".encode("latin-1"))
+
+        # Signal keep-alive or close to the client.
+        if keep_alive:
+            writer.write(b"connection: keep-alive\r\n")
+        else:
+            writer.write(b"connection: close\r\n")
+
         writer.write(b"\r\n")
         writer.write(body)
         await writer.drain()
 
     async def _send_error(self, writer: asyncio.StreamWriter, status: int, message: str) -> None:
-        """Send an error response to the agent."""
-        body = f'{{"error": "{message}"}}'.encode()
+        """Send an error response to the agent and signal connection close."""
+        import json as _json
+
+        body = _json.dumps({"error": message}).encode()
         writer.write(f"HTTP/1.1 {status} Error\r\n".encode("latin-1"))
         writer.write(b"content-type: application/json\r\n")
         writer.write(f"content-length: {len(body)}\r\n".encode("latin-1"))
+        writer.write(b"connection: close\r\n")
         writer.write(b"\r\n")
         writer.write(body)
         await writer.drain()
