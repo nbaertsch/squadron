@@ -116,6 +116,8 @@ class AgentManager:
             repo_root=repo_root,
             owner=config.project.owner,
             repo=config.project.repo,
+            provider_type=config.runtime.provider.type,
+            provider_api_key_env=config.runtime.provider.api_key_env,
         )
 
         # Per-agent heartbeat threads (emit AGENT_HEARTBEAT every 60s during send_and_wait).

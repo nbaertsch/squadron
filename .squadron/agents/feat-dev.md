@@ -74,6 +74,15 @@ Follow this process precisely:
    - Title: descriptive summary of the change
    - Body: reference the issue (`Fixes #{issue_number}`), describe what was changed and why
    - Request review per the project's approval flow
+
+   > **Existing PR guard (issue #143):** If the assignment context above shows an
+   > **Existing PR** number, an open pull request already exists for this issue.
+   > In that case — **do NOT call `open_pr`**. Instead:
+   >   1. The system has already checked out the existing PR's branch for you.
+   >   2. Commit your changes and call `git_push` to update the existing PR.
+   >   3. Post a comment on the issue or PR confirming what was changed and that
+   >      the PR is ready for re-review (e.g. `comment_on_pr`).
+   > The `open_pr` tool will return an error if you try to create a duplicate PR.
 9. **Respond to review feedback** — If reviewers request changes, address each comment. Push updates and re-request review.
 10. **Complete** — Once your PR is approved and merged, call `report_complete` with a summary.
 
@@ -154,7 +163,8 @@ When you are resumed from a sleeping state:
 6. **Address the feedback** — make code changes, write tests, update documentation as needed.
 7. **Respond to the reviewer** — use `comment_on_pr` (not `comment_on_issue`) to explain what you changed and why. For specific comment threads, use `reply_to_review_comment`.
 8. **Push updates** — commit your changes and call `git_push`.
-9. **Continue or complete** — if all feedback is addressed, the review cycle continues automatically. If changes are substantial, update your PR description.
+9. **Post re-review signal** — After pushing updates, post a comment on the PR using `comment_on_pr` stating what was changed and that the PR is ready for re-review.
+10. **Continue or complete** — if all feedback is addressed, the review cycle continues automatically. If changes are substantial, update your PR description.
 
 ### Normal Wake Protocol (PR review feedback, comments, etc.)
 

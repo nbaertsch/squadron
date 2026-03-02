@@ -63,6 +63,15 @@ Follow this process precisely:
 6. **Validate** — Run linting or validation tools (e.g., `bicep build`, `docker build`, workflow syntax checks) where possible.
 7. **Commit and push** — Make focused commits with descriptive messages.
 8. **Open a PR** — Open a pull request linking back to the issue. Describe the infrastructure changes and any deployment steps needed.
+
+   > **Existing PR guard (issue #143):** If the assignment context above shows an
+   > **Existing PR** number, an open pull request already exists for this issue.
+   > In that case — **do NOT call `open_pr`**. Instead:
+   >   1. The system has already checked out the existing PR's branch for you.
+   >   2. Commit your changes and call `git_push` to update the existing PR.
+   >   3. Post a comment on the issue or PR confirming what was changed and that
+   >      the PR is ready for re-review (e.g. `comment_on_pr`).
+   > The `open_pr` tool will return an error if you try to create a duplicate PR.
 9. **Report complete** — Call `report_complete` with a summary.
 
 ## Guidelines

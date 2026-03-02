@@ -14,8 +14,15 @@ project:
   repo: "my-repo"             # GitHub repo name
   default_branch: main
 
+# REQUIRED — Named groups of GitHub usernames.
+# The 'maintainers' group controls who can trigger Squadron system events
+# (agent spawning, PM triage, command routing) and who receives escalation
+# notifications. Without at least one entry in 'maintainers', all
+# human-triggered events are dropped. The bot identity is always permitted.
+# See docs/configuration.md for full security model details.
 human_groups:
-  maintainers: ["your-github-username"]   # REQUIRED — at least one human for escalations
+  maintainers:
+    - your-github-username    # REQUIRED — replace with your actual GitHub username
 
 # ── OPTIONAL (defaults shown) ────────────────────────────────────────────────
 # Uncomment and modify sections as needed.

@@ -43,6 +43,7 @@ class TestEventMapping:
             "issue_comment.created",
             "pull_request.opened",
             "pull_request.closed",
+            "pull_request.labeled",
             "pull_request.synchronize",
             "pull_request_review.submitted",
             "pull_request_review_comment.created",

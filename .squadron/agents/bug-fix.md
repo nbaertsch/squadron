@@ -71,6 +71,15 @@ Follow this process precisely:
    - Title: `fix(#{issue_number}): [concise description]`
    - Body: Root cause analysis, what was changed, how the regression test verifies the fix
    - Reference: `Fixes #{issue_number}`
+
+   > **Existing PR guard (issue #143):** If the assignment context above shows an
+   > **Existing PR** number, an open pull request already exists for this issue.
+   > In that case — **do NOT call `open_pr`**. Instead:
+   >   1. The system has already checked out the existing PR's branch for you.
+   >   2. Commit your changes and call `git_push` to update the existing PR.
+   >   3. Post a comment on the issue or PR confirming what was changed and that
+   >      the PR is ready for re-review (e.g. `comment_on_pr`).
+   > The `open_pr` tool will return an error if you try to create a duplicate PR.
 10. **Respond to review feedback** — Address reviewer comments, push updates.
 11. **Complete** — Once merged, call `report_complete`.
 
@@ -116,6 +125,7 @@ If events are pending, read and process them before continuing. This ensures you
 6. **Address the feedback** — make code changes as needed.
 7. **Respond to the reviewer** — use `comment_on_pr` to explain changes. For specific threads, use `reply_to_review_comment`.
 8. **Push updates** — commit and call `git_push`.
+9. **Post re-review signal** — After pushing updates, post a comment on the PR using `comment_on_pr` stating what was changed and that the PR is ready for re-review.
 
 ### Normal Wake Protocol (PR review feedback, comments, etc.)
 

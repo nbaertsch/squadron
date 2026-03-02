@@ -1,303 +1,195 @@
 # Squadron Configuration Examples
 
-This directory contains example Squadron configurations that you can copy into your repository and customize for your needs.
+This directory contains example Squadron configurations that you can copy into your repository and customize.
 
 ## Quick Setup
 
-Copy the entire `.squadron/` directory to your repository root:
+Copy the `.squadron/` directory to your repository root:
 
 ```bash
 # From your repository root
 cp -r /path/to/squadron/examples/.squadron .
-
-# Or download directly
-curl -L https://github.com/your-org/squadron/archive/main.tar.gz | tar xz --strip=2 squadron-main/examples/.squadron
 ```
 
-## Configuration Files
+Then edit `.squadron/config.yaml` with your project details:
 
-### `.squadron/config.yaml`
-Main project configuration containing:
-- **Project metadata** (name, owner, repo)
-- **Human groups** (maintainers, reviewers)
-- **Label taxonomy** (types, priorities, states)
-- **Branch naming conventions**
-- **Agent triggers and circuit breaker overrides**
-
-**Required customization:**
 ```yaml
 project:
   name: "YOUR-PROJECT-NAME"    # Change this
-  owner: "YOUR-GITHUB-ORG"     # Change this  
+  owner: "YOUR-GITHUB-ORG"     # Change this
   repo: "YOUR-REPO-NAME"       # Change this
 
 human_groups:
   maintainers: ["YOUR-USERNAME"]  # Change this
 ```
 
+## Configuration Files
+
+### `.squadron/config.yaml`
+
+Main project configuration containing:
+- **Project metadata** (name, owner, repo, default branch)
+- **Human groups** (maintainers for escalations)
+- **Label taxonomy** (types, priorities, states)
+- **Branch naming conventions**
+- **Circuit breaker defaults**
+
 ### `.squadron/agents/`
+
 Agent definitions using Markdown with YAML frontmatter:
 
-- **`pm.md`** - Project manager (triages issues, assigns work)
-- **`feat-dev.md`** - Feature development agent
-- **`bug-fix.md`** - Bug fix specialist
-- **`pr-review.md`** - General code review
-- **`security-review.md`** - Security-focused review
+| File | Agent | Role |
+|------|-------|------|
+| `pm.md` | Project Manager | Triages issues, applies labels |
+| `feat-dev.md` | Feature Developer | Implements new features |
+| `bug-fix.md` | Bug Fix Agent | Diagnoses and fixes bugs |
+| `pr-review.md` | PR Reviewer | Reviews code quality |
+| `security-review.md` | Security Reviewer | Reviews for vulnerabilities |
 
-## Agent Roles and Triggers
+## Label → Agent Trigger Mapping
 
-### PM Agent (Project Manager)
-- **Triggers**: New issues, issue updates, @squadron-dev mentions
-- **Responsibilities**:
-  - Triage incoming issues
-  - Apply appropriate labels
-  - Assign issues to development agents
-  - Escalate complex issues to humans
-- **Tools**: Issue management, registry introspection, escalation
-- **Lifecycle**: Ephemeral (runs once per trigger)
-
-**Example trigger:**
-```
-New issue labeled "feature" → PM agent triages → Assigns to feat-dev agent
-```
-
-### Development Agents
-
-#### feat-dev (Feature Development)
-- **Triggers**: Issues labeled `feature` 
-- **Responsibilities**: Implement new features with tests and documentation
-- **Tools**: Git operations, PR creation, issue management
-- **Lifecycle**: Persistent (can sleep/wake across work sessions)
-
-#### bug-fix (Bug Fixes)
-- **Triggers**: Issues labeled `bug`
-- **Responsibilities**: Fix bugs, regressions, and issues
-- **Tools**: Git operations, PR creation, debugging tools
-- **Lifecycle**: Persistent
-
-#### docs-dev (Documentation)
-- **Triggers**: Issues labeled `docs` or `documentation`
-- **Responsibilities**: Update documentation, guides, and API docs
-- **Tools**: Git operations, repository introspection
-- **Lifecycle**: Persistent
-
-### Review Agents
-
-#### pr-review (Code Review)
-- **Triggers**: PR opened by development agents
-- **Responsibilities**: Review code quality, suggest improvements
-- **Tools**: PR analysis, review submission, file inspection
-- **Lifecycle**: Persistent
-
-#### security-review (Security Review)
-- **Triggers**: PRs labeled `security` or touching security-sensitive files
-- **Responsibilities**: Security-focused code review
-- **Tools**: PR analysis, security scanning, review submission
-- **Lifecycle**: Persistent
+| Label applied to issue | Agent spawned |
+|-----------------------|---------------|
+| `feature` | `feat-dev` |
+| `bug` | `bug-fix` |
+| `security` | `security-review` |
+| `documentation` | `docs-dev` |
+| `infrastructure` | Use `@squadron-dev infra-dev` mention |
 
 ## Customization Examples
 
-### Adding a Custom Agent
+### Adding a Documentation Agent
 
-Create `.squadron/agents/api-docs.md`:
+Create `.squadron/agents/docs-dev.md`:
 
 ```yaml
 ---
-name: api-docs
-description: API documentation specialist
+name: docs-dev
+display_name: Documentation Developer
+emoji: "📝"
+description: Writes and updates documentation
 tools:
-  - read_issue
-  - open_pr
+  - read_file
+  - write_file
+  - bash
   - git_push
+  - open_pr
+  - read_issue
+  - comment_on_issue
   - check_for_events
   - report_complete
-  - get_repo_info
-circuit_breaker:
-  max_turns: 30
-  max_duration: 1800
+lifecycle: persistent
 ---
 
-# API Documentation Agent
+# Documentation Agent
 
-You are responsible for maintaining comprehensive API documentation...
+You are a Documentation Developer agent for the {project_name} project.
 
-## Your Process
-1. Read the issue to understand what API changes were made
-2. Update OpenAPI/Swagger specifications
-3. Generate and update documentation
-4. Create a PR with the documentation changes
+## Your Task
 
-## Guidelines
-- Always include code examples
-- Update both reference docs and tutorials
-- Ensure documentation is accurate and up-to-date
+You have been assigned issue #{issue_number}: **{issue_title}**
+
+Issue description:
+{issue_body}
+
+## Workflow
+
+1. Read the issue to understand what documentation needs updating
+2. Review existing documentation and the codebase
+3. Create your branch: `{branch_name}` from `{base_branch}`
+4. Write clear, accurate documentation with examples
+5. Open a PR referencing `Fixes #{issue_number}`
+6. Address review feedback
+7. Call `report_complete` after the PR merges
 ```
 
-### Custom Label Configuration
+Then add the trigger in `config.yaml`:
+
+```yaml
+agent_roles:
+  docs-dev:
+    triggers:
+      - issue_labeled: "documentation"
+    lifecycle: persistent
+```
+
+### Custom Labels and Priorities
 
 ```yaml
 # .squadron/config.yaml
 labels:
-  types: [feature, bug, enhancement, task, question]
-  priorities: [critical, high, normal, low]
-  states: [needs-triage, in-progress, blocked, review, testing]
-  custom: [frontend, backend, database, security]
-
-# Custom agent triggers
-agents:
-  api-docs:
-    triggers:
-      - issue_labeled: ["api", "documentation"]
-      - pr_opened: 
-          paths: ["src/api/**", "docs/api/**"]
+  types: [feature, bug, enhancement, task]
+  priorities: [p0, p1, p2, p3]
+  states: [needs-triage, in-progress, blocked, review]
 ```
 
-### Environment-Specific Configuration
+### Circuit Breaker Tuning
 
-Development environment:
 ```yaml
-# .squadron/config.dev.yaml  
+# Stricter limits for development/testing
 circuit_breakers:
   defaults:
-    max_duration: 300  # Shorter timeouts for dev
-    
-logging:
-  level: DEBUG
-```
+    max_turns: 20
+    max_tool_calls: 50
+    max_active_duration: 1800  # 30 minutes
 
-Production environment:
-```yaml
-# .squadron/config.prod.yaml
+# Production defaults
 circuit_breakers:
   defaults:
-    max_duration: 3600  # Longer timeouts for prod
-    
-monitoring:
-  alerts: true
-  slack_webhook: "https://hooks.slack.com/..."
-```
-
-### Advanced Tool Configurations
-
-Custom tool selection for specialized agents:
-
-```yaml
-# High-privilege agent with administrative tools
----
-name: release-manager
-tools:
-  - read_issue
-  - open_pr
-  - git_push
-  - merge_pr
-  - create_issue
-  - label_issue
-  - close_issue
-  - delete_branch
----
-
-# Security-focused agent with minimal tools
----
-name: security-scanner
-tools:
-  - read_issue
-  - comment_on_issue
-  - submit_pr_review
-  - escalate_to_human
----
+    max_turns: 50
+    max_tool_calls: 200
+    max_active_duration: 7200  # 2 hours
 ```
 
 ## Best Practices
 
 ### Agent Design
+
 1. **Single responsibility**: Each agent should have a clear, focused purpose
 2. **Minimal tools**: Only grant tools the agent actually needs
-3. **Clear instructions**: Provide detailed system prompts with examples
-4. **Error handling**: Include guidance for common failure scenarios
+3. **Clear system prompt**: Include step-by-step workflow and quality guidelines
+4. **Error guidance**: Tell agents when to use `report_blocked` vs. `report_complete`
 
 ### Configuration Management
-1. **Version control**: Keep all `.squadron/` files in version control
-2. **Environment separation**: Use different configs for dev/staging/prod
-3. **Secrets management**: Never commit API keys or sensitive data
-4. **Documentation**: Document any customizations you make
+
+1. **Version control**: Commit all `.squadron/` files
+2. **Secret separation**: Never put API keys in config files
+3. **Test incrementally**: Add one agent at a time when customizing
 
 ### Security
-1. **Principle of least privilege**: Agents should have minimal required permissions
-2. **Review permissions**: Regularly audit what tools each agent can access
-3. **Monitor usage**: Track agent actions and resource consumption
-4. **Human oversight**: Ensure critical actions require human approval
 
-## Testing Your Configuration
-
-### Validate Configuration
-```bash
-# Test configuration validity
-squadron validate-config --config .squadron/config.yaml
-
-# Test agent definitions
-squadron validate-agents --agents-dir .squadron/agents/
-```
-
-### Local Testing
-```bash
-# Run Squadron locally
-squadron serve --repo-root . --config .squadron/config.yaml
-
-# Test with sample issues
-squadron test-workflow --issue-template examples/test-issues/feature.md
-```
-
-### Gradual Rollout
-1. **Start with PM only**: Test issue triaging first
-2. **Add one dev agent**: Test feature development workflow
-3. **Add review agents**: Test complete PR lifecycle
-4. **Scale up**: Add more specialized agents as needed
+1. **Principle of least privilege**: Agents get only what they need
+2. **Review periodically**: Audit tool grants regularly
+3. **Human oversight**: Keep `needs-human` escalation path clear
 
 ## Troubleshooting
 
-### Common Issues
+### Agent not triggering
 
-**Agent not triggering:**
+Verify the trigger label matches exactly what's in your GitHub repo:
+
 ```yaml
-# Check trigger configuration
-agents:
-  my-agent:
+agent_roles:
+  feat-dev:
     triggers:
-      - issue_labeled: ["correct-label-name"]  # Must match exactly
+      - issue_labeled: "feature"  # Must match the label name exactly
 ```
 
-**Tool permission errors:**
+### Tool permission errors
+
+Verify the tool name is spelled correctly in frontmatter:
+
 ```yaml
-# Verify tool is available
----
 tools:
-  - open_pr  # Tool name must match exactly
----
+  - open_pr    # Correct
+  - open-pr    # Wrong — use underscores
 ```
 
-**Configuration syntax errors:**
-```bash
-# Validate YAML syntax
-squadron validate-config .squadron/config.yaml
-```
-
-### Debug Mode
-```bash
-# Run with verbose logging
-LOG_LEVEL=DEBUG squadron serve --repo-root .
-
-# Test specific agent
-squadron test-agent --agent feat-dev --issue 123
-```
-
-For more troubleshooting help, see [docs/troubleshooting.md](../docs/troubleshooting.md).
+For more troubleshooting, see [docs/troubleshooting.md](../docs/troubleshooting.md).
 
 ## Next Steps
 
-1. **Copy configuration** to your repository
-2. **Customize** for your project needs
-3. **Test locally** before deploying
-4. **Deploy to production** using [deployment guide](../deploy/README.md)
-5. **Monitor and iterate** based on usage patterns
-
-For complete setup instructions, see [Getting Started Guide](../docs/getting-started.md).
+1. Copy configuration to your repository
+2. Customize for your project needs
+3. Deploy using the [deployment guide](../deploy/README.md)
+4. Monitor activity via the [observability dashboard](../docs/observability.md)
