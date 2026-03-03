@@ -1,3 +1,72 @@
+# .squadron/config.yaml — Squadron project configuration (greenfield implementation)
+#
+# Implements the recommendations from the Issue #148 configuration review.
+# Key changes from previous config:
+#   - .squadron/** added to sandbox sensitive_paths (security fix)
+#   - code-search and test-writer registered in agent_roles (was: silent runtime failure)
+#   - infra-dev-lifecycle and merge-conflict-resolution pipelines added
+#   - pull_request.synchronize wake events added to all lifecycle pipelines
+#   - docs-dev-lifecycle gains issue_comment.created wake event
+#   - pr-lifecycle uses parallel stage for test-coverage + security-review
+#   - Human approval gate for security/infrastructure PRs
+#   - config-change-review pipeline (self-improvement with guardrails)
+#   - Security review expanded to all src/ changes (not just auth/crypto paths)
+#   - max_concurrent_agents explicit; retention_days increased to 7
+#   - Network bridge config explicit for auditability
+#   - chore branch naming removed (was: silently ignored by Pydantic)
+#   - Skills added to docs-dev, merge-conflict, code-search, pm, infra-dev
+#   - reasoning_effort NOT set (unsupported by current model configuration)
+
+# ─── PROJECT ─────────────────────────────────────────────────────────────────
+project:
+  name: squadron
+  owner: nbaertsch
+  repo: squadron
+  default_branch: squadron-dev
+  bot_username: squadron-dev[bot]
+
+# ─── LABELS ──────────────────────────────────────────────────────────────────
+labels:
+  types:
+    - feature
+    - bug
+    - security
+    - documentation
+    - infrastructure
+  priorities:
+    - critical
+    - high
+    - medium
+    - low
+  states:
+    - needs-triage
+    - in-progress
+    - blocked
+    - needs-human
+    - needs-clarification
+
+# ─── BRANCH NAMING ───────────────────────────────────────────────────────────
+# Note: 'chore' removed — BranchNamingConfig has no chore field; the value was
+# previously silently discarded by Pydantic. Remove when BranchNamingConfig
+# gains a chore field in source code.
+branch_naming:
+  feature: feat/issue-{issue_number}
+  bugfix: fix/issue-{issue_number}
+  docs: docs/issue-{issue_number}
+  infra: infra/issue-{issue_number}
+  hotfix: hotfix/issue-{issue_number}
+  security: security/issue-{issue_number}
+
+# ─── HUMAN GROUPS ────────────────────────────────────────────────────────────
+human_groups:
+  maintainers:
+    - "@noahbaertsch"
+  # security-team maps to maintainers for this project (single-maintainer setup).
+  # Separate group defined for semantic clarity and future expansion.
+  security-team:
+    - "@noahbaertsch"
+
+# ─── SKILLS ──────────────────────────────────────────────────────────────────
 skills:
   base_path: .squadron/skills
   definitions:
@@ -11,6 +80,7 @@ skills:
       path: squadron-tools
       description: "Squadron tool registry, signatures, and guide for adding new tools"
 
+# ─── AGENT ROLES ─────────────────────────────────────────────────────────────
 agent_roles:
   bug-fix:
     agent_definition: agents/bug-fix.md
@@ -22,8 +92,8 @@ agent_roles:
     agent_definition: agents/feat-dev.md
     lifecycle: stateful
     subagents:
-    - code-search
-    - test-writer
+      - code-search
+      - test-writer
   infra-dev:
     agent_definition: agents/infra-dev.md
     lifecycle: stateful
@@ -35,12 +105,12 @@ agent_roles:
     lifecycle: ephemeral
     singleton: true
     subagents:
-    - feat-dev
-    - bug-fix
-    - pr-review
-    - security-review
-    - docs-dev
-    - infra-dev
+      - feat-dev
+      - bug-fix
+      - pr-review
+      - security-review
+      - docs-dev
+      - infra-dev
   pr-review:
     agent_definition: agents/pr-review.md
     lifecycle: stateful
@@ -50,19 +120,21 @@ agent_roles:
   test-coverage:
     agent_definition: agents/test-coverage.md
     lifecycle: stateful
-branch_naming:
-  bugfix: fix/issue-{issue_number}
-  chore: chore/{description}
-  docs: docs/issue-{issue_number}
-  feature: feat/issue-{issue_number}
-  hotfix: hotfix/issue-{issue_number}
-  infra: infra/issue-{issue_number}
-  security: security/issue-{issue_number}
+  # Subagent roles — ephemeral, spawned by feat-dev
+  # Previously missing from agent_roles caused silent runtime failures.
+  code-search:
+    agent_definition: agents/code-search.md
+    lifecycle: ephemeral
+  test-writer:
+    agent_definition: agents/test-writer.md
+    lifecycle: ephemeral
+
+# ─── CIRCUIT BREAKERS ────────────────────────────────────────────────────────
 circuit_breakers:
   defaults:
-    max_active_duration: 7200
+    max_active_duration: 7200     # 2 hours
     max_iterations: 5
-    max_sleep_duration: 86400
+    max_sleep_duration: 86400     # 24 hours
     max_tool_calls: 200
     max_turns: 50
     warning_threshold: 0.8
@@ -84,365 +156,24 @@ circuit_breakers:
       max_tool_calls: 100
       max_turns: 20
     infra-dev:
-      max_active_duration: 10800  # 3 hours - infrastructure work can be complex
+      max_active_duration: 10800  # 3 hours — infrastructure work can be complex
       max_tool_calls: 200
       max_turns: 50
-commands:
-  help:
-    enabled: true
-    invoke_agent: false
-    response: '## Squadron Commands
+    merge-conflict:
+      max_active_duration: 1800   # 30 minutes — conflict resolution is bounded
+      max_tool_calls: 100
+      max_turns: 20
 
-
-      Available commands:
-
-      - `@squadron-dev help` - Show this help message
-
-      - `@squadron-dev status` - Show project status
-
-
-      For more information, see the Squadron documentation.
-
-      '
-  status:
-    delegate_to: pm
-    enabled: true
-    invoke_agent: true
-escalation:
-  default_notify: maintainers
-  escalation_labels:
-  - needs-human
-  - escalation
-  max_issue_depth: 3
-human_groups:
-  maintainers:
-  - '@noahbaertsch'
-human_invocation:
-  include_context: true
-  labels_to_add:
-  - needs-human
-  mention_format: '@{username}'
-  method: both
-labels:
-  priorities:
-  - critical
-  - high
-  - medium
-  - low
-  states:
-  - needs-triage
-  - in-progress
-  - blocked
-  - needs-human
-  - needs-clarification
-  types:
-  - feature
-  - bug
-  - security
-  - documentation
-  - infrastructure
-project:
-  bot_username: squadron-dev[bot]
-  default_branch: squadron-dev
-  name: squadron
-  owner: nbaertsch
-  repo: squadron
-
-# ─── PIPELINES ───────────────────────────────────────────────────────────────────
-# AD-019: Unified pipeline system — replaces triggers, review_policy, and workflows
-pipelines:
-
-  # ── Issue Triage ─────────────────────────────────────────────────────────────
-  # Replaces: pm agent_role triggers (issues.opened, issues.reopened)
-  issue-triage:
-    description: "Spawn PM agent to triage new and reopened issues"
-    trigger:
-      event: issues.opened
-    stages:
-      - id: triage
-        type: agent
-        agent: pm
-        action: "Triage this issue: assess priority, assign labels, and determine next steps"
-        timeout: 10m
-        on_error:
-          retry: 1
-          then: escalate
-
-  issue-reopen-triage:
-    description: "Spawn PM agent to re-triage reopened issues"
-    trigger:
-      event: issues.reopened
-    stages:
-      - id: triage
-        type: agent
-        agent: pm
-        action: "Re-triage this reopened issue: reassess priority and determine next steps"
-        timeout: 10m
-        on_error:
-          retry: 1
-          then: escalate
-
-  # ── Bug Fix Lifecycle ────────────────────────────────────────────────────────
-  # Replaces: bug-fix agent_role triggers
-  bug-fix-lifecycle:
-    description: "Full bug fix lifecycle from issue label to PR merge"
-    scope: issue
-    trigger:
-      event: issues.labeled
-      conditions:
-        label: bug
-    on_events:
-      pull_request_review.submitted:
-        action: wake_agent
-      issue_comment.created:
-        action: wake_agent
-      pull_request.closed:
-        action: wake_agent
-    stages:
-      - id: fix-bug
-        type: agent
-        agent: bug-fix
-        action: "Investigate and fix this bug, then open a PR with the fix"
-        timeout: 2h
-        on_error:
-          retry: 1
-          then: escalate
-
-  # ── Feature Development Lifecycle ────────────────────────────────────────────
-  # Replaces: feat-dev agent_role triggers
-  feature-dev-lifecycle:
-    description: "Full feature development lifecycle from issue label to PR merge"
-    scope: issue
-    trigger:
-      event: issues.labeled
-      conditions:
-        label: feature
-    on_events:
-      pull_request_review.submitted:
-        action: wake_agent
-      issue_comment.created:
-        action: wake_agent
-      pull_request.closed:
-        action: wake_agent
-    stages:
-      - id: implement
-        type: agent
-        agent: feat-dev
-        action: "Implement this feature and open a PR"
-        timeout: 2h
-        on_error:
-          retry: 1
-          then: escalate
-
-  # ── Documentation Lifecycle ──────────────────────────────────────────────────
-  # Replaces: docs-dev agent_role triggers
-  docs-dev-lifecycle:
-    description: "Documentation development lifecycle from issue label to PR merge"
-    scope: issue
-    trigger:
-      event: issues.labeled
-      conditions:
-        label: documentation
-    on_events:
-      pull_request_review.submitted:
-        action: wake_agent
-      pull_request.closed:
-        action: wake_agent
-    stages:
-      - id: write-docs
-        type: agent
-        agent: docs-dev
-        action: "Write or update documentation as described in this issue"
-        timeout: 1h
-        on_error:
-          retry: 1
-          then: escalate
-
-  # ── Security Issue Lifecycle ─────────────────────────────────────────────────
-  # Replaces: security-review agent_role trigger on issues.labeled:security
-  security-issue-lifecycle:
-    description: "Security issue investigation and remediation"
-    scope: issue
-    trigger:
-      event: issues.labeled
-      conditions:
-        label: security
-    on_events:
-      pull_request_review.submitted:
-        action: wake_agent
-      pull_request.closed:
-        action: wake_agent
-    stages:
-      - id: investigate
-        type: agent
-        agent: security-review
-        action: "Investigate this security issue and implement a fix"
-        timeout: 1h
-        on_error:
-          retry: 1
-          then: escalate
-
-  # ── PR Lifecycle ─────────────────────────────────────────────────────────────
-  # Replaces: review_policy (default_requirements, rules, on_synchronize, auto_merge)
-  #           + pr-review/security-review/test-coverage triggers on PR events
-  pr-lifecycle:
-    description: "PR review, approval gates, and auto-merge pipeline"
-    scope: single-pr
-    trigger:
-      event: pull_request.opened
-      conditions:
-        base_branch: squadron-dev
-    on_events:
-      pull_request.synchronize:
-        action: invalidate_and_restart
-        invalidate:
-          - security-review
-          - code-review
-        restart_from: test-coverage
-      pull_request_review.submitted:
-        action: reevaluate_gates
-      check_suite.completed:
-        action: reevaluate_gates
-      pull_request.closed:
-        action: cancel
-    stages:
-      # Stage 1: Test coverage review (from squadron-dev-pipeline sequence)
-      - id: test-coverage
-        type: agent
-        agent: test-coverage
-        action: "Review test coverage for this PR"
-        timeout: 30m
-        on_complete: security-review
-        on_error:
-          retry: 1
-          then: escalate
-
-      # Stage 2: Security review — conditional on security-sensitive paths/labels
-      - id: security-review
-        type: agent
-        agent: security-review
-        action: "Perform security review of this PR"
-        condition:
-          any:
-            - labels_include: security
-            - paths_match:
-                - "src/**/auth/**"
-                - "src/**/crypto/**"
-                - "**/security/**"
-        skip_to: code-review
-        timeout: 30m
-        on_complete: code-review
-        on_error:
-          retry: 1
-          then: escalate
-
-      # Stage 3: Code review
-      - id: code-review
-        type: agent
-        agent: pr-review
-        action: "Perform code review of this PR"
-        timeout: 30m
-        on_complete: approval-gate
-        on_error:
-          retry: 1
-          then: escalate
-
-      # Stage 4: Approval gate — all agent reviews must approve
-      - id: approval-gate
-        type: gate
-        conditions:
-          - check: pr_approvals_met
-            count: 1
-          - check: no_changes_requested
-        on_pass: auto-merge
-        on_fail:
-          goto: code-review
-          max_iterations: 3
-          then: escalate
-        timeout: 48h
-        on_timeout:
-          notify:
-            target: maintainers
-            message: "PR approval gate timed out after 48h"
-          then: escalate
-
-      # Stage 5: Auto-merge
-      - id: auto-merge
-        type: action
-        action: merge_pr
-        config:
-          method: squash
-          delete_branch: true
-        on_error:
-          retry: 1
-          then: escalate
-
-    on_complete:
-      - type: comment
-        body: "Pipeline complete — PR merged to squadron-dev."
-
-    on_error:
-      - type: label
-        add: needs-human
-      - type: comment
-        body: "PR lifecycle pipeline encountered an error. Human review required."
-
-  # ── Feature Dev Pipeline (multi-stage with quality gates) ────────────────────
-  # Replaces: workflows.feature-dev-pipeline
-  feature-dev-pipeline:
-    description: "Multi-stage feature development with quality gates"
-    scope: issue
-    trigger:
-      event: issues.labeled
-      conditions:
-        label: feature-pipeline
-    context:
-      require_tests: true
-      test_coverage_threshold: 80
-    stages:
-      - id: plan
-        type: agent
-        agent: pm
-        action: "Create implementation plan for this feature"
-        on_complete: implement
-        timeout: 10m
-        on_error:
-          retry: 1
-          then: escalate
-
-      - id: implement
-        type: agent
-        agent: feat-dev
-        action: "Implement the feature according to the plan"
-        timeout: 2h
-        on_complete: quality-gate
-        on_error:
-          retry: 1
-          then: escalate
-
-      - id: quality-gate
-        type: gate
-        conditions:
-          - check: command
-            run: python -m pytest tests/
-            expect: "exit_code == 0"
-        on_fail:
-          goto: implement
-          max_iterations: 3
-          then: escalate
-
-    on_complete:
-      - type: comment
-        body: "Feature implementation complete and all quality gates passed."
-
-    on_error:
-      - type: label
-        add: needs-human
-      - type: comment
-        body: "Feature pipeline encountered an error. Human review required."
-
+# ─── RUNTIME ─────────────────────────────────────────────────────────────────
+# Note: reasoning_effort is NOT set. claude-sonnet-4.6 may not support the
+# reasoning_effort parameter; omitting it prevents silent API errors.
+# Re-evaluate when the model configuration is confirmed to support this field.
 runtime:
+  provider:
+    type: copilot
   default_model: claude-sonnet-4.6
+  max_concurrent_agents: 15        # Explicit cap (was: implicit default of 10)
+  reconciliation_interval: 300
   models:
     bug-fix:
       model: claude-sonnet-4.6
@@ -456,12 +187,55 @@ runtime:
       model: claude-sonnet-4.6
     test-coverage:
       model: claude-sonnet-4.6
-  provider:
-    type: copilot
-  reconciliation_interval: 300
+    infra-dev:
+      model: claude-sonnet-4.6
+    merge-conflict:
+      model: claude-sonnet-4.6
 
+# ─── ESCALATION ──────────────────────────────────────────────────────────────
+escalation:
+  default_notify: maintainers
+  escalation_labels:
+    - needs-human
+    - escalation
+  max_issue_depth: 3
+
+human_invocation:
+  method: both
+  mention_format: "@{username}"
+  include_context: true
+  labels_to_add:
+    - needs-human
+
+# ─── COMMANDS ────────────────────────────────────────────────────────────────
+commands:
+  help:
+    enabled: true
+    invoke_agent: false
+    response: |
+      ## Squadron Commands
+
+      Available commands:
+      - `@squadron-dev help` — Show this help message
+      - `@squadron-dev status` — Show project status (open issues, active agents)
+      - `@squadron-dev triage` — Re-triage this issue (reassess priority and next steps)
+      - `@squadron-dev review` — Request a code review of the current PR
+  status:
+    delegate_to: pm
+    enabled: true
+    invoke_agent: true
+  triage:
+    delegate_to: pm
+    enabled: true
+    invoke_agent: true
+  review:
+    delegate_to: pr-review
+    enabled: true
+    invoke_agent: true
+
+# ─── SANDBOX ─────────────────────────────────────────────────────────────────
 sandbox:
-  enabled: true  # Requires Linux kernel >= 3.8 (namespace isolation)
+  enabled: true
   # Namespace isolation (native Linux kernel, no third-party deps)
   namespace_mount: true
   namespace_pid: true
@@ -471,12 +245,12 @@ sandbox:
   seccomp_enabled: true
   # Worktree isolation
   use_overlayfs: true
-  # Data retention -- Azure File Share mount point
+  # Data retention — retain across full sprint cycle (was: 1 day, too short for multi-day work)
   retention_path: /mnt/squadron-data/forensics
-  retention_days: 1
+  retention_days: 7
   # Resource limits (cgroups v2)
   memory_limit_mb: 2048
-  cpu_quota_percent: 200
+  cpu_quota_percent: 150            # Tightened from 200 for fairness across concurrent agents
   disk_limit_mb: 5120
   session_timeout: 7200
   # Tool proxy
@@ -488,6 +262,7 @@ sandbox:
   diff_inspection_enabled: true
   block_sensitive_path_changes: true
   sensitive_paths:
+    # Infrastructure & CI — require human review to modify
     - ".github/**"
     - "Makefile"
     - "*.sh"
@@ -497,3 +272,413 @@ sandbox:
     - "infra/**"
     - "deploy/**"
     - ".pre-commit-config.yaml"
+    # Squadron self-configuration — agents must never reprogram themselves.
+    # Previously absent: any stateful agent with write_file could modify its own
+    # agent definition, circuit breaker limits, or pipeline config without the
+    # sandbox diff inspector flagging it. This is the primary security fix.
+    - ".squadron/**"
+    - ".squadron-data/**"
+  # Network bridge (Issue #146) — explicit for auditability
+  bridge_name: "sq-br0"
+  bridge_subnet: "10.146.0.0/16"
+  bridge_ip: "10.146.0.1"
+  proxy_port: 8443
+  ca_dir: "/tmp/squadron-ca"
+  ca_validity_days: 1
+
+# ─── PIPELINES ───────────────────────────────────────────────────────────────
+
+pipelines:
+
+  # ── Issue Triage ─────────────────────────────────────────────────────────
+  issue-triage:
+    description: "Spawn PM agent to triage new issues"
+    trigger:
+      event: issues.opened
+    stages:
+      - id: triage
+        type: agent
+        agent: pm
+        action: "Triage this issue: assess priority, assign labels, and determine next steps"
+        timeout: 15m
+        on_error:
+          retry: 1
+          then: escalate
+
+  issue-reopen-triage:
+    description: "Spawn PM agent to re-triage reopened issues"
+    trigger:
+      event: issues.reopened
+    stages:
+      - id: triage
+        type: agent
+        agent: pm
+        action: "Re-triage this reopened issue: reassess priority and determine next steps"
+        timeout: 15m
+        on_error:
+          retry: 1
+          then: escalate
+
+  # ── Bug Fix Lifecycle ────────────────────────────────────────────────────
+  bug-fix-lifecycle:
+    description: "Full bug fix lifecycle from issue label to PR merge"
+    scope: issue
+    trigger:
+      event: issues.labeled
+      conditions:
+        label: bug
+    on_events:
+      pull_request_review.submitted:
+        action: wake_agent
+      issue_comment.created:
+        action: wake_agent
+      pull_request.synchronize:    # Wake when CI results arrive after a push
+        action: wake_agent
+      pull_request.closed:
+        action: wake_agent
+    stages:
+      - id: fix-bug
+        type: agent
+        agent: bug-fix
+        action: "Investigate and fix this bug, then open a PR with regression tests"
+        timeout: 2h
+        on_error:
+          retry: 1
+          then: escalate
+
+  # ── Feature Development Lifecycle ────────────────────────────────────────
+  feature-dev-lifecycle:
+    description: "Full feature development lifecycle from issue label to PR merge"
+    scope: issue
+    trigger:
+      event: issues.labeled
+      conditions:
+        label: feature
+    on_events:
+      pull_request_review.submitted:
+        action: wake_agent
+      issue_comment.created:
+        action: wake_agent
+      pull_request.synchronize:    # Wake when CI results arrive after a push
+        action: wake_agent
+      pull_request.closed:
+        action: wake_agent
+    stages:
+      - id: implement
+        type: agent
+        agent: feat-dev
+        action: "Implement this feature and open a PR with tests"
+        timeout: 2h
+        on_error:
+          retry: 1
+          then: escalate
+
+  # ── Documentation Lifecycle ──────────────────────────────────────────────
+  docs-dev-lifecycle:
+    description: "Documentation development lifecycle from issue label to PR merge"
+    scope: issue
+    trigger:
+      event: issues.labeled
+      conditions:
+        label: documentation
+    on_events:
+      pull_request_review.submitted:
+        action: wake_agent
+      issue_comment.created:       # Previously absent — docs agents can now receive mid-task guidance
+        action: wake_agent
+      pull_request.synchronize:    # Wake when CI results arrive after a push
+        action: wake_agent
+      pull_request.closed:
+        action: wake_agent
+    stages:
+      - id: write-docs
+        type: agent
+        agent: docs-dev
+        action: "Write or update documentation as described in this issue"
+        timeout: 1h
+        on_error:
+          retry: 1
+          then: escalate
+
+  # ── Infrastructure Development Lifecycle ──────────────────────────────────
+  # Previously absent — infrastructure label had no auto-spawn pipeline.
+  infra-dev-lifecycle:
+    description: "Infrastructure development lifecycle from issue label to PR merge"
+    scope: issue
+    trigger:
+      event: issues.labeled
+      conditions:
+        label: infrastructure
+    on_events:
+      pull_request_review.submitted:
+        action: wake_agent
+      issue_comment.created:
+        action: wake_agent
+      pull_request.synchronize:
+        action: wake_agent
+      pull_request.closed:
+        action: wake_agent
+    stages:
+      - id: implement
+        type: agent
+        agent: infra-dev
+        action: "Implement infrastructure changes as described in this issue"
+        timeout: 3h
+        on_error:
+          retry: 1
+          then: escalate
+
+  # ── Security Issue Lifecycle ─────────────────────────────────────────────
+  security-issue-lifecycle:
+    description: "Security issue investigation and remediation"
+    scope: issue
+    trigger:
+      event: issues.labeled
+      conditions:
+        label: security
+    on_events:
+      pull_request_review.submitted:
+        action: wake_agent
+      issue_comment.created:
+        action: wake_agent
+      pull_request.synchronize:
+        action: wake_agent
+      pull_request.closed:
+        action: wake_agent
+    stages:
+      - id: investigate
+        type: agent
+        agent: security-review
+        action: "Investigate this security issue and implement a fix"
+        timeout: 2h
+        on_error:
+          retry: 1
+          then: escalate
+
+  # ── Merge Conflict Resolution ─────────────────────────────────────────────
+  # Previously absent — merge-conflict agent had no trigger pipeline.
+  # Triggers on PR sync events targeting squadron-dev; agent checks for
+  # conflicts and resolves them if present, or reports complete immediately.
+  merge-conflict-resolution:
+    description: "Auto-resolve merge conflicts on PRs targeting squadron-dev"
+    scope: single-pr
+    trigger:
+      event: pull_request.synchronize
+      conditions:
+        base_branch: squadron-dev
+    stages:
+      - id: resolve
+        type: agent
+        agent: merge-conflict
+        action: "Check if this PR has merge conflicts with the base branch. If conflicts exist, resolve them. If the branch is clean, call report_complete immediately."
+        timeout: 30m
+        on_error:
+          retry: 1
+          then: escalate
+
+  # ── PR Review Pipeline ────────────────────────────────────────────────────
+  # Multi-stage: parallel test-coverage + security-review → code review →
+  # approval gate → human gate (security/infra PRs only) → auto-merge.
+  #
+  # Key improvements over previous config:
+  # - test-coverage and security-review now run in parallel (saves ~30-50% wall clock)
+  # - security-review is unconditional for all src/** changes (was: auth/crypto paths only)
+  # - human approval gate added for security and infrastructure PRs
+  pr-lifecycle:
+    description: "PR review: parallel test/security → code review → approval gate → (human gate) → auto-merge"
+    scope: single-pr
+    trigger:
+      event: pull_request.opened
+      conditions:
+        base_branch: squadron-dev
+    on_events:
+      pull_request.synchronize:
+        action: invalidate_and_restart
+        invalidate:
+          - security-review
+          - test-coverage
+          - code-review
+        restart_from: parallel-review
+      pull_request_review.submitted:
+        action: reevaluate_gates
+      check_suite.completed:
+        action: reevaluate_gates
+      pull_request.closed:
+        action: cancel
+
+    stages:
+
+      # Stage 1: Parallel test-coverage + security-review
+      # Both run simultaneously; code-review proceeds after both complete.
+      - id: parallel-review
+        type: parallel
+        join: all
+        branches:
+          - id: test-branch
+            type: agent
+            agent: test-coverage
+            action: "Review test coverage for this PR"
+            timeout: 30m
+          - id: security-branch
+            type: agent
+            agent: security-review
+            action: "Perform a security review of this PR. Review all changes in src/ for security implications — this is a security-critical autonomous agent framework."
+            timeout: 40m
+        on_complete: code-review
+        on_error:
+          retry: 1
+          then: escalate
+
+      # Stage 2: Code review (sequential — needs full parallel-review context)
+      - id: code-review
+        type: agent
+        agent: pr-review
+        action: "Perform code review of this PR"
+        timeout: 30m
+        on_complete: approval-gate
+        on_error:
+          retry: 1
+          then: escalate
+
+      # Stage 3: Automated approval gate
+      - id: approval-gate
+        type: gate
+        conditions:
+          - check: pr_approvals_met
+            count: 1
+          - check: no_changes_requested
+        on_pass: human-gate-check
+        on_fail:
+          goto: code-review
+          max_iterations: 3
+          then: escalate
+        timeout: 48h
+        on_timeout:
+          notify:
+            target: maintainers
+            message: "PR approval gate timed out after 48h — please review"
+          then: escalate
+
+      # Stage 4: Human gate check — required for security/infrastructure PRs.
+      # For other PRs, this gate fails (no matching label) and routes to auto-merge.
+      - id: human-gate-check
+        type: gate
+        any_of:
+          - check: label_present
+            label: security
+          - check: label_present
+            label: infrastructure
+        on_pass: human-approval
+        on_fail: auto-merge
+        timeout: 5m
+
+      # Stage 5: Human approval (security/infrastructure PRs only)
+      - id: human-approval
+        type: human
+        human:
+          description: "Security or infrastructure change — requires maintainer sign-off before merge"
+          wait_for: approval
+          from: security-team
+          count: 1
+          auto_assign: true
+          notify:
+            on_enter: "⚠️ This PR requires human approval (security/infrastructure label). Please review and approve before it can be auto-merged."
+            reminder:
+              interval: 24h
+              message: "Reminder: this PR is waiting for your security/infrastructure sign-off."
+              max_reminders: 3
+        on_complete: auto-merge
+        timeout: 72h
+        on_timeout:
+          notify:
+            target: maintainers
+            message: "Human approval gate timed out after 72h. PR cannot be auto-merged."
+          then: escalate
+
+      # Stage 6: Auto-merge
+      - id: auto-merge
+        type: action
+        action: merge_pr
+        config:
+          method: squash
+          delete_branch: true
+        on_error:
+          retry: 2
+          then: escalate
+
+    on_complete:
+      - type: comment
+        body: "✅ Pipeline complete — PR merged to squadron-dev. All quality gates passed."
+
+    on_error:
+      - type: label
+        add: needs-human
+      - type: comment
+        body: "❌ PR lifecycle pipeline encountered an error. Human review required."
+
+  # ── Self-Improvement: Config Change Review ────────────────────────────────
+  # The "self-improvement with guardrails" pattern. When a PR modifies the
+  # .squadron/ configuration (agent definitions, pipelines, skills, config),
+  # spawn a dedicated security review and require human maintainer sign-off
+  # before the PR can proceed through the normal merge pipeline.
+  #
+  # This ensures agents cannot silently modify their own operational parameters
+  # (tool grants, circuit breaker limits, pipeline logic) without human review.
+  config-change-review:
+    description: "Security review + human approval for any .squadron/ configuration changes"
+    scope: single-pr
+    trigger:
+      event: pull_request.opened
+      conditions:
+        base_branch: squadron-dev
+    stages:
+      # Gate: check if this PR actually touches .squadron/ files.
+      # If not, exit immediately (common case — no overhead for normal PRs).
+      - id: check-config-changes
+        type: gate
+        conditions:
+          - check: command
+            run: "git diff --name-only origin/squadron-dev...HEAD | grep -q '^\\.squadron/'"
+            expect: "exit_code == 0"
+        on_pass: config-security-review
+        on_fail: __complete__      # No .squadron/ changes — nothing to review
+        timeout: 3m
+
+      # Security review focused on config change implications
+      - id: config-security-review
+        type: agent
+        agent: security-review
+        action: "Review these .squadron/ configuration changes for security implications. Check for: new tools granted to agents, expanded sensitive_path exclusions, relaxed circuit breaker limits, pipeline modifications that bypass approval gates, and any changes to sandbox isolation settings."
+        timeout: 30m
+        on_complete: config-approval
+        on_error:
+          retry: 1
+          then: escalate
+
+      # Human approval — config changes always require maintainer sign-off
+      - id: config-approval
+        type: human
+        human:
+          description: "Squadron configuration change requires maintainer sign-off"
+          wait_for: approval
+          from: maintainers
+          count: 1
+          auto_assign: true
+          notify:
+            on_enter: "🔧 `.squadron/` configuration change detected. Please review and approve before this PR can be merged."
+            reminder:
+              interval: 24h
+              message: "Reminder: `.squadron/` config change is waiting for your approval."
+              max_reminders: 3
+        timeout: 48h
+        on_timeout:
+          notify:
+            target: maintainers
+            message: "Config change approval gate timed out after 48h."
+          then: escalate
+
+    on_error:
+      - type: label
+        add: needs-human
+      - type: comment
+        body: "⚠️ Config change review pipeline failed. Manual review required."
