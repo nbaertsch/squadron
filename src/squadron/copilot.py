@@ -28,6 +28,7 @@ from typing import Any, Callable
 from copilot import CopilotClient
 from copilot import CopilotSession as SDKSession
 from copilot.types import (
+    PermissionRequestResult,
     ProviderConfig as SDKProviderConfig,
     ResumeSessionConfig as SDKResumeConfig,
     SessionConfig as SDKSessionConfig,
@@ -37,6 +38,16 @@ from squadron.config import RuntimeConfig
 from squadron.dashboard_security import DASHBOARD_API_KEY_ENV
 
 logger = logging.getLogger(__name__)
+
+
+def _approve_all_permissions(request: dict, _context: dict) -> PermissionRequestResult:
+    """Auto-approve all permission requests.
+
+    Squadron agents run inside sandboxed worktrees with env-scrubbed
+    subprocesses, so interactive permission prompts are unnecessary.
+    """
+    return PermissionRequestResult(kind="approved")
+
 
 # ── Copilot CLI authentication ────────────────────────────────────────────
 # Env var that holds the GitHub token used by the Copilot CLI to
@@ -356,6 +367,7 @@ def build_session_config(
         "model": model,
         "system_message": {"mode": "replace", "content": system_message},
         "working_directory": working_directory,
+        "on_permission_request": _approve_all_permissions,
         "infinite_sessions": {
             "enabled": True,
             "background_compaction_threshold": 0.80,
@@ -419,6 +431,7 @@ def build_resume_config(
         "model": model,
         "system_message": {"mode": "replace", "content": system_message},
         "working_directory": working_directory,
+        "on_permission_request": _approve_all_permissions,
         "infinite_sessions": {
             "enabled": True,
             "background_compaction_threshold": 0.80,
