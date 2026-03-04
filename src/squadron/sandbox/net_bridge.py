@@ -123,7 +123,10 @@ class NetworkBridge:
             return False
 
         # Assign IP to bridge.
-        await _run(f"ip addr add {ip}/{subnet_bits} dev {br}")
+        rc, _, err = await _run(f"ip addr add {ip}/{subnet_bits} dev {br}")
+        if rc != 0 and "File exists" not in err:
+            logger.error("Failed to assign %s to bridge %s: %s", ip, br, err)
+            return False
         # Bring bridge up.
         rc, _, err = await _run(f"ip link set {br} up")
         if rc != 0:
