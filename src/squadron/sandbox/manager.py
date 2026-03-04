@@ -135,6 +135,7 @@ class SandboxManager:
             self._ca.ensure_ca()
             logger.info("SandboxManager: ephemeral CA ready at %s", self._ca.cert_path)
 
+        bridge_ok = False
         if self._bridge:
             bridge_ok = await self._bridge.setup_bridge()
             if bridge_ok:
@@ -145,8 +146,8 @@ class SandboxManager:
                     "falling back to bare network namespace isolation"
                 )
 
-        # Start inference proxy (only if bridge + CA are active).
-        if self._bridge and self._bridge.is_available and self._ca:
+        # Start inference proxy (only if bridge actually came up + CA is active).
+        if bridge_ok and self._ca:
             credentials = build_credentials_from_env(
                 self._provider_type, self._provider_api_key_env
             )
