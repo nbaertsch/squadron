@@ -10,7 +10,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pydantic>=2.0",
     "aiosqlite>=0.20",
-    "github-copilot-sdk>=0.1",
+    "github-copilot-sdk>=0.1.30",
     "PyJWT[crypto]>=2.0",
     "python-dotenv>=1.0",
 ]
