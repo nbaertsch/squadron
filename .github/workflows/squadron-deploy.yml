@@ -6,7 +6,8 @@
 #   - Destroy: tear down all infrastructure
 #
 # On push to main:
-#   - Code changes (src/**, Dockerfile, pyproject.toml) → full deploy (new revision)
+#   - Code changes (src/**, Dockerfile, pyproject.toml) → wait for CI to push
+#     the Docker image, then full deploy using the SHA-tagged image
 #   - Config-only changes (.squadron/**) → sync-config (restart existing revision)
 #
 # Manual dispatch: Actions → Squadron Deploy → Run workflow
@@ -55,6 +56,7 @@ on:
 # ── Permissions ────────────────────────────────────────────────────────────
 permissions:
   contents: read
+  packages: read
 
 # ── Environment ────────────────────────────────────────────────────────────
 env:
@@ -86,14 +88,65 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════
+  # Wait for CI to push the Docker image (push events with code changes)
+  # ════════════════════════════════════════════════════════════════════
+  wait-for-image:
+    needs: [detect]
+    if: github.event_name == 'push' && needs.detect.outputs.code_changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - name: Wait for SHA-tagged image in GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG="sha-${SHORT_SHA}"
+          IMAGE="ghcr.io/${{ github.repository }}:${TAG}"
+          echo "Waiting for ${IMAGE} to be available..."
+
+          for i in $(seq 1 60); do
+            # Check if the tag exists via GHCR API
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $(echo ${{ github.token }} | base64 -w0)" \
+              "https://ghcr.io/v2/${{ github.repository }}/manifests/${TAG}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json" 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ]; then
+              echo "Image ${IMAGE} is available (HTTP ${HTTP_CODE})"
+              break
+            fi
+            # Also try gh api as fallback
+            FOUND=$(gh api "/users/${{ github.repository_owner }}/packages/container/$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')/versions" \
+              --jq "[.[] | select(.metadata.container.tags[] == \"${TAG}\")] | length" 2>/dev/null || echo "0")
+            if [ "$FOUND" != "0" ]; then
+              echo "Image ${IMAGE} found via API"
+              break
+            fi
+            if [ "$i" = "60" ]; then
+              echo "::error::Timed out waiting for ${IMAGE} after 5 minutes"
+              exit 1
+            fi
+            echo "  Attempt $i/60 — not found yet (waiting 5s...)"
+            sleep 5
+          done
+
+      - name: Resolve image tag
+        id: resolve
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "image=ghcr.io/${{ github.repository }}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+  # ════════════════════════════════════════════════════════════════════
   # Deploy infrastructure + sync config (full redeploy)
   # ════════════════════════════════════════════════════════════════════
   deploy:
-    needs: [detect]
+    needs: [detect, wait-for-image]
     if: >
       always() && (
         (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
-        || (needs.detect.outputs.code_changed == 'true')
+        || (needs.detect.outputs.code_changed == 'true' && needs.wait-for-image.result == 'success')
       )
     runs-on: ubuntu-latest
 
@@ -129,7 +182,13 @@ jobs:
         run: |
           echo "resource-group=${{ inputs.resource-group || 'squadron-rg' }}" >> "$GITHUB_OUTPUT"
           echo "location=${{ inputs.location || 'eastus2' }}" >> "$GITHUB_OUTPUT"
-          echo "image=${{ inputs.squadron-image || 'ghcr.io/nbaertsch/squadron:latest' }}" >> "$GITHUB_OUTPUT"
+          # For push events, use the SHA-tagged image from wait-for-image job.
+          # For manual dispatch, use the user-provided image (defaults to :latest).
+          if [ -n "${{ needs.wait-for-image.outputs.image }}" ]; then
+            echo "image=${{ needs.wait-for-image.outputs.image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=${{ inputs.squadron-image || 'ghcr.io/nbaertsch/squadron:latest' }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Azure Login
         uses: azure/login@v2
