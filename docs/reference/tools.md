@@ -118,6 +118,88 @@ Tools for understanding the current Squadron system state.
 
 ---
 
+## GitHub Projects V2
+
+Tools for creating and managing GitHub Projects V2 boards programmatically. All tools use the GitHub GraphQL API (Projects V2 is GraphQL-only).
+
+> **Authentication:** These tools use the same `GITHUB_TOKEN` / GitHub App credentials as all other Squadron tools. The token must have the `project` OAuth scope (or the GitHub App must be granted project permissions).
+
+### Project Lifecycle
+
+| Tool | Description |
+|------|-------------|
+| `create_project` | Create a new GitHub Projects V2 board linked to the repo. Returns `project_id`, `number`, `title`, `url`. |
+| `get_project` | Read a project by global node ID or display number. Returns title, description, fields, and item count. |
+| `list_projects` | List all Projects V2 boards in the configured repository. |
+
+### Custom Fields
+
+| Tool | Description |
+|------|-------------|
+| `add_project_field` | Add a custom field to a project board (`TEXT`, `NUMBER`, `DATE`, or `SINGLE_SELECT` with option values). |
+| `list_project_fields` | Return all fields defined on a project, including IDs, types, and single-select options. |
+
+### Item (Issue) Management
+
+| Tool | Description |
+|------|-------------|
+| `add_issue_to_project` | Add an existing GitHub Issue to a project board. Returns `item_id` needed for field updates. |
+| `remove_issue_from_project` | Remove an item from a project board by its `item_id`. |
+| `update_project_item_field` | Set the value of a custom field on a project item (e.g. `Status="In Progress"`, `Wave=1`). |
+| `get_project_items` | List all items on a project board with their field values. Supports filtering by field name and value. |
+
+### Field Value Format
+
+When calling `update_project_item_field`, the `value` parameter format depends on the field type:
+
+| Field Type | Value Format | Example |
+|-----------|-------------|---------|
+| `TEXT` | `{"text": "<string>"}` | `{"text": "feat-dev"}` |
+| `NUMBER` | `{"number": <int/float>}` | `{"number": 1}` |
+| `SINGLE_SELECT` | `{"singleSelectOptionId": "<option_node_id>"}` | `{"singleSelectOptionId": "opt_abc123"}` |
+| `DATE` | `{"date": "<YYYY-MM-DD>"}` | `{"date": "2025-03-15"}` |
+
+Use `list_project_fields` to retrieve the field node IDs and single-select option IDs needed for updates.
+
+### Projects V2 Workflow Example
+
+```python
+# 1. Create a project board
+project = create_project(title="Long-Horizon Epic #151", description="Wave tracking board")
+project_id = project["project_id"]
+
+# 2. Add custom fields
+status_field = add_project_field(
+    project_id=project_id,
+    name="Status",
+    data_type="SINGLE_SELECT",
+    single_select_options=[
+        {"name": "Backlog", "color": "GRAY"},
+        {"name": "In Progress", "color": "BLUE"},
+        {"name": "Blocked", "color": "RED"},
+        {"name": "Done", "color": "GREEN"},
+    ]
+)
+wave_field = add_project_field(project_id=project_id, name="Wave", data_type="NUMBER")
+role_field  = add_project_field(project_id=project_id, name="Agent Role", data_type="TEXT")
+
+# 3. Add an issue to the board
+item = add_issue_to_project(project_id=project_id, issue_number=152)
+item_id = item["item_id"]
+
+# 4. Set field values (use option IDs from list_project_fields)
+fields = list_project_fields(project_id=project_id)
+in_progress_id = next(o["id"] for f in fields if f["name"] == "Status" for o in f["options"] if o["name"] == "In Progress")
+update_project_item_field(project_id=project_id, item_id=item_id, field_id=wave_field["id"], value={"number": 1})
+update_project_item_field(project_id=project_id, item_id=item_id, field_id=role_field["id"], value={"text": "infra-dev"})
+update_project_item_field(project_id=project_id, item_id=item_id, field_id=status_field["id"], value={"singleSelectOptionId": in_progress_id})
+
+# 5. Query the board state (e.g. find all blocked issues in Wave 2)
+blocked_items = get_project_items(project_id=project_id, filter_field="Status", filter_value="Blocked")
+```
+
+---
+
 ## SDK Built-in Tools
 
 These tools are provided by the GitHub Copilot SDK and available to any agent. List them alongside Squadron tools in the `tools:` frontmatter array.

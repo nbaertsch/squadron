@@ -91,6 +91,16 @@ ALL_TOOL_NAMES = [
     # Communication
     "comment_on_issue",
     "comment_on_pr",
+    # GitHub Projects V2
+    "create_project",
+    "get_project",
+    "list_projects",
+    "add_project_field",
+    "list_project_fields",
+    "add_issue_to_project",
+    "remove_issue_from_project",
+    "update_project_item_field",
+    "get_project_items",
 ]
 
 # O(1) lookup set for splitting .md tool lists into custom vs SDK built-in
@@ -336,6 +346,98 @@ class ReplyToReviewCommentParams(BaseModel):
     pr_number: int = Field(description="The pull request number")
     comment_id: int = Field(description="The comment ID to reply to")
     body: str = Field(description="Reply body (markdown)")
+
+
+# ── GitHub Projects V2 Parameter Models ─────────────────────────────────────
+
+
+class CreateProjectParams(BaseModel):
+    title: str = Field(description="Display title for the new Projects V2 board")
+    description: str = Field(
+        default="",
+        description="Optional short description for the project board",
+    )
+
+
+class GetProjectParams(BaseModel):
+    project_id: str | None = Field(
+        default=None,
+        description="Global node ID of the project (e.g. 'PVT_...'). Use either this or project_number.",
+    )
+    project_number: int | None = Field(
+        default=None,
+        description="Display number of the project (visible in the GitHub UI/URL). Use either this or project_id.",
+    )
+
+
+class ListProjectsParams(BaseModel):
+    """No parameters needed — lists all Projects V2 boards for the configured repo."""
+
+    pass
+
+
+class AddProjectFieldParams(BaseModel):
+    project_id: str = Field(description="Global node ID of the project (e.g. 'PVT_...')")
+    name: str = Field(description="Display name of the field (e.g. 'Wave', 'Agent Role', 'Status')")
+    data_type: str = Field(
+        description="Field type: 'TEXT', 'NUMBER', 'DATE', or 'SINGLE_SELECT'"
+    )
+    single_select_options: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Required for SINGLE_SELECT fields. List of option dicts, each with 'name' "
+            "and optionally 'color' (e.g. [{'name': 'Backlog', 'color': 'GRAY'}, "
+            "{'name': 'In Progress', 'color': 'BLUE'}]). "
+            "Valid colors: GRAY, BLUE, GREEN, YELLOW, ORANGE, RED, PINK, PURPLE"
+        ),
+    )
+
+
+class ListProjectFieldsParams(BaseModel):
+    project_id: str = Field(description="Global node ID of the project (e.g. 'PVT_...')")
+
+
+class AddIssueToProjectParams(BaseModel):
+    project_id: str = Field(description="Global node ID of the project (e.g. 'PVT_...')")
+    issue_number: int = Field(description="GitHub issue number to add to the project board")
+
+
+class RemoveIssueFromProjectParams(BaseModel):
+    project_id: str = Field(description="Global node ID of the project (e.g. 'PVT_...')")
+    item_id: str = Field(
+        description="Global node ID of the project item to remove (e.g. 'PVTI_...')"
+    )
+
+
+class UpdateProjectItemFieldParams(BaseModel):
+    project_id: str = Field(description="Global node ID of the project (e.g. 'PVT_...')")
+    item_id: str = Field(description="Global node ID of the project item (e.g. 'PVTI_...')")
+    field_id: str = Field(description="Global node ID of the field to update")
+    value: dict = Field(
+        description=(
+            "Value to set. Must match the field type: "
+            "TEXT: {'text': 'value'}, "
+            "NUMBER: {'number': 42}, "
+            "SINGLE_SELECT: {'singleSelectOptionId': '<option_node_id>'}, "
+            "DATE: {'date': '2025-01-01'}"
+        )
+    )
+
+
+class GetProjectItemsParams(BaseModel):
+    project_id: str = Field(description="Global node ID of the project (e.g. 'PVT_...')")
+    filter_field: str | None = Field(
+        default=None,
+        description="Optional field name to filter by (e.g. 'Status', 'Wave')",
+    )
+    filter_value: str | None = Field(
+        default=None,
+        description="Optional value to match when filtering (e.g. 'Blocked', '2')",
+    )
+    limit: int = Field(
+        default=50,
+        description="Maximum number of items to return (default 50, max 100)",
+    )
 
 
 # ── Unified Tool Implementations ─────────────────────────────────────────────
@@ -1659,7 +1761,313 @@ class SquadronTools:
 
         return f"Posted comment on PR #{params.pr_number}"
 
-    # ── Tool Selection ───────────────────────────────────────────────────
+    # ── GitHub Projects V2 Tools ────────────────────────────────────────
+
+    async def create_project(self, agent_id: str, params: CreateProjectParams) -> str:
+        """Create a new GitHub Projects V2 board linked to the repo.
+
+        Args:
+            params.title: Display title for the new board.
+            params.description: Optional short description.
+
+        Returns:
+            JSON string with ``project_id`` (global node ID), ``number``,
+            ``title``, and ``url`` of the created project.
+
+        Raises:
+            RuntimeError: If the GraphQL mutation fails or token lacks
+            ``project`` scope.
+        """
+        owner_id = await self.github.get_repo_owner_id(self.owner, self.repo)
+        project = await self.github.create_project(owner_id, params.title)
+
+        # Update description via a separate mutation if provided
+        if params.description:
+            try:
+                await self.github.graphql(
+                    """
+                    mutation updateProject($id: ID!, $desc: String) {
+                      updateProjectV2(input: {projectId: $id, shortDescription: $desc}) {
+                        projectV2 { id }
+                      }
+                    }
+                    """,
+                    {"id": project["id"], "desc": params.description},
+                )
+            except Exception:
+                logger.debug("Could not set project description (non-fatal)", exc_info=True)
+
+        import json
+
+        return json.dumps(
+            {
+                "project_id": project["id"],
+                "number": project["number"],
+                "title": project["title"],
+                "url": project["url"],
+            },
+            indent=2,
+        )
+
+    async def get_project(self, agent_id: str, params: GetProjectParams) -> str:
+        """Read a Projects V2 board by its global node ID or display number.
+
+        Provide exactly one of ``project_id`` or ``project_number``.
+
+        Args:
+            params.project_id: Global node ID (``"PVT_..."``).
+            params.project_number: Display number (visible in the GitHub URL).
+
+        Returns:
+            JSON string with project details: ``id``, ``number``, ``title``,
+            ``description``, ``url``, ``fields``, and ``item_count``.
+
+        Raises:
+            ValueError: If neither ``project_id`` nor ``project_number`` is
+            provided, or if the project is not found.
+        """
+        import json
+
+        if params.project_id:
+            project = await self.github.get_project_by_id(params.project_id)
+        elif params.project_number is not None:
+            project = await self.github.get_project_by_number(
+                self.owner, self.repo, params.project_number
+            )
+        else:
+            raise ValueError("Provide either project_id or project_number")
+
+        fields = [
+            f for f in project.get("fields", {}).get("nodes", []) if f
+        ]
+        return json.dumps(
+            {
+                "id": project["id"],
+                "number": project["number"],
+                "title": project["title"],
+                "description": project.get("shortDescription") or "",
+                "url": project["url"],
+                "item_count": project.get("items", {}).get("totalCount", 0),
+                "fields": fields,
+            },
+            indent=2,
+        )
+
+    async def list_projects(self, agent_id: str, params: ListProjectsParams) -> str:
+        """List all Projects V2 boards in the configured repository.
+
+        Returns:
+            JSON string containing a list of project summaries, each with
+            ``id``, ``number``, ``title``, ``description``, ``url``, and
+            ``item_count``.
+        """
+        import json
+
+        projects = await self.github.list_projects(self.owner, self.repo)
+        result = [
+            {
+                "id": p["id"],
+                "number": p["number"],
+                "title": p["title"],
+                "description": p.get("shortDescription") or "",
+                "url": p["url"],
+                "item_count": p.get("items", {}).get("totalCount", 0),
+            }
+            for p in projects
+        ]
+        return json.dumps(result, indent=2)
+
+    async def add_project_field(self, agent_id: str, params: AddProjectFieldParams) -> str:
+        """Add a custom field to a Projects V2 board.
+
+        Args:
+            params.project_id: Global node ID of the project.
+            params.name: Display name of the field.
+            params.data_type: ``"TEXT"``, ``"NUMBER"``, ``"DATE"``, or
+                ``"SINGLE_SELECT"``.
+            params.single_select_options: List of ``{"name": ..., "color": ...}``
+                dicts. Required when ``data_type="SINGLE_SELECT"``.
+
+        Returns:
+            JSON string with the created field's ``id``, ``name``,
+            ``data_type``, and (for SINGLE_SELECT) ``options``.
+
+        Raises:
+            RuntimeError: On GraphQL error (e.g. field already exists,
+            invalid type, or insufficient permissions).
+        """
+        import json
+
+        opts = params.single_select_options if params.single_select_options else None
+        field = await self.github.add_project_field(
+            params.project_id,
+            params.name,
+            params.data_type,
+            single_select_options=opts,
+        )
+        result: dict = {
+            "id": field.get("id"),
+            "name": field.get("name"),
+            "data_type": field.get("dataType"),
+        }
+        if "options" in field:
+            result["options"] = field["options"]
+        return json.dumps(result, indent=2)
+
+    async def list_project_fields(self, agent_id: str, params: ListProjectFieldsParams) -> str:
+        """Return all fields defined on a Projects V2 board.
+
+        Args:
+            params.project_id: Global node ID of the project.
+
+        Returns:
+            JSON string with a list of field objects. Each has ``id``,
+            ``name``, ``data_type``. SINGLE_SELECT fields also include
+            ``options`` with ``id``, ``name``, ``color``, and ``description``.
+        """
+        import json
+
+        fields = await self.github.list_project_fields(params.project_id)
+        result = []
+        for f in fields:
+            if not f:
+                continue
+            entry: dict = {
+                "id": f.get("id"),
+                "name": f.get("name"),
+                "data_type": f.get("dataType"),
+            }
+            if "options" in f:
+                entry["options"] = f["options"]
+            result.append(entry)
+        return json.dumps(result, indent=2)
+
+    async def add_issue_to_project(
+        self, agent_id: str, params: AddIssueToProjectParams
+    ) -> str:
+        """Add an existing GitHub Issue to a Projects V2 board.
+
+        Args:
+            params.project_id: Global node ID of the project.
+            params.issue_number: Issue display number (e.g. 42).
+
+        Returns:
+            JSON string with ``item_id`` (the project item's global node ID,
+            needed for ``update_project_item_field``) and the ``issue_number``.
+
+        Raises:
+            RuntimeError: If the issue does not exist or the token lacks
+            ``project`` scope.
+        """
+        import json
+
+        issue_node_id = await self.github.get_issue_node_id(
+            self.owner, self.repo, params.issue_number
+        )
+        item_id = await self.github.add_issue_to_project(
+            params.project_id, issue_node_id
+        )
+        return json.dumps(
+            {"item_id": item_id, "issue_number": params.issue_number},
+            indent=2,
+        )
+
+    async def remove_issue_from_project(
+        self, agent_id: str, params: RemoveIssueFromProjectParams
+    ) -> str:
+        """Remove an item from a Projects V2 board.
+
+        Args:
+            params.project_id: Global node ID of the project.
+            params.item_id: Global node ID of the project item (``"PVTI_..."``).
+
+        Returns:
+            Confirmation string with the deleted item ID.
+
+        Raises:
+            RuntimeError: If the item does not exist in the project.
+        """
+        deleted_id = await self.github.remove_issue_from_project(
+            params.project_id, params.item_id
+        )
+        return f"Removed item {deleted_id} from project {params.project_id}"
+
+    async def update_project_item_field(
+        self, agent_id: str, params: UpdateProjectItemFieldParams
+    ) -> str:
+        """Set the value of a custom field on a project item.
+
+        Field value format depends on the field type:
+        - TEXT field:          ``{"text": "some text"}``
+        - NUMBER field:        ``{"number": 42}``
+        - SINGLE_SELECT field: ``{"singleSelectOptionId": "<option_node_id>"}``
+        - DATE field:          ``{"date": "2025-01-01"}``
+
+        Use ``list_project_fields`` to get field IDs and option IDs for
+        SINGLE_SELECT fields.
+
+        Args:
+            params.project_id: Global node ID of the project.
+            params.item_id: Global node ID of the project item.
+            params.field_id: Global node ID of the field to update.
+            params.value: Value dict matching the field type.
+
+        Returns:
+            Confirmation string with the updated item ID.
+
+        Raises:
+            RuntimeError: On invalid field type, missing option ID, or
+            insufficient token permissions.
+        """
+        updated_id = await self.github.update_project_item_field(
+            params.project_id,
+            params.item_id,
+            params.field_id,
+            params.value,
+        )
+        return f"Updated field {params.field_id} on item {updated_id}"
+
+    async def get_project_items(self, agent_id: str, params: GetProjectItemsParams) -> str:
+        """List items on a Projects V2 board, with their field values.
+
+        Args:
+            params.project_id: Global node ID of the project.
+            params.filter_field: Optional field name to filter by (e.g. ``"Status"``).
+            params.filter_value: Optional value to match (e.g. ``"Blocked"``).
+                Comparison is case-insensitive for strings. For NUMBER fields
+                the string is converted to a float for comparison.
+            params.limit: Maximum number of items to return (default 50).
+
+        Returns:
+            JSON string with a list of item objects, each containing:
+            ``id``, ``type``, ``content`` (issue/PR data), and ``fields``
+            (dict mapping field name → current value). If ``filter_field``
+            is set, only matching items are included.
+        """
+        import json
+
+        limit = min(params.limit, 100)
+        items = await self.github.get_project_items(params.project_id, first=limit)
+
+        # Apply optional client-side filtering
+        if params.filter_field and params.filter_value is not None:
+            def _matches(item: dict) -> bool:
+                field_val = item["fields"].get(params.filter_field)
+                if field_val is None:
+                    return False
+                # Numeric comparison
+                try:
+                    return float(field_val) == float(params.filter_value)
+                except (ValueError, TypeError):
+                    pass
+                # String comparison (case-insensitive)
+                return str(field_val).lower() == str(params.filter_value).lower()
+
+            items = [i for i in items if _matches(i)]
+
+        return json.dumps(items, indent=2)
+
+        # ── Tool Selection ───────────────────────────────────────────────────
 
     def get_tools(
         self,
@@ -1923,7 +2331,63 @@ class SquadronTools:
             tools.reply_to_review_comment,
         )
 
-        # Build and return only the requested tools
+        # GitHub Projects V2 tools
+        _register(
+            "create_project",
+            "Create a new GitHub Projects V2 board linked to the repo. Returns project_id, number, title, and url.",
+            CreateProjectParams,
+            tools.create_project,
+        )
+        _register(
+            "get_project",
+            "Read a Projects V2 board by its global node ID or display number. Returns title, description, fields, and item count.",
+            GetProjectParams,
+            tools.get_project,
+        )
+        _register(
+            "list_projects",
+            "List all Projects V2 boards in the configured repository.",
+            ListProjectsParams,
+            tools.list_projects,
+        )
+        _register(
+            "add_project_field",
+            "Add a custom field to a Projects V2 board (TEXT, NUMBER, DATE, or SINGLE_SELECT with option values).",
+            AddProjectFieldParams,
+            tools.add_project_field,
+        )
+        _register(
+            "list_project_fields",
+            "Return all fields defined on a Projects V2 board, including their IDs, types, and single-select options.",
+            ListProjectFieldsParams,
+            tools.list_project_fields,
+        )
+        _register(
+            "add_issue_to_project",
+            "Add an existing GitHub Issue to a Projects V2 board. Returns the item_id needed for field updates.",
+            AddIssueToProjectParams,
+            tools.add_issue_to_project,
+        )
+        _register(
+            "remove_issue_from_project",
+            "Remove an item from a Projects V2 board by its item_id.",
+            RemoveIssueFromProjectParams,
+            tools.remove_issue_from_project,
+        )
+        _register(
+            "update_project_item_field",
+            "Set the value of a custom field on a project item (e.g. set Status='In Progress', Wave=1, Agent Role='feat-dev').",
+            UpdateProjectItemFieldParams,
+            tools.update_project_item_field,
+        )
+        _register(
+            "get_project_items",
+            "List all items on a Projects V2 board with their field values. Supports optional filtering by field name and value.",
+            GetProjectItemsParams,
+            tools.get_project_items,
+        )
+
+                # Build and return only the requested tools
         result = []
         for name in names:
             builder = tool_builders.get(name)
