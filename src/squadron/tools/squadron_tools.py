@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from copilot import define_tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
     import asyncio
@@ -374,6 +374,21 @@ class GetProjectParams(BaseModel):
         default=None,
         description="Repository name (required when using project_number)",
     )
+
+    @model_validator(mode="after")
+    def validate_identifier(self) -> "GetProjectParams":
+        """Require exactly one of project_id or project_number (not both, not neither)."""
+        has_id = self.project_id is not None
+        has_number = self.project_number is not None
+        if not has_id and not has_number:
+            raise ValueError(
+                "Provide either 'project_id' (node ID) or 'project_number' (integer from URL)."
+            )
+        if has_id and has_number:
+            raise ValueError(
+                "Provide either 'project_id' or 'project_number', not both."
+            )
+        return self
 
 
 class ListProjectsParams(BaseModel):

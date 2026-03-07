@@ -412,9 +412,18 @@ class TestGetProjectTool:
         assert data["number"] == 1
 
     async def test_missing_params_raises(self, tools):
+        """Both-None case is now caught at model construction by model_validator."""
         sq, gh = tools
-        with pytest.raises(ValueError):
-            await sq.get_project("agent1", GetProjectParams())
+        import pydantic
+        with pytest.raises(pydantic.ValidationError, match="project_id.*project_number|project_number.*project_id|Provide either"):
+            GetProjectParams()
+
+    async def test_both_params_raises(self, tools):
+        """Providing both project_id and project_number is rejected by model_validator."""
+        sq, gh = tools
+        import pydantic
+        with pytest.raises(pydantic.ValidationError, match="not both|Provide either"):
+            GetProjectParams(project_id="PVT_abc", project_number=1)
 
 
 class TestListProjectsTool:
