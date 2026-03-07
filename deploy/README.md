@@ -42,7 +42,15 @@ Start with the [GitHub App setup guide](github-app-setup.md) — it walks throug
 
 | Target | Status | Directory |
 |--------|--------|-----------|
-| [Azure Container Apps](azure-container-apps/README.md) | ✅ Supported | `deploy/azure-container-apps/` |
+| [Azure Container Instances](azure-container-instances/README.md) | **Recommended** | `deploy/azure-container-instances/` |
+| [Azure Container Apps](azure-container-apps/README.md) | Legacy (no sandbox network isolation) | `deploy/azure-container-apps/` |
+
+> **Why ACI?** Squadron's sandbox requires `CAP_NET_ADMIN` for network namespace
+> isolation (MitM proxy). ACI supports Linux capabilities; Container Apps does not.
+> Without these capabilities the sandbox degrades: env scrubbing and tool proxy
+> still work, but the MitM proxy cannot start and the Copilot SDK re-injects the
+> GitHub token (`COPILOT_SDK_AUTH_TOKEN`) into agent subprocesses with unrestricted
+> network access.
 
 ## Container Image
 

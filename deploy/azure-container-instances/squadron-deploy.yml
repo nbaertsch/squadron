@@ -1,5 +1,7 @@
 # Squadron Deploy — Azure Container Instances
 #
+# TEMPLATE: Copy this file to your repo at .github/workflows/squadron-deploy.yml
+#
 # This workflow manages the full lifecycle of a Squadron deployment:
 #   - Full deploy: infrastructure + new container image (code changes or manual)
 #   - Config sync: upload .squadron/ config + restart (config-only changes)

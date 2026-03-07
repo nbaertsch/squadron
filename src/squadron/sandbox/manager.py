@@ -146,6 +146,29 @@ class SandboxManager:
                     "falling back to bare network namespace isolation"
                 )
 
+        if not bridge_ok:
+            logger.warning(
+                "\n"
+                "╔══════════════════════════════════════════════════════════════╗\n"
+                "║  DEGRADED SANDBOX — MitM PROXY NOT RUNNING                 ║\n"
+                "║                                                            ║\n"
+                "║  The network bridge could not be created (CAP_NET_ADMIN     ║\n"
+                "║  likely missing). The MitM inference proxy will NOT start.  ║\n"
+                "║                                                            ║\n"
+                "║  SECURITY IMPACT:                                          ║\n"
+                "║  • The Copilot SDK re-injects the GitHub token as          ║\n"
+                "║    COPILOT_SDK_AUTH_TOKEN into agent subprocesses.          ║\n"
+                "║  • Without network namespace isolation, agents have        ║\n"
+                "║    unrestricted outbound HTTPS access WITH this token.     ║\n"
+                "║                                                            ║\n"
+                "║  Env scrubbing, tool proxy, and worktree isolation are     ║\n"
+                "║  still active. Agents will continue to run (fail-open).    ║\n"
+                "║                                                            ║\n"
+                "║  To fix: deploy on a platform that grants CAP_NET_ADMIN    ║\n"
+                "║  (e.g. Azure Container Instances with privileged mode).    ║\n"
+                "╚══════════════════════════════════════════════════════════════╝"
+            )
+
         # Start inference proxy (only if bridge actually came up + CA is active).
         if bridge_ok and self._ca:
             credentials = build_credentials_from_env(
