@@ -666,3 +666,274 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
         )
         return resp.json().get("check_runs", [])
+
+    # ── GraphQL (Projects V2) ────────────────────────────────────────────────
+
+    async def graphql(self, query: str, variables: dict | None = None) -> dict:
+        """Execute a GitHub GraphQL API query.
+
+        Args:
+            query: GraphQL query or mutation string.
+            variables: Optional variables dict for parameterised queries.
+
+        Returns:
+            The ``data`` portion of the GraphQL response.
+
+        Raises:
+            RuntimeError: If the response contains a top-level ``errors`` key.
+        """
+        token = await self._ensure_token()
+        payload: dict = {"query": query}
+        if variables:
+            payload["variables"] = variables
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.github.com/graphql",
+                json=payload,
+                headers={
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "Squadron/0.1.0",
+                },
+            )
+            resp.raise_for_status()
+            body = resp.json()
+
+        if "errors" in body:
+            raise RuntimeError(f"GraphQL errors: {body['errors']}")
+
+        return body.get("data", {})
+
+    async def get_repo_owner_id(self, owner: str, repo: str) -> str:
+        """Resolve the owner's global node ID (needed for createProjectV2)."""
+        query = (
+            "query($login: String!) {"
+            "  repositoryOwner(login: $login) { id }"
+            "}"
+        )
+        data = await self.graphql(query, {"login": owner})
+        return data["repositoryOwner"]["id"]
+
+    async def create_project(self, owner_id: str, title: str) -> dict:
+        """Create a new Projects V2 board."""
+        mutation = (
+            "mutation($ownerId: ID!, $title: String!) {"
+            "  createProjectV2(input: {ownerId: $ownerId, title: $title}) {"
+            "    projectV2 { id number title url }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(mutation, {"ownerId": owner_id, "title": title})
+        return data["createProjectV2"]["projectV2"]
+
+    async def get_project_by_number(self, owner: str, repo: str, number: int) -> dict:
+        """Read project metadata by project number."""
+        query = (
+            "query($owner: String!, $repo: String!, $number: Int!) {"
+            "  repository(owner: $owner, name: $repo) {"
+            "    projectV2(number: $number) { id number title url }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(query, {"owner": owner, "repo": repo, "number": number})
+        return data["repository"]["projectV2"]
+
+    async def get_project_by_id(self, project_id: str) -> dict:
+        """Read project metadata by global node ID."""
+        query = (
+            "query($id: ID!) {"
+            "  node(id: $id) {"
+            "    ... on ProjectV2 { id number title url }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(query, {"id": project_id})
+        return data["node"]
+
+    async def list_projects(self, owner: str, repo: str, limit: int = 20) -> list[dict]:
+        """List all Projects V2 boards linked to the repository."""
+        query = (
+            "query($owner: String!, $repo: String!, $limit: Int!) {"
+            "  repository(owner: $owner, name: $repo) {"
+            "    projectsV2(first: $limit) {"
+            "      nodes { id number title url }"
+            "    }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(query, {"owner": owner, "repo": repo, "limit": limit})
+        return data["repository"]["projectsV2"]["nodes"]
+
+    async def add_project_field(
+        self,
+        project_id: str,
+        name: str,
+        data_type: str,
+        options: list[str] | None = None,
+    ) -> dict:
+        """Create a custom field on a Projects V2 board."""
+        mutation = (
+            "mutation($projectId: ID!, $name: String!, $dataType: ProjectV2CustomFieldType!,"
+            "         $singleSelectOptions: [ProjectV2SingleSelectFieldOptionInput!]) {"
+            "  createProjectV2Field(input: {"
+            "    projectId: $projectId, name: $name, dataType: $dataType,"
+            "    singleSelectOptions: $singleSelectOptions"
+            "  }) {"
+            "    projectV2Field {"
+            "      ... on ProjectV2Field { id name dataType }"
+            "      ... on ProjectV2SingleSelectField {"
+            "        id name dataType options { id name }"
+            "      }"
+            "    }"
+            "  }"
+            "}"
+        )
+        variables: dict = {
+            "projectId": project_id,
+            "name": name,
+            "dataType": data_type,
+            "singleSelectOptions": [{"name": o} for o in options] if options else None,
+        }
+        data = await self.graphql(mutation, variables)
+        return data["createProjectV2Field"]["projectV2Field"]
+
+    async def list_project_fields(self, project_id: str, limit: int = 50) -> list[dict]:
+        """List all fields on a Projects V2 board."""
+        query = (
+            "query($id: ID!, $limit: Int!) {"
+            "  node(id: $id) {"
+            "    ... on ProjectV2 {"
+            "      fields(first: $limit) {"
+            "        nodes {"
+            "          ... on ProjectV2Field { id name dataType }"
+            "          ... on ProjectV2SingleSelectField {"
+            "            id name dataType options { id name }"
+            "          }"
+            "          ... on ProjectV2IterationField { id name dataType }"
+            "        }"
+            "      }"
+            "    }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(query, {"id": project_id, "limit": limit})
+        return data["node"]["fields"]["nodes"]
+
+    async def get_issue_node_id(self, owner: str, repo: str, issue_number: int) -> str:
+        """Resolve an issue's global node ID."""
+        query = (
+            "query($owner: String!, $repo: String!, $number: Int!) {"
+            "  repository(owner: $owner, name: $repo) {"
+            "    issue(number: $number) { id }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(query, {"owner": owner, "repo": repo, "number": issue_number})
+        return data["repository"]["issue"]["id"]
+
+    async def add_issue_to_project(self, project_id: str, issue_node_id: str) -> dict:
+        """Add an issue as a card on a Projects V2 board."""
+        mutation = (
+            "mutation($projectId: ID!, $contentId: ID!) {"
+            "  addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {"
+            "    item { id }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(mutation, {"projectId": project_id, "contentId": issue_node_id})
+        return data["addProjectV2ItemById"]["item"]
+
+    async def remove_issue_from_project(self, project_id: str, item_id: str) -> None:
+        """Remove a card from a Projects V2 board."""
+        mutation = (
+            "mutation($projectId: ID!, $itemId: ID!) {"
+            "  deleteProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) {"
+            "    deletedItemId"
+            "  }"
+            "}"
+        )
+        await self.graphql(mutation, {"projectId": project_id, "itemId": item_id})
+
+    async def update_project_item_field(
+        self, project_id: str, item_id: str, field_id: str, value: dict
+    ) -> dict:
+        """Set a field value on a board item."""
+        mutation = (
+            "mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {"
+            "  updateProjectV2ItemFieldValue(input: {"
+            "    projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: $value"
+            "  }) {"
+            "    projectV2Item { id }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(
+            mutation,
+            {"projectId": project_id, "itemId": item_id, "fieldId": field_id, "value": value},
+        )
+        return data["updateProjectV2ItemFieldValue"]["projectV2Item"]
+
+    async def get_project_items(self, project_id: str, limit: int = 50) -> list[dict]:
+        """List items on a Projects V2 board with their field values."""
+        query = (
+            "query($id: ID!, $limit: Int!) {"
+            "  node(id: $id) {"
+            "    ... on ProjectV2 {"
+            "      items(first: $limit) {"
+            "        nodes {"
+            "          id"
+            "          fieldValues(first: 20) {"
+            "            nodes {"
+            "              ... on ProjectV2ItemFieldTextValue {"
+            "                text field { ... on ProjectV2FieldCommon { name } }"
+            "              }"
+            "              ... on ProjectV2ItemFieldNumberValue {"
+            "                number field { ... on ProjectV2FieldCommon { name } }"
+            "              }"
+            "              ... on ProjectV2ItemFieldDateValue {"
+            "                date field { ... on ProjectV2FieldCommon { name } }"
+            "              }"
+            "              ... on ProjectV2ItemFieldSingleSelectValue {"
+            "                name field { ... on ProjectV2FieldCommon { name } }"
+            "              }"
+            "            }"
+            "          }"
+            "          content {"
+            "            ... on Issue { title number }"
+            "            ... on PullRequest { title number }"
+            "          }"
+            "        }"
+            "      }"
+            "    }"
+            "  }"
+            "}"
+        )
+        data = await self.graphql(query, {"id": project_id, "limit": limit})
+        raw_items = data["node"]["items"]["nodes"]
+
+        items = []
+        for raw in raw_items:
+            fields: dict = {}
+            for fv in raw.get("fieldValues", {}).get("nodes", []):
+                field_info = fv.get("field", {})
+                field_name = field_info.get("name") if field_info else None
+                if not field_name:
+                    continue
+                if "text" in fv:
+                    fields[field_name] = fv["text"]
+                elif "number" in fv:
+                    fields[field_name] = fv["number"]
+                elif "date" in fv:
+                    fields[field_name] = fv["date"]
+                elif "name" in fv:
+                    fields[field_name] = fv["name"]
+            content = raw.get("content") or {}
+            items.append({
+                "id": raw["id"],
+                "title": content.get("title", ""),
+                "number": content.get("number"),
+                "fields": fields,
+            })
+        return items
+
