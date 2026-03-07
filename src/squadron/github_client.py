@@ -716,11 +716,7 @@ class GitHubClient:
 
     async def get_repo_owner_id(self, owner: str, repo: str) -> str:
         """Resolve the owner's global node ID (needed for createProjectV2)."""
-        query = (
-            "query($login: String!) {"
-            "  repositoryOwner(login: $login) { id }"
-            "}"
-        )
+        query = "query($login: String!) {  repositoryOwner(login: $login) { id }}"
         data = await self.graphql(query, {"login": owner})
         return data["repositoryOwner"]["id"]
 
@@ -750,13 +746,7 @@ class GitHubClient:
 
     async def get_project_by_id(self, project_id: str) -> dict:
         """Read project metadata by global node ID."""
-        query = (
-            "query($id: ID!) {"
-            "  node(id: $id) {"
-            "    ... on ProjectV2 { id number title url }"
-            "  }"
-            "}"
-        )
+        query = "query($id: ID!) {  node(id: $id) {    ... on ProjectV2 { id number title url }  }}"
         data = await self.graphql(query, {"id": project_id})
         return data["node"]
 
@@ -938,11 +928,12 @@ class GitHubClient:
                 elif "name" in fv:
                     fields[field_name] = fv["name"]
             content = raw.get("content") or {}
-            items.append({
-                "id": raw["id"],
-                "title": content.get("title", ""),
-                "number": content.get("number"),
-                "fields": fields,
-            })
+            items.append(
+                {
+                    "id": raw["id"],
+                    "title": content.get("title", ""),
+                    "number": content.get("number"),
+                    "fields": fields,
+                }
+            )
         return items
-

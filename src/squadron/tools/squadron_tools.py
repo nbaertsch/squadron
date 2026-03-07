@@ -385,9 +385,7 @@ class GetProjectParams(BaseModel):
                 "Provide either 'project_id' (node ID) or 'project_number' (integer from URL)."
             )
         if has_id and has_number:
-            raise ValueError(
-                "Provide either 'project_id' or 'project_number', not both."
-            )
+            raise ValueError("Provide either 'project_id' or 'project_number', not both.")
         return self
 
 

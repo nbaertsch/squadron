@@ -93,9 +93,7 @@ class TestGraphQL:
 
     @respx.mock
     async def test_variables_passed(self, github):
-        route = respx.post(GRAPHQL_URL).mock(
-            return_value=httpx.Response(200, json={"data": {}})
-        )
+        route = respx.post(GRAPHQL_URL).mock(return_value=httpx.Response(200, json={"data": {}}))
         await github.graphql("query($id: ID!) { node(id: $id) { id } }", {"id": "PVT_abc"})
         body = json.loads(route.calls[0].request.content)
         assert body["variables"] == {"id": "PVT_abc"}
@@ -319,9 +317,7 @@ class TestUpdateProjectItemField:
                 200,
                 json={
                     "data": {
-                        "updateProjectV2ItemFieldValue": {
-                            "projectV2Item": {"id": "PVTI_item1"}
-                        }
+                        "updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "PVTI_item1"}}
                     }
                 },
             )
@@ -415,13 +411,18 @@ class TestGetProjectTool:
         """Both-None case is now caught at model construction by model_validator."""
         sq, gh = tools
         import pydantic
-        with pytest.raises(pydantic.ValidationError, match="project_id.*project_number|project_number.*project_id|Provide either"):
+
+        with pytest.raises(
+            pydantic.ValidationError,
+            match="project_id.*project_number|project_number.*project_id|Provide either",
+        ):
             GetProjectParams()
 
     async def test_both_params_raises(self, tools):
         """Providing both project_id and project_number is rejected by model_validator."""
         sq, gh = tools
         import pydantic
+
         with pytest.raises(pydantic.ValidationError, match="not both|Provide either"):
             GetProjectParams(project_id="PVT_abc", project_number=1)
 
@@ -530,9 +531,7 @@ class TestGetProjectItemsTool:
                 },
             ]
         )
-        result = await sq.get_project_items(
-            "agent1", GetProjectItemsParams(project_id="PVT_abc")
-        )
+        result = await sq.get_project_items("agent1", GetProjectItemsParams(project_id="PVT_abc"))
         data = json.loads(result)
         assert len(data) == 2
 
@@ -556,9 +555,7 @@ class TestGetProjectItemsTool:
         )
         result = await sq.get_project_items(
             "agent1",
-            GetProjectItemsParams(
-                project_id="PVT_abc", filter_field="Status", filter_value="Todo"
-            ),
+            GetProjectItemsParams(project_id="PVT_abc", filter_field="Status", filter_value="Todo"),
         )
         data = json.loads(result)
         assert len(data) == 1
@@ -574,9 +571,7 @@ class TestGetProjectItemsTool:
         )
         result = await sq.get_project_items(
             "agent1",
-            GetProjectItemsParams(
-                project_id="PVT_abc", filter_field="Points", filter_value="5"
-            ),
+            GetProjectItemsParams(project_id="PVT_abc", filter_field="Points", filter_value="5"),
         )
         data = json.loads(result)
         assert len(data) == 1
@@ -661,20 +656,20 @@ class TestDataTypeAllowlist:
         assert params.data_type == "DATE"
 
     def test_valid_single_select_type_accepted(self):
-        params = AddProjectFieldParams(
-            project_id="PVT_x", name="Status", data_type="SINGLE_SELECT"
-        )
+        params = AddProjectFieldParams(project_id="PVT_x", name="Status", data_type="SINGLE_SELECT")
         assert params.data_type == "SINGLE_SELECT"
 
     def test_invalid_type_rejected(self):
         """An invalid data_type must raise a ValidationError — not silently pass."""
         import pydantic
+
         with pytest.raises((pydantic.ValidationError, ValueError)):
             AddProjectFieldParams(project_id="PVT_x", name="Bad", data_type="INVALID_TYPE")
 
     def test_injection_attempt_rejected(self):
         """A GraphQL injection payload in data_type must be rejected at validation time."""
         import pydantic
+
         with pytest.raises((pydantic.ValidationError, ValueError)):
             AddProjectFieldParams(
                 project_id="PVT_x",
@@ -693,12 +688,14 @@ class TestLimitBounds:
     def test_list_projects_limit_capped(self):
         """ListProjectsParams must reject limit > 100."""
         import pydantic
+
         with pytest.raises(pydantic.ValidationError, match="less than or equal to 100"):
             ListProjectsParams(limit=999999)
 
     def test_get_project_items_limit_capped(self):
         """GetProjectItemsParams must reject limit > 100."""
         import pydantic
+
         with pytest.raises(pydantic.ValidationError, match="less than or equal to 100"):
             GetProjectItemsParams(project_id="PVT_x", limit=999999)
 
@@ -755,9 +752,7 @@ class TestGetProjectItemsFilterCoverage:
         )
         result = await sq.get_project_items(
             "agent1",
-            GetProjectItemsParams(
-                project_id="PVT_abc", filter_field="Status", filter_value="Todo"
-            ),
+            GetProjectItemsParams(project_id="PVT_abc", filter_field="Status", filter_value="Todo"),
         )
         data = json.loads(result)
         assert len(data) == 2
@@ -772,9 +767,7 @@ class TestGetProjectItemsFilterCoverage:
                 {"id": "PVTI_3", "title": "C", "number": 3, "fields": {}},
             ]
         )
-        result = await sq.get_project_items(
-            "agent1", GetProjectItemsParams(project_id="PVT_abc")
-        )
+        result = await sq.get_project_items("agent1", GetProjectItemsParams(project_id="PVT_abc"))
         data = json.loads(result)
         assert len(data) == 3
 
@@ -885,13 +878,7 @@ class TestListProjectsEmptyCase:
         respx.post(GRAPHQL_URL).mock(
             return_value=httpx.Response(
                 200,
-                json={
-                    "data": {
-                        "repository": {
-                            "projectsV2": {"nodes": []}
-                        }
-                    }
-                },
+                json={"data": {"repository": {"projectsV2": {"nodes": []}}}},
             )
         )
         projects = await github.list_projects("acme", "widgets")
