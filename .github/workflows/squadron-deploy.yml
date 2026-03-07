@@ -195,6 +195,20 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Register required Azure providers
+        run: |
+          set -euo pipefail
+          for ns in Microsoft.OperationalInsights Microsoft.ContainerInstance Microsoft.Storage; do
+            state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null || echo "NotRegistered")
+            if [ "$state" != "Registered" ]; then
+              echo "Registering $ns (currently: $state)..."
+              az provider register --namespace "$ns" --wait
+              echo "$ns registered"
+            else
+              echo "$ns already registered"
+            fi
+          done
+
       - name: Azure context diagnostics
         run: |
           set -euo pipefail
