@@ -240,7 +240,7 @@ Squadron supports programmatic management of GitHub Projects V2 boards via 9 ded
 |------|-------------|
 | `create_project` | Create a new Projects V2 board under the repo owner |
 | `get_project` | Read project metadata by ID or project number |
-| `list_projects` | List all Projects V2 boards linked to the repository |
+| `list_projects` | List Projects V2 boards linked to this repository (repo-linked only; org-level unlinked projects are excluded) |
 
 ### Field Management Tools
 

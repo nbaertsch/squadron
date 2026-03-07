@@ -672,6 +672,13 @@ class GitHubClient:
     async def graphql(self, query: str, variables: dict | None = None) -> dict:
         """Execute a GitHub GraphQL API query.
 
+        This method uses its own ``httpx.AsyncClient`` and does **not** go through
+        ``_do_request()`` / ``_request()``.  As a result it does not update the shared
+        ``_rate_limit_remaining`` counter (which tracks REST requests).  GitHub's
+        GraphQL endpoint has its own point budget (5 000 points/hour) that is separate
+        from the REST rate limit, so keeping them independent avoids false throttle
+        signals on the REST path.
+
         Args:
             query: GraphQL query or mutation string.
             variables: Optional variables dict for parameterised queries.
@@ -680,7 +687,9 @@ class GitHubClient:
             The ``data`` portion of the GraphQL response.
 
         Raises:
-            RuntimeError: If the response contains a top-level ``errors`` key.
+            RuntimeError: If the response contains a top-level ``errors`` key
+                (covers both full failures and partial-error responses).
+            httpx.HTTPStatusError: On non-2xx HTTP responses.
         """
         token = await self._ensure_token()
         payload: dict = {"query": query}
