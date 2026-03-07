@@ -268,3 +268,121 @@ class TestAgentRoleConfigModel:
         role = AgentRoleConfig(**raw)
         assert role.is_ephemeral
         assert role.lifecycle == "ephemeral"
+
+
+# -- Security Fix Tests -------------------------------------------------------
+
+
+class TestPMSecurityHardenings:
+    """Tests for security fixes applied to PM persistent lifecycle (issue #159).
+
+    Verifies:
+    - Trust boundary guidance present in pm.md (prompt injection protection)
+    - Concurrency safety rule present in pm.md (duplicate delegation protection)
+    - Circuit breaker comments clarify per-wake-cycle semantics (not total lifetime)
+    - Stateful deduplication comment present in config.yaml (concurrent instance safety)
+    """
+
+    @staticmethod
+    def _load_pm_md() -> str:
+        pm_path = SQUADRON_DIR / "agents" / "pm.md"
+        return pm_path.read_text()
+
+    @staticmethod
+    def _load_raw_config() -> dict:
+        raw_path = SQUADRON_DIR / "config.yaml"
+        with raw_path.open() as f:
+            return yaml.safe_load(f)
+
+    def test_pm_md_has_trust_boundary_section(self):
+        """pm.md must contain a Trust Boundaries section for wake events."""
+        content = self._load_pm_md()
+        assert "Trust Boundaries" in content, (
+            "pm.md must contain Trust Boundaries guidance for event-driven wake events"
+        )
+
+    def test_pm_md_trust_boundary_treats_comments_as_data_not_commands(self):
+        """pm.md must explicitly state that event payloads are data, not commands."""
+        content = self._load_pm_md()
+        # Check for the core principle
+        assert "data, not commands" in content or "context" in content.lower(), (
+            "pm.md must state that event payloads are contextual data, not operational commands"
+        )
+
+    def test_pm_md_trust_boundary_covers_human_authored_comments(self):
+        """pm.md must instruct PM not to act on human-authored comment instructions."""
+        content = self._load_pm_md()
+        assert "human" in content.lower(), (
+            "pm.md must address trust boundaries for human-authored comments"
+        )
+        # Should say something about not treating human comments as commands
+        assert "human-authored comment" in content or "human users" in content, (
+            "pm.md must explicitly address trust rules for human-authored comments"
+        )
+
+    def test_pm_md_trust_boundary_covers_bot_comments(self):
+        """pm.md must distinguish bot (squadron[bot]) comments from human comments."""
+        content = self._load_pm_md()
+        assert "squadron[bot]" in content or "squadron-dev[bot]" in content, (
+            "pm.md must reference trusted bot identities in trust boundary guidance"
+        )
+
+    def test_pm_md_has_concurrency_safety_rule(self):
+        """pm.md Rules must include a concurrency safety rule to prevent duplicate delegations."""
+        content = self._load_pm_md()
+        assert "Concurrency safety" in content or "concurrency" in content.lower(), (
+            "pm.md Rules must include concurrency safety guidance to prevent duplicate delegations"
+        )
+
+    def test_pm_md_concurrency_safety_references_check_registry(self):
+        """Concurrency safety rule must reference check_registry for deduplication."""
+        content = self._load_pm_md()
+        # check_registry should be referenced in context of concurrency/duplication check
+        assert "check_registry" in content, (
+            "pm.md must reference check_registry in concurrency safety guidance"
+        )
+
+    def test_pm_md_concurrency_safety_prevents_duplicate_delegations(self):
+        """pm.md must explicitly warn against duplicate delegations."""
+        content = self._load_pm_md()
+        assert "duplicate" in content.lower(), (
+            "pm.md must warn against duplicate delegations in concurrency safety guidance"
+        )
+
+    def test_config_pm_circuit_breaker_has_wake_cycle_comment(self):
+        """PM max_active_duration comment must clarify it applies per wake cycle, not total lifetime."""
+        raw_path = SQUADRON_DIR / "config.yaml"
+        config_text = raw_path.read_text()
+        # Find PM circuit breaker section and check for clarifying comment
+        assert "per wake cycle" in config_text or "wake cycle" in config_text, (
+            "config.yaml PM circuit breaker must clarify max_active_duration is per wake cycle"
+        )
+
+    def test_config_pm_lifecycle_has_deduplication_comment(self):
+        """PM lifecycle entry in config.yaml must document the concurrency/deduplication model."""
+        raw_path = SQUADRON_DIR / "config.yaml"
+        config_text = raw_path.read_text()
+        assert "deduplication" in config_text or "one PM instance" in config_text, (
+            "config.yaml PM lifecycle must document the per-issue deduplication model"
+        )
+
+    def test_pm_old_ephemeral_framing_removed(self):
+        """pm.md must not contain old ephemeral-lifecycle framing text."""
+        content = self._load_pm_md()
+        assert "framework auto-completes ephemeral agent sessions" not in content, (
+            "pm.md must not contain old ephemeral-specific 'framework auto-completes' text"
+        )
+
+    def test_pm_md_rules_require_lifecycle_call(self):
+        """pm.md Rules section must require agents to end with a lifecycle call."""
+        content = self._load_pm_md()
+        assert "report_blocked" in content and "report_complete" in content, (
+            "pm.md Rules must instruct the PM to always end with report_blocked or report_complete"
+        )
+        # Verify it's in the Rules section specifically
+        rules_idx = content.find("## Rules")
+        assert rules_idx != -1, "pm.md must have a Rules section"
+        rules_section = content[rules_idx:]
+        assert "report_blocked" in rules_section or "lifecycle call" in rules_section, (
+            "pm.md Rules section must mention lifecycle calls (report_blocked/report_complete)"
+        )

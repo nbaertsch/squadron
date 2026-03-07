@@ -102,7 +102,7 @@ agent_roles:
     lifecycle: ephemeral
   pm:
     agent_definition: agents/pm.md
-    lifecycle: stateful
+    lifecycle: stateful           # Persistent per-issue; framework ensures one PM instance per issue (stateful deduplication)
     subagents:
       - feat-dev
       - bug-fix
@@ -139,9 +139,9 @@ circuit_breakers:
     warning_threshold: 0.8
   roles:
     pm:
-      max_active_duration: 1800   # 30 minutes — coordination tasks are bounded per wake cycle
-      max_tool_calls: 100
-      max_turns: 25
+      max_active_duration: 1800   # 30 minutes per wake cycle (not total lifetime; agent sleeps between events)
+      max_tool_calls: 100         # 2x ephemeral budget — stateful PM may handle multiple follow-up wake cycles
+      max_turns: 25               # 2.5x ephemeral budget — covers triage + multi-step follow-up coordination
     pr-review:
       max_active_duration: 1800
       max_tool_calls: 100
