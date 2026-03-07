@@ -45,6 +45,34 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Fix Copilot CLI binary permissions
 RUN chmod +x /app/.venv/lib/python*/site-packages/copilot/bin/copilot || true
 
+# Pre-warm the Copilot CLI pkg asset extraction (fixes issue #164).
+#
+# The Copilot CLI is a pkg-bundled Node.js executable. On first run it
+# extracts its bundled assets (ripgrep binary, pty.node native module,
+# tree-sitter WASM, etc.) into $HOME/.copilot/pkg/linux-x64/<version>/.
+#
+# Without this step, each container start triggers a concurrent extraction
+# race: multiple agent CLI subprocesses (PM + feat-dev + PR-review) all
+# start simultaneously and each tries to extract to the same cache dir.
+# The race can leave files mid-write, causing:
+#   - bash tool: "Failed to start bash process" (pty.node not fully written)
+#   - grep tool:  "spawn .../rg ENOENT"         (rg binary not fully written)
+#
+# Running the CLI once here bakes the fully-extracted pkg cache into the
+# image layer, eliminating the extraction race entirely.
+#
+# --no-auto-update: prevents network calls for update checks during build.
+# The CLI will exit non-zero (no auth token), but extraction completes first.
+RUN /app/.venv/lib/python*/site-packages/copilot/bin/copilot --no-auto-update --help 2>/dev/null || \
+    /app/.venv/lib/python*/site-packages/copilot/bin/copilot --no-auto-update 2>/dev/null || \
+    true
+
+# USE_BUILTIN_RIPGREP=false: instructs the Copilot CLI to use the system
+# ripgrep binary (installed above via apt) rather than its bundled copy.
+# This provides a belt-and-suspenders fallback: even if the bundled rg is
+# somehow unavailable, the system rg at /usr/bin/rg will be used.
+ENV USE_BUILTIN_RIPGREP=false
+
 # Default port
 EXPOSE 8000
 
