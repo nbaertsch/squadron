@@ -348,8 +348,6 @@ class ReplyToReviewCommentParams(BaseModel):
     body: str = Field(description="Reply body (markdown)")
 
 
-
-
 class CreateProjectParams(BaseModel):
     """Create a new GitHub Projects V2 board."""
 
@@ -381,7 +379,9 @@ class GetProjectParams(BaseModel):
 class ListProjectsParams(BaseModel):
     """List all GitHub Projects V2 boards linked to the repository."""
 
-    limit: int = Field(default=20, le=100, description="Maximum number of projects to return (max 100)")
+    limit: int = Field(
+        default=20, le=100, description="Maximum number of projects to return (max 100)"
+    )
 
 
 class AddProjectFieldParams(BaseModel):
@@ -415,9 +415,7 @@ class RemoveIssueFromProjectParams(BaseModel):
     """Remove a card from a Projects V2 board."""
 
     project_id: str = Field(description="The project's global node ID")
-    item_id: str = Field(
-        description="The board item node ID (returned by add_issue_to_project)"
-    )
+    item_id: str = Field(description="The board item node ID (returned by add_issue_to_project)")
 
 
 class UpdateProjectItemFieldParams(BaseModel):
@@ -438,7 +436,9 @@ class GetProjectItemsParams(BaseModel):
     """List items on a Projects V2 board with field values."""
 
     project_id: str = Field(description="The project's global node ID")
-    limit: int = Field(default=50, le=100, description="Maximum number of items to return (max 100)")
+    limit: int = Field(
+        default=50, le=100, description="Maximum number of items to return (max 100)"
+    )
     filter_field: str | None = Field(
         default=None,
         description="Optional field name to filter by",
@@ -447,6 +447,7 @@ class GetProjectItemsParams(BaseModel):
         default=None,
         description="Optional field value to filter by (string comparison)",
     )
+
 
 # ── Unified Tool Implementations ─────────────────────────────────────────────
 
@@ -484,6 +485,8 @@ class SquadronTools:
         self._pre_sleep_hook = pre_sleep_hook
         self._git_push_callback = git_push_callback
         self.activity_logger = activity_logger
+        # Per-agent issue creation counter (guards against runaway issue spam)
+        self._issues_created: dict[str, int] = {}
 
     def _agent_signature(self, role: str) -> str:
         """Build the agent signature prefix: emoji + display_name on its own line.
@@ -528,6 +531,35 @@ class SquadronTools:
             await self.activity_logger.log(event)
         except Exception:
             logger.debug("Failed to log activity event", exc_info=True)
+
+    async def _compute_blocker_depth(self, agent: "AgentRecord") -> int:
+        """Compute how deep *agent* sits in the blocker-issue chain.
+
+        Walks upward: if the agent's issue_number appears in another
+        agent's ``blocked_by`` list, that parent is one level up.
+        Continues until no parent is found.
+
+        Returns 0 if the agent is a root (not blocking anyone), 1 if it
+        was spawned as a direct blocker, etc.
+        """
+        depth = 0
+        current_issue = agent.issue_number
+        visited: set[int] = set()
+
+        while current_issue and current_issue not in visited:
+            visited.add(current_issue)
+            # Find agents that are blocked by this issue
+            parents = await self.registry.get_agents_blocked_by(current_issue)
+            if not parents:
+                break
+            # Follow the first parent (there should be at most one in a
+            # well-formed chain; if multiple exist, any path gives a
+            # valid lower-bound on depth).
+            parent = parents[0]
+            depth += 1
+            current_issue = parent.issue_number
+
+        return depth
 
     # ── Framework Tools (agent lifecycle) ────────────────────────────────
 
@@ -699,6 +731,31 @@ class SquadronTools:
         if agent is None:
             return f"Error: agent {agent_id} not found"
 
+        # ── max_issue_depth guard ─────────────────────────────────────
+        # Walk the blocker chain upward to compute how deep this agent
+        # is in the hierarchy.  If creating another sub-issue would
+        # exceed the configured depth, refuse and suggest escalation.
+        max_depth = 3  # default
+        if self.config and self.config.escalation:
+            max_depth = self.config.escalation.max_issue_depth
+
+        current_depth = await self._compute_blocker_depth(agent)
+        if current_depth >= max_depth:
+            logger.warning(
+                "create_blocker_issue: agent %s (issue #%s) is already at "
+                "blocker depth %d (max %d) — refusing to create sub-issue",
+                agent_id,
+                agent.issue_number,
+                current_depth,
+                max_depth,
+            )
+            return (
+                f"Cannot create a blocker issue: the blocker chain is already "
+                f"{current_depth} levels deep (max allowed: {max_depth}). "
+                f"Use the `escalate_to_human` tool instead to request help "
+                f"from a maintainer."
+            )
+
         # Create the issue
         body = f"{params.body}\n\n---\n_Blocking #{agent.issue_number} ({agent.agent_id})_"
         new_issue = await self.github.create_issue(
@@ -709,6 +766,9 @@ class SquadronTools:
             labels=params.labels,
         )
         new_issue_number = new_issue["number"]
+
+        # Track issue creation for per-agent rate limiting
+        self._issues_created[agent_id] = self._issues_created.get(agent_id, 0) + 1
 
         # Register blocker
         success = await self.registry.add_blocker(agent_id, new_issue_number)
@@ -1080,6 +1140,30 @@ class SquadronTools:
 
     async def create_issue(self, agent_id: str, params: CreateIssueParams) -> str:
         """Create a new GitHub issue."""
+        # ── Per-agent issue creation rate limit ───────────────────────
+        # Prevents any single agent from spamming unbounded issues in
+        # one session.  Limit is 2× max_issue_depth (default 6).
+        max_depth = 3
+        if self.config and self.config.escalation:
+            max_depth = self.config.escalation.max_issue_depth
+        issue_cap = max_depth * 2
+
+        count = self._issues_created.get(agent_id, 0)
+        if count >= issue_cap:
+            logger.warning(
+                "create_issue: agent %s has already created %d issues "
+                "this session (cap %d) — refusing",
+                agent_id,
+                count,
+                issue_cap,
+            )
+            return (
+                f"Cannot create issue: you have already created {count} issues "
+                f"this session (limit: {issue_cap}). Review and consolidate "
+                f"existing issues before creating more, or use "
+                f"`escalate_to_human` if you need additional work items."
+            )
+
         result = await self.github.create_issue(
             self.owner,
             self.repo,
@@ -1087,6 +1171,7 @@ class SquadronTools:
             body=params.body,
             labels=params.labels,
         )
+        self._issues_created[agent_id] = count + 1
         return f"Created issue #{result['number']}: {params.title}"
 
     async def assign_issue(self, agent_id: str, params: AssignIssueParams) -> str:
@@ -1769,7 +1854,6 @@ class SquadronTools:
 
         return f"Posted comment on PR #{params.pr_number}"
 
-
     # ── GitHub Projects V2 Tools ─────────────────────────────────────────────
 
     async def create_project(self, agent_id: str, params: CreateProjectParams) -> str:
@@ -1779,6 +1863,7 @@ class SquadronTools:
         Raises: RuntimeError on GraphQL failure.
         """
         import json
+
         owner_id = await self.github.get_repo_owner_id(params.owner, self.repo)
         project = await self.github.create_project(owner_id, params.title)
         return json.dumps(project)
@@ -1791,6 +1876,7 @@ class SquadronTools:
                 RuntimeError on GraphQL failure.
         """
         import json
+
         if params.project_id:
             project = await self.github.get_project_by_id(params.project_id)
         elif params.project_number is not None:
@@ -1808,6 +1894,7 @@ class SquadronTools:
         Raises: RuntimeError on GraphQL failure.
         """
         import json
+
         projects = await self.github.list_projects(self.owner, self.repo, params.limit)
         return json.dumps(projects)
 
@@ -1818,6 +1905,7 @@ class SquadronTools:
         Raises: RuntimeError on GraphQL failure.
         """
         import json
+
         options = params.options if params.options else None
         field = await self.github.add_project_field(
             params.project_id, params.name, params.data_type, options
@@ -1831,12 +1919,11 @@ class SquadronTools:
         Raises: RuntimeError on GraphQL failure.
         """
         import json
+
         fields = await self.github.list_project_fields(params.project_id)
         return json.dumps(fields)
 
-    async def add_issue_to_project(
-        self, agent_id: str, params: AddIssueToProjectParams
-    ) -> str:
+    async def add_issue_to_project(self, agent_id: str, params: AddIssueToProjectParams) -> str:
         """Add an issue as a card on a Projects V2 board.
 
         Returns: JSON with id (the board item node ID). Save this for
@@ -1844,6 +1931,7 @@ class SquadronTools:
         Raises: RuntimeError on GraphQL failure.
         """
         import json
+
         issue_node_id = await self.github.get_issue_node_id(
             self.owner, self.repo, params.issue_number
         )
@@ -1870,6 +1958,7 @@ class SquadronTools:
         Raises: RuntimeError on GraphQL failure.
         """
         import json
+
         result = await self.github.update_project_item_field(
             params.project_id, params.item_id, params.field_id, params.value
         )
@@ -1884,6 +1973,7 @@ class SquadronTools:
         Raises: RuntimeError on GraphQL failure.
         """
         import json
+
         items = await self.github.get_project_items(params.project_id, params.limit)
 
         if params.filter_field and params.filter_value is not None:

@@ -130,7 +130,6 @@ class TestPMAgentDefinition:
         content = self._read_pm_agent()
         # Find the body (after frontmatter)
         lines = content.split("\n")
-        in_frontmatter = False
         frontmatter_end = 0
         dash_count = 0
         for i, line in enumerate(lines):
@@ -139,7 +138,7 @@ class TestPMAgentDefinition:
                 if dash_count == 2:
                     frontmatter_end = i
                     break
-        body = "\n".join(lines[frontmatter_end + 1:])
+        body = "\n".join(lines[frontmatter_end + 1 :])
 
         # PM prompt should describe the persistent lifecycle
         assert "report_blocked" in body, (

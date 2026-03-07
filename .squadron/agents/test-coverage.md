@@ -67,8 +67,9 @@ Review PR #{pr_number} and evaluate whether the changes have sufficient test cov
    - Would the test suite catch a regression if this code were reverted?
 
 6. **Submit review decision:**
-   - **Approve** — if test coverage is adequate. Minor suggestions don't block approval.
-   - **Request changes** — if critical functionality lacks tests, or if new code paths are entirely untested.
+    - **Approve** — if test coverage is adequate. Minor suggestions don't block approval.
+    - **Request changes** — if critical functionality lacks tests, or if new code paths are entirely untested.
+    - **NEVER delegate test writing to other agents** via `@squadron-dev` mentions. Do NOT spawn new agents to write tests for an existing PR. The original dev agent will be woken by your `REQUEST_CHANGES` review and will write the missing tests on its existing branch. Your job is to identify the gaps; the dev agent fixes them.
 
 ## Severity Classification
 
