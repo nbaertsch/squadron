@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from copilot import define_tool
 from pydantic import BaseModel, Field
@@ -381,7 +381,7 @@ class GetProjectParams(BaseModel):
 class ListProjectsParams(BaseModel):
     """List all GitHub Projects V2 boards linked to the repository."""
 
-    limit: int = Field(default=20, description="Maximum number of projects to return")
+    limit: int = Field(default=20, le=100, description="Maximum number of projects to return (max 100)")
 
 
 class AddProjectFieldParams(BaseModel):
@@ -389,7 +389,7 @@ class AddProjectFieldParams(BaseModel):
 
     project_id: str = Field(description="The project's global node ID")
     name: str = Field(description="Field name")
-    data_type: str = Field(
+    data_type: Literal["TEXT", "NUMBER", "DATE", "SINGLE_SELECT"] = Field(
         description="Field type: TEXT, NUMBER, DATE, or SINGLE_SELECT",
     )
     options: list[str] = Field(
@@ -438,7 +438,7 @@ class GetProjectItemsParams(BaseModel):
     """List items on a Projects V2 board with field values."""
 
     project_id: str = Field(description="The project's global node ID")
-    limit: int = Field(default=50, description="Maximum number of items to return")
+    limit: int = Field(default=50, le=100, description="Maximum number of items to return (max 100)")
     filter_field: str | None = Field(
         default=None,
         description="Optional field name to filter by",

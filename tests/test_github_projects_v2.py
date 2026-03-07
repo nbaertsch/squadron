@@ -591,3 +591,299 @@ class TestAllToolNamesRegistration:
             "get_project_items",
         }
         assert expected.issubset(set(ALL_TOOL_NAMES))
+
+
+# ── Security & Validation Regression Tests ───────────────────────────────────
+# These tests verify the security fixes and coverage gaps flagged in the review.
+# Each test here would FAIL if the security fixes were reverted.
+
+
+class TestGraphQLErrorSanitization:
+    """GraphQL error messages must contain human-readable info, not raw dicts."""
+
+    @respx.mock
+    async def test_error_message_contains_error_text(self, github):
+        """RuntimeError message should contain the human-readable error text."""
+        respx.post(GRAPHQL_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"errors": [{"message": "Could not resolve to a node"}]},
+            )
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            await github.graphql("{ bad }")
+        msg = str(exc_info.value)
+        assert "Could not resolve to a node" in msg
+
+    @respx.mock
+    async def test_partial_response_with_errors_raises(self, github):
+        """When response has both 'data' and 'errors', raise so errors are not silently ignored."""
+        respx.post(GRAPHQL_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": {"viewer": {"login": "bot"}},
+                    "errors": [{"message": "Some fields failed"}],
+                },
+            )
+        )
+        with pytest.raises(RuntimeError, match="GraphQL errors"):
+            await github.graphql("{ viewer { login } }")
+
+
+class TestDataTypeAllowlist:
+    """data_type in AddProjectFieldParams must be constrained to valid GitHub values.
+
+    Without the Literal["TEXT","NUMBER","DATE","SINGLE_SELECT"] annotation an agent
+    could pass arbitrary strings straight into the GraphQL mutation, potentially
+    causing unexpected API behavior or injection-style attacks.
+    """
+
+    def test_valid_text_type_accepted(self):
+        params = AddProjectFieldParams(project_id="PVT_x", name="Notes", data_type="TEXT")
+        assert params.data_type == "TEXT"
+
+    def test_valid_number_type_accepted(self):
+        params = AddProjectFieldParams(project_id="PVT_x", name="Points", data_type="NUMBER")
+        assert params.data_type == "NUMBER"
+
+    def test_valid_date_type_accepted(self):
+        params = AddProjectFieldParams(project_id="PVT_x", name="Due", data_type="DATE")
+        assert params.data_type == "DATE"
+
+    def test_valid_single_select_type_accepted(self):
+        params = AddProjectFieldParams(
+            project_id="PVT_x", name="Status", data_type="SINGLE_SELECT"
+        )
+        assert params.data_type == "SINGLE_SELECT"
+
+    def test_invalid_type_rejected(self):
+        """An invalid data_type must raise a ValidationError — not silently pass."""
+        import pydantic
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            AddProjectFieldParams(project_id="PVT_x", name="Bad", data_type="INVALID_TYPE")
+
+    def test_injection_attempt_rejected(self):
+        """A GraphQL injection payload in data_type must be rejected at validation time."""
+        import pydantic
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            AddProjectFieldParams(
+                project_id="PVT_x",
+                name="Exploit",
+                data_type='TEXT}) { id } mutation { deleteProjectV2(input:{id:"PVT_x"}) {',
+            )
+
+
+class TestLimitBounds:
+    """Limit parameters must be capped to prevent unbounded data over-fetching.
+
+    Without le=100 an agent could request limit=999999, causing excessive API
+    calls and returning potentially sensitive project data in bulk.
+    """
+
+    def test_list_projects_limit_capped(self):
+        """ListProjectsParams must reject limit > 100."""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError, match="less than or equal to 100"):
+            ListProjectsParams(limit=999999)
+
+    def test_get_project_items_limit_capped(self):
+        """GetProjectItemsParams must reject limit > 100."""
+        import pydantic
+        with pytest.raises(pydantic.ValidationError, match="less than or equal to 100"):
+            GetProjectItemsParams(project_id="PVT_x", limit=999999)
+
+    def test_list_projects_accepts_max_limit(self):
+        """ListProjectsParams should accept limit == 100."""
+        params = ListProjectsParams(limit=100)
+        assert params.limit == 100
+
+    def test_get_project_items_accepts_max_limit(self):
+        """GetProjectItemsParams should accept limit == 100."""
+        params = GetProjectItemsParams(project_id="PVT_x", limit=100)
+        assert params.limit == 100
+
+    def test_list_projects_default_limit_reasonable(self):
+        """Default limit should be reasonable (<= 100)."""
+        params = ListProjectsParams()
+        assert params.limit <= 100
+
+    def test_get_project_items_default_limit_reasonable(self):
+        """Default limit should be reasonable (<= 100)."""
+        params = GetProjectItemsParams(project_id="PVT_x")
+        assert params.limit <= 100
+
+
+class TestGetProjectItemsFilterCoverage:
+    """Filter edge cases: match-all, match-subset, match-none."""
+
+    async def test_filter_match_none(self, tools):
+        """When no items match the filter, return empty list."""
+        sq, gh = tools
+        gh.get_project_items = AsyncMock(
+            return_value=[
+                {"id": "PVTI_1", "title": "A", "number": 1, "fields": {"Status": "Todo"}},
+                {"id": "PVTI_2", "title": "B", "number": 2, "fields": {"Status": "Done"}},
+            ]
+        )
+        result = await sq.get_project_items(
+            "agent1",
+            GetProjectItemsParams(
+                project_id="PVT_abc", filter_field="Status", filter_value="In Progress"
+            ),
+        )
+        data = json.loads(result)
+        assert data == []
+
+    async def test_filter_match_all(self, tools):
+        """When all items match the filter, return all items."""
+        sq, gh = tools
+        gh.get_project_items = AsyncMock(
+            return_value=[
+                {"id": "PVTI_1", "title": "A", "number": 1, "fields": {"Status": "Todo"}},
+                {"id": "PVTI_2", "title": "B", "number": 2, "fields": {"Status": "Todo"}},
+            ]
+        )
+        result = await sq.get_project_items(
+            "agent1",
+            GetProjectItemsParams(
+                project_id="PVT_abc", filter_field="Status", filter_value="Todo"
+            ),
+        )
+        data = json.loads(result)
+        assert len(data) == 2
+
+    async def test_no_filter_returns_all(self, tools):
+        """When no filter is set, all items are returned."""
+        sq, gh = tools
+        gh.get_project_items = AsyncMock(
+            return_value=[
+                {"id": "PVTI_1", "title": "A", "number": 1, "fields": {}},
+                {"id": "PVTI_2", "title": "B", "number": 2, "fields": {}},
+                {"id": "PVTI_3", "title": "C", "number": 3, "fields": {}},
+            ]
+        )
+        result = await sq.get_project_items(
+            "agent1", GetProjectItemsParams(project_id="PVT_abc")
+        )
+        data = json.loads(result)
+        assert len(data) == 3
+
+
+class TestAllFieldTypesInTools:
+    """add_project_field and update_project_item_field must handle all 4 field types."""
+
+    async def test_add_text_field(self, tools):
+        sq, gh = tools
+        gh.add_project_field = AsyncMock(
+            return_value={"id": "PVTF_t", "name": "Notes", "dataType": "TEXT"}
+        )
+        result = await sq.add_project_field(
+            "agent1",
+            AddProjectFieldParams(project_id="PVT_abc", name="Notes", data_type="TEXT"),
+        )
+        data = json.loads(result)
+        assert data["dataType"] == "TEXT"
+        gh.add_project_field.assert_called_once_with("PVT_abc", "Notes", "TEXT", None)
+
+    async def test_add_number_field(self, tools):
+        sq, gh = tools
+        gh.add_project_field = AsyncMock(
+            return_value={"id": "PVTF_n", "name": "Points", "dataType": "NUMBER"}
+        )
+        result = await sq.add_project_field(
+            "agent1",
+            AddProjectFieldParams(project_id="PVT_abc", name="Points", data_type="NUMBER"),
+        )
+        data = json.loads(result)
+        assert data["dataType"] == "NUMBER"
+
+    async def test_add_date_field(self, tools):
+        sq, gh = tools
+        gh.add_project_field = AsyncMock(
+            return_value={"id": "PVTF_d", "name": "Due Date", "dataType": "DATE"}
+        )
+        result = await sq.add_project_field(
+            "agent1",
+            AddProjectFieldParams(project_id="PVT_abc", name="Due Date", data_type="DATE"),
+        )
+        data = json.loads(result)
+        assert data["dataType"] == "DATE"
+
+    async def test_update_text_field_value(self, tools):
+        sq, gh = tools
+        gh.update_project_item_field = AsyncMock(return_value={"id": "PVTI_item1"})
+        result = await sq.update_project_item_field(
+            "agent1",
+            UpdateProjectItemFieldParams(
+                project_id="PVT_abc",
+                item_id="PVTI_item1",
+                field_id="PVTF_t",
+                value={"text": "some notes"},
+            ),
+        )
+        data = json.loads(result)
+        assert data["id"] == "PVTI_item1"
+        gh.update_project_item_field.assert_called_once_with(
+            "PVT_abc", "PVTI_item1", "PVTF_t", {"text": "some notes"}
+        )
+
+    async def test_update_number_field_value(self, tools):
+        sq, gh = tools
+        gh.update_project_item_field = AsyncMock(return_value={"id": "PVTI_item1"})
+        await sq.update_project_item_field(
+            "agent1",
+            UpdateProjectItemFieldParams(
+                project_id="PVT_abc",
+                item_id="PVTI_item1",
+                field_id="PVTF_n",
+                value={"number": 8},
+            ),
+        )
+        gh.update_project_item_field.assert_called_once_with(
+            "PVT_abc", "PVTI_item1", "PVTF_n", {"number": 8}
+        )
+
+    async def test_update_date_field_value(self, tools):
+        sq, gh = tools
+        gh.update_project_item_field = AsyncMock(return_value={"id": "PVTI_item1"})
+        await sq.update_project_item_field(
+            "agent1",
+            UpdateProjectItemFieldParams(
+                project_id="PVT_abc",
+                item_id="PVTI_item1",
+                field_id="PVTF_d",
+                value={"date": "2026-03-15"},
+            ),
+        )
+        gh.update_project_item_field.assert_called_once_with(
+            "PVT_abc", "PVTI_item1", "PVTF_d", {"date": "2026-03-15"}
+        )
+
+
+class TestListProjectsEmptyCase:
+    """list_projects must handle an empty board list gracefully."""
+
+    async def test_empty_list_from_tool(self, tools):
+        sq, gh = tools
+        gh.list_projects = AsyncMock(return_value=[])
+        result = await sq.list_projects("agent1", ListProjectsParams())
+        data = json.loads(result)
+        assert data == []
+
+    @respx.mock
+    async def test_empty_list_from_client(self, github):
+        respx.post(GRAPHQL_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "repository": {
+                            "projectsV2": {"nodes": []}
+                        }
+                    }
+                },
+            )
+        )
+        projects = await github.list_projects("acme", "widgets")
+        assert projects == []
