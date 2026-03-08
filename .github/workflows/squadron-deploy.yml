@@ -201,19 +201,24 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Register required Azure providers
+      - name: Verify Azure provider registration
         run: |
           set -euo pipefail
+          # Check that required providers are registered. These should be
+          # registered once by a subscription Owner/Contributor — the deploy
+          # SP intentionally does NOT have */register/action.
+          missing=()
           for ns in Microsoft.OperationalInsights Microsoft.ContainerInstance Microsoft.Storage; do
-            state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null || echo "NotRegistered")
+            state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null || echo "Unknown")
+            echo "$ns: $state"
             if [ "$state" != "Registered" ]; then
-              echo "Registering $ns (currently: $state)..."
-              az provider register --namespace "$ns" --wait
-              echo "$ns registered"
-            else
-              echo "$ns already registered"
+              missing+=("$ns ($state)")
             fi
           done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::warning::Unregistered providers: ${missing[*]}"
+            echo "Run 'az provider register --namespace <ns> --wait' as a subscription Owner."
+          fi
 
       - name: Azure context diagnostics
         run: |
