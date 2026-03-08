@@ -2748,6 +2748,30 @@ class AgentManager:
             await self._post_unknown_agent_error(event, agent_name)
             return
 
+        # ── PR-context delegation guard ──────────────────────────────
+        # When a review agent (bot-authored comment) tries to delegate to a dev
+        # agent on an issue that already has a dev agent with an open PR, block
+        # the spawn.  The existing dev agent will be woken by the
+        # pull_request_review.submitted reactive event and will address the
+        # feedback on its existing branch — preventing duplicate PRs.
+        _dev_roles = {"bug-fix", "feat-dev", "infra-dev", "docs-dev"}
+        if sender_role and agent_name in _dev_roles:
+            existing_agents = await self.registry.get_all_agents_for_issue(event.issue_number)
+            agents_with_pr = [a for a in existing_agents if a.role in _dev_roles and a.pr_number]
+            if agents_with_pr:
+                existing = agents_with_pr[0]
+                logger.info(
+                    "PR-delegation guard: blocking @squadron-dev %s spawn on issue #%d — "
+                    "agent %s (%s) already has PR #%s. The dev agent will be woken by "
+                    "the review event instead.",
+                    agent_name,
+                    event.issue_number,
+                    existing.agent_id,
+                    existing.role,
+                    existing.pr_number,
+                )
+                return
+
         logger.info(
             "Command routing: @squadron-dev %s: on issue #%d (sender_role=%s)",
             agent_name,

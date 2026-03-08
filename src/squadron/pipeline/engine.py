@@ -285,6 +285,20 @@ class PipelineEngine:
                         )
                         continue
 
+                # Issue-scope dedup: don't start a duplicate lifecycle pipeline
+                # for the same issue (e.g. label removed and re-applied).
+                if issue_number and not pr_number:
+                    existing = await self._registry.get_pipeline_runs_by_issue(
+                        issue_number, status=PipelineRunStatus.RUNNING
+                    )
+                    if any(r.pipeline_name == name for r in existing):
+                        logger.info(
+                            "Pipeline '%s' already running for issue #%s, skipping",
+                            name,
+                            issue_number,
+                        )
+                        continue
+
                 run = await self._start_pipeline(
                     name,
                     defn,
@@ -1688,7 +1702,7 @@ class PipelineEngine:
             # Check on_events config
             reactive_config = defn.on_events.get(event_type)
             if reactive_config:
-                await self._handle_reactive_action(run, defn, reactive_config)
+                await self._handle_reactive_action(run, defn, reactive_config, payload)
 
             # Always re-evaluate gates/human stages on relevant events
             await self._reevaluate_waiting_stages(run, defn, event_type, payload)
@@ -1698,6 +1712,7 @@ class PipelineEngine:
         run: PipelineRun,
         definition: PipelineDefinition,
         config: Any,  # ReactiveEventConfig
+        payload: dict[str, Any] | None = None,
     ) -> None:
         """Handle a configured reactive event action."""
         action = config.action
@@ -1712,7 +1727,7 @@ class PipelineEngine:
         elif action == ReactiveAction.NOTIFY:
             await self._handle_reactive_notify(run, config)
         elif action == ReactiveAction.WAKE_AGENT:
-            await self._handle_reactive_wake_agent(run, definition)
+            await self._handle_reactive_wake_agent(run, definition, payload)
 
     async def _handle_reactive_notify(
         self,
@@ -1745,8 +1760,26 @@ class PipelineEngine:
         self,
         run: PipelineRun,
         definition: PipelineDefinition,
+        payload: dict[str, Any] | None = None,
     ) -> None:
-        """Handle WAKE_AGENT reactive action — wake the agent for the current stage."""
+        """Handle WAKE_AGENT reactive action — wake the agent for the current stage.
+
+        If the triggering event is a bot-authored comment, skip the wake to
+        prevent agents from waking themselves (or other bots) in a feedback
+        loop.
+        """
+        # ── Self-wake guard: ignore bot-authored comments ──────────────
+        if payload:
+            comment = payload.get("comment") or {}
+            comment_user = comment.get("user") or {}
+            if comment_user.get("type") == "Bot":
+                logger.info(
+                    "WAKE_AGENT: skipping wake — comment authored by bot user '%s' (pipeline %s)",
+                    comment_user.get("login", "unknown"),
+                    run.run_id,
+                )
+                return
+
         if not run.current_stage_id:
             return
 

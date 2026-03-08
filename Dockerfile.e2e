@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iptables \
         iputils-ping \
         git \
+        ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast dependency resolution
@@ -28,6 +29,16 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Fix Copilot CLI binary permissions
 RUN chmod +x /app/.venv/lib/python*/site-packages/copilot/bin/copilot || true
+
+# Pre-warm Copilot CLI pkg asset extraction (see Dockerfile for full explanation).
+# Also applies to E2E tests to avoid extraction races during concurrent agent tests.
+RUN /app/.venv/lib/python*/site-packages/copilot/bin/copilot --no-auto-update --help 2>/dev/null || \
+    /app/.venv/lib/python*/site-packages/copilot/bin/copilot --no-auto-update 2>/dev/null || \
+    true
+
+# USE_BUILTIN_RIPGREP=false: use system rg (installed via apt) rather than
+# bundled ripgrep binary for reliability (see Dockerfile for full explanation).
+ENV USE_BUILTIN_RIPGREP=false
 
 # Default: run E2E tests
 ENTRYPOINT ["pytest", "tests/e2e/", "-v", "--tb=long"]

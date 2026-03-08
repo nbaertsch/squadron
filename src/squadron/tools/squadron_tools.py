@@ -29,10 +29,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from copilot import define_tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
     import asyncio
@@ -91,6 +91,16 @@ ALL_TOOL_NAMES = [
     # Communication
     "comment_on_issue",
     "comment_on_pr",
+    # GitHub Projects V2
+    "create_project",
+    "get_project",
+    "list_projects",
+    "add_project_field",
+    "list_project_fields",
+    "add_issue_to_project",
+    "remove_issue_from_project",
+    "update_project_item_field",
+    "get_project_items",
 ]
 
 # O(1) lookup set for splitting .md tool lists into custom vs SDK built-in
@@ -338,6 +348,120 @@ class ReplyToReviewCommentParams(BaseModel):
     body: str = Field(description="Reply body (markdown)")
 
 
+class CreateProjectParams(BaseModel):
+    """Create a new GitHub Projects V2 board."""
+
+    owner: str = Field(description="Repository owner login (user or org)")
+    title: str = Field(description="Title of the new project board")
+
+
+class GetProjectParams(BaseModel):
+    """Read a project by ID or number."""
+
+    project_id: str | None = Field(
+        default=None,
+        description="The project's global node ID (preferred if known)",
+    )
+    project_number: int | None = Field(
+        default=None,
+        description="The project number visible in the project URL",
+    )
+    owner: str | None = Field(
+        default=None,
+        description="Repository owner login (required when using project_number)",
+    )
+    repo: str | None = Field(
+        default=None,
+        description="Repository name (required when using project_number)",
+    )
+
+    @model_validator(mode="after")
+    def validate_identifier(self) -> "GetProjectParams":
+        """Require exactly one of project_id or project_number (not both, not neither)."""
+        has_id = self.project_id is not None
+        has_number = self.project_number is not None
+        if not has_id and not has_number:
+            raise ValueError(
+                "Provide either 'project_id' (node ID) or 'project_number' (integer from URL)."
+            )
+        if has_id and has_number:
+            raise ValueError("Provide either 'project_id' or 'project_number', not both.")
+        return self
+
+
+class ListProjectsParams(BaseModel):
+    """List all GitHub Projects V2 boards linked to the repository."""
+
+    limit: int = Field(
+        default=20, le=100, description="Maximum number of projects to return (max 100)"
+    )
+
+
+class AddProjectFieldParams(BaseModel):
+    """Add a custom field to a Projects V2 board."""
+
+    project_id: str = Field(description="The project's global node ID")
+    name: str = Field(description="Field name")
+    data_type: Literal["TEXT", "NUMBER", "DATE", "SINGLE_SELECT"] = Field(
+        description="Field type: TEXT, NUMBER, DATE, or SINGLE_SELECT",
+    )
+    options: list[str] = Field(
+        default_factory=list,
+        description="Option names for SINGLE_SELECT fields",
+    )
+
+
+class ListProjectFieldsParams(BaseModel):
+    """List all fields on a Projects V2 board."""
+
+    project_id: str = Field(description="The project's global node ID")
+
+
+class AddIssueToProjectParams(BaseModel):
+    """Add an issue as a card on a Projects V2 board."""
+
+    project_id: str = Field(description="The project's global node ID")
+    issue_number: int = Field(description="The issue number to add")
+
+
+class RemoveIssueFromProjectParams(BaseModel):
+    """Remove a card from a Projects V2 board."""
+
+    project_id: str = Field(description="The project's global node ID")
+    item_id: str = Field(description="The board item node ID (returned by add_issue_to_project)")
+
+
+class UpdateProjectItemFieldParams(BaseModel):
+    """Set a field value on a board item."""
+
+    project_id: str = Field(description="The project's global node ID")
+    item_id: str = Field(description="The board item node ID")
+    field_id: str = Field(description="The field's node ID")
+    value: dict = Field(
+        description=(
+            "Field value dict. Format: TEXT={text:val}, NUMBER={number:42}, "
+            "DATE={date:2024-01-15}, SINGLE_SELECT={singleSelectOptionId:<id>}"
+        )
+    )
+
+
+class GetProjectItemsParams(BaseModel):
+    """List items on a Projects V2 board with field values."""
+
+    project_id: str = Field(description="The project's global node ID")
+    limit: int = Field(
+        default=50, le=100, description="Maximum number of items to return (max 100)"
+    )
+    filter_field: str | None = Field(
+        default=None,
+        description="Optional field name to filter by",
+    )
+    filter_value: str | None = Field(
+        default=None,
+        description="Optional field value to filter by (string comparison)",
+    )
+
+
 # ── Unified Tool Implementations ─────────────────────────────────────────────
 
 
@@ -374,6 +498,8 @@ class SquadronTools:
         self._pre_sleep_hook = pre_sleep_hook
         self._git_push_callback = git_push_callback
         self.activity_logger = activity_logger
+        # Per-agent issue creation counter (guards against runaway issue spam)
+        self._issues_created: dict[str, int] = {}
 
     def _agent_signature(self, role: str) -> str:
         """Build the agent signature prefix: emoji + display_name on its own line.
@@ -418,6 +544,35 @@ class SquadronTools:
             await self.activity_logger.log(event)
         except Exception:
             logger.debug("Failed to log activity event", exc_info=True)
+
+    async def _compute_blocker_depth(self, agent: "AgentRecord") -> int:
+        """Compute how deep *agent* sits in the blocker-issue chain.
+
+        Walks upward: if the agent's issue_number appears in another
+        agent's ``blocked_by`` list, that parent is one level up.
+        Continues until no parent is found.
+
+        Returns 0 if the agent is a root (not blocking anyone), 1 if it
+        was spawned as a direct blocker, etc.
+        """
+        depth = 0
+        current_issue = agent.issue_number
+        visited: set[int] = set()
+
+        while current_issue and current_issue not in visited:
+            visited.add(current_issue)
+            # Find agents that are blocked by this issue
+            parents = await self.registry.get_agents_blocked_by(current_issue)
+            if not parents:
+                break
+            # Follow the first parent (there should be at most one in a
+            # well-formed chain; if multiple exist, any path gives a
+            # valid lower-bound on depth).
+            parent = parents[0]
+            depth += 1
+            current_issue = parent.issue_number
+
+        return depth
 
     # ── Framework Tools (agent lifecycle) ────────────────────────────────
 
@@ -589,6 +744,31 @@ class SquadronTools:
         if agent is None:
             return f"Error: agent {agent_id} not found"
 
+        # ── max_issue_depth guard ─────────────────────────────────────
+        # Walk the blocker chain upward to compute how deep this agent
+        # is in the hierarchy.  If creating another sub-issue would
+        # exceed the configured depth, refuse and suggest escalation.
+        max_depth = 3  # default
+        if self.config and self.config.escalation:
+            max_depth = self.config.escalation.max_issue_depth
+
+        current_depth = await self._compute_blocker_depth(agent)
+        if current_depth >= max_depth:
+            logger.warning(
+                "create_blocker_issue: agent %s (issue #%s) is already at "
+                "blocker depth %d (max %d) — refusing to create sub-issue",
+                agent_id,
+                agent.issue_number,
+                current_depth,
+                max_depth,
+            )
+            return (
+                f"Cannot create a blocker issue: the blocker chain is already "
+                f"{current_depth} levels deep (max allowed: {max_depth}). "
+                f"Use the `escalate_to_human` tool instead to request help "
+                f"from a maintainer."
+            )
+
         # Create the issue
         body = f"{params.body}\n\n---\n_Blocking #{agent.issue_number} ({agent.agent_id})_"
         new_issue = await self.github.create_issue(
@@ -599,6 +779,9 @@ class SquadronTools:
             labels=params.labels,
         )
         new_issue_number = new_issue["number"]
+
+        # Track issue creation for per-agent rate limiting
+        self._issues_created[agent_id] = self._issues_created.get(agent_id, 0) + 1
 
         # Register blocker
         success = await self.registry.add_blocker(agent_id, new_issue_number)
@@ -970,6 +1153,30 @@ class SquadronTools:
 
     async def create_issue(self, agent_id: str, params: CreateIssueParams) -> str:
         """Create a new GitHub issue."""
+        # ── Per-agent issue creation rate limit ───────────────────────
+        # Prevents any single agent from spamming unbounded issues in
+        # one session.  Limit is 2× max_issue_depth (default 6).
+        max_depth = 3
+        if self.config and self.config.escalation:
+            max_depth = self.config.escalation.max_issue_depth
+        issue_cap = max_depth * 2
+
+        count = self._issues_created.get(agent_id, 0)
+        if count >= issue_cap:
+            logger.warning(
+                "create_issue: agent %s has already created %d issues "
+                "this session (cap %d) — refusing",
+                agent_id,
+                count,
+                issue_cap,
+            )
+            return (
+                f"Cannot create issue: you have already created {count} issues "
+                f"this session (limit: {issue_cap}). Review and consolidate "
+                f"existing issues before creating more, or use "
+                f"`escalate_to_human` if you need additional work items."
+            )
+
         result = await self.github.create_issue(
             self.owner,
             self.repo,
@@ -977,6 +1184,7 @@ class SquadronTools:
             body=params.body,
             labels=params.labels,
         )
+        self._issues_created[agent_id] = count + 1
         return f"Created issue #{result['number']}: {params.title}"
 
     async def assign_issue(self, agent_id: str, params: AssignIssueParams) -> str:
@@ -1659,6 +1867,138 @@ class SquadronTools:
 
         return f"Posted comment on PR #{params.pr_number}"
 
+    # ── GitHub Projects V2 Tools ─────────────────────────────────────────────
+
+    async def create_project(self, agent_id: str, params: CreateProjectParams) -> str:
+        """Create a new GitHub Projects V2 board.
+
+        Returns: JSON with id, number, title, url of the created project.
+        Raises: RuntimeError on GraphQL failure.
+        """
+        import json
+
+        owner_id = await self.github.get_repo_owner_id(params.owner, self.repo)
+        project = await self.github.create_project(owner_id, params.title)
+        return json.dumps(project)
+
+    async def get_project(self, agent_id: str, params: GetProjectParams) -> str:
+        """Read a project by global node ID or owner/repo/number.
+
+        Returns: JSON with id, number, title, url.
+        Raises: ValueError if neither project_id nor project_number given.
+                RuntimeError on GraphQL failure.
+        """
+        import json
+
+        if params.project_id:
+            project = await self.github.get_project_by_id(params.project_id)
+        elif params.project_number is not None:
+            owner = params.owner or self.owner
+            repo = params.repo or self.repo
+            project = await self.github.get_project_by_number(owner, repo, params.project_number)
+        else:
+            raise ValueError("Either project_id or project_number must be provided")
+        return json.dumps(project)
+
+    async def list_projects(self, agent_id: str, params: ListProjectsParams) -> str:
+        """List all Projects V2 boards linked to the repository.
+
+        Returns: JSON list of project dicts (id, number, title, url).
+        Raises: RuntimeError on GraphQL failure.
+        """
+        import json
+
+        projects = await self.github.list_projects(self.owner, self.repo, params.limit)
+        return json.dumps(projects)
+
+    async def add_project_field(self, agent_id: str, params: AddProjectFieldParams) -> str:
+        """Add a custom field to a Projects V2 board.
+
+        Returns: JSON with id, name, dataType (and options for SINGLE_SELECT).
+        Raises: RuntimeError on GraphQL failure.
+        """
+        import json
+
+        options = params.options if params.options else None
+        field = await self.github.add_project_field(
+            params.project_id, params.name, params.data_type, options
+        )
+        return json.dumps(field)
+
+    async def list_project_fields(self, agent_id: str, params: ListProjectFieldsParams) -> str:
+        """List all fields on a Projects V2 board.
+
+        Returns: JSON list of field dicts with id, name, dataType, and options.
+        Raises: RuntimeError on GraphQL failure.
+        """
+        import json
+
+        fields = await self.github.list_project_fields(params.project_id)
+        return json.dumps(fields)
+
+    async def add_issue_to_project(self, agent_id: str, params: AddIssueToProjectParams) -> str:
+        """Add an issue as a card on a Projects V2 board.
+
+        Returns: JSON with id (the board item node ID). Save this for
+                 update_project_item_field and remove_issue_from_project.
+        Raises: RuntimeError on GraphQL failure.
+        """
+        import json
+
+        issue_node_id = await self.github.get_issue_node_id(
+            self.owner, self.repo, params.issue_number
+        )
+        item = await self.github.add_issue_to_project(params.project_id, issue_node_id)
+        return json.dumps(item)
+
+    async def remove_issue_from_project(
+        self, agent_id: str, params: RemoveIssueFromProjectParams
+    ) -> str:
+        """Remove a card from a Projects V2 board.
+
+        Returns: Confirmation string.
+        Raises: RuntimeError on GraphQL failure.
+        """
+        await self.github.remove_issue_from_project(params.project_id, params.item_id)
+        return f"Removed item {params.item_id} from project {params.project_id}"
+
+    async def update_project_item_field(
+        self, agent_id: str, params: UpdateProjectItemFieldParams
+    ) -> str:
+        """Set a field value on a board item.
+
+        Returns: JSON with id of the updated item.
+        Raises: RuntimeError on GraphQL failure.
+        """
+        import json
+
+        result = await self.github.update_project_item_field(
+            params.project_id, params.item_id, params.field_id, params.value
+        )
+        return json.dumps(result)
+
+    async def get_project_items(self, agent_id: str, params: GetProjectItemsParams) -> str:
+        """List items on a Projects V2 board with their field values.
+
+        Supports client-side filtering by field name and value.
+
+        Returns: JSON list of item dicts with id, title, number, fields dict.
+        Raises: RuntimeError on GraphQL failure.
+        """
+        import json
+
+        items = await self.github.get_project_items(params.project_id, params.limit)
+
+        if params.filter_field and params.filter_value is not None:
+            items = [
+                item
+                for item in items
+                if str(item.get("fields", {}).get(params.filter_field, ""))
+                == str(params.filter_value)
+            ]
+
+        return json.dumps(items)
+
     # ── Tool Selection ───────────────────────────────────────────────────
 
     def get_tools(
@@ -1921,6 +2261,62 @@ class SquadronTools:
             "Reply to an existing PR review comment. Use to respond to reviewer feedback.",
             ReplyToReviewCommentParams,
             tools.reply_to_review_comment,
+        )
+
+        # GitHub Projects V2 tools
+        _register(
+            "create_project",
+            "Create a new GitHub Projects V2 board.",
+            CreateProjectParams,
+            tools.create_project,
+        )
+        _register(
+            "get_project",
+            "Read a GitHub Projects V2 board by ID or number.",
+            GetProjectParams,
+            tools.get_project,
+        )
+        _register(
+            "list_projects",
+            "List all GitHub Projects V2 boards linked to the repository.",
+            ListProjectsParams,
+            tools.list_projects,
+        )
+        _register(
+            "add_project_field",
+            "Add a custom field (TEXT/NUMBER/DATE/SINGLE_SELECT) to a Projects V2 board.",
+            AddProjectFieldParams,
+            tools.add_project_field,
+        )
+        _register(
+            "list_project_fields",
+            "List all fields on a Projects V2 board with their option IDs.",
+            ListProjectFieldsParams,
+            tools.list_project_fields,
+        )
+        _register(
+            "add_issue_to_project",
+            "Add an issue as a card on a Projects V2 board. Returns item_id for field updates.",
+            AddIssueToProjectParams,
+            tools.add_issue_to_project,
+        )
+        _register(
+            "remove_issue_from_project",
+            "Remove an item (card) from a Projects V2 board.",
+            RemoveIssueFromProjectParams,
+            tools.remove_issue_from_project,
+        )
+        _register(
+            "update_project_item_field",
+            "Set a field value on a Projects V2 board item (TEXT/NUMBER/DATE/SINGLE_SELECT).",
+            UpdateProjectItemFieldParams,
+            tools.update_project_item_field,
+        )
+        _register(
+            "get_project_items",
+            "List items on a Projects V2 board with field values. Supports client-side filtering.",
+            GetProjectItemsParams,
+            tools.get_project_items,
         )
 
         # Build and return only the requested tools

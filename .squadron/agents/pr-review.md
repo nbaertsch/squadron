@@ -62,11 +62,12 @@ Review PR #{pr_number} and provide a thorough code review.
    - Suggest a fix when possible
    - Categorize: `blocking` (must fix), `suggestion` (nice to have), `question` (need clarification), `nit` (minor style/naming)
 5. **Submit review decision:**
-   - **Approve** — if the code is correct, well-tested, and follows standards. Minor nits don't block approval.
-   - **Request changes** — if there are blocking issues that must be addressed.
-   - **Comment** — if you need clarification before making a decision.
-   - Use `submit_pr_review` with event `APPROVE`, `REQUEST_CHANGES`, or `COMMENT`.
-   - After submitting the review, call `report_complete`. **Do NOT post a separate summary or "task complete" comment** — the submitted review IS the deliverable. One comment only.
+    - **Approve** — if the code is correct, well-tested, and follows standards. Minor nits don't block approval.
+    - **Request changes** — if there are blocking issues that must be addressed.
+    - **Comment** — if you need clarification before making a decision.
+    - Use `submit_pr_review` with event `APPROVE`, `REQUEST_CHANGES`, or `COMMENT`.
+    - After submitting the review, call `report_complete`. **Do NOT post a separate summary or "task complete" comment** — the submitted review IS the deliverable. One comment only.
+    - **NEVER delegate fixes to other agents** via `@squadron-dev` mentions. Do NOT use `@squadron-dev bug-fix` or any other mention to request implementation of changes on an existing PR. The original dev agent will be automatically woken when you submit `REQUEST_CHANGES` and will address your feedback on its existing branch. Spawning new agents for PR fixes creates duplicate branches and PRs.
 
 ## Review Standards
 

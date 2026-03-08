@@ -225,3 +225,73 @@ All Squadron tools are implemented in `src/squadron/tools/squadron_tools.py`. Ea
 - Interacts with GitHub via the internal `GitHubClient`
 
 To see all registered tool names, see `ALL_TOOL_NAMES` in `src/squadron/tools/squadron_tools.py`.
+
+---
+
+## GitHub Projects V2
+
+Squadron supports programmatic management of GitHub Projects V2 boards via 9 dedicated tools backed by the GitHub GraphQL API.
+
+> **Note:** The GitHub App (or OAuth token) must have the **"Projects" read & write** permission for these tools to work against the real API.
+
+### Project Board Tools
+
+| Tool | Description |
+|------|-------------|
+| `create_project` | Create a new Projects V2 board under the repo owner |
+| `get_project` | Read project metadata by ID or project number |
+| `list_projects` | List Projects V2 boards linked to this repository (repo-linked only; org-level unlinked projects are excluded) |
+
+### Field Management Tools
+
+| Tool | Description |
+|------|-------------|
+| `add_project_field` | Add a custom field (TEXT / NUMBER / DATE / SINGLE_SELECT) |
+| `list_project_fields` | List all fields with their option IDs |
+
+### Item (Card) Tools
+
+| Tool | Description |
+|------|-------------|
+| `add_issue_to_project` | Add an issue as a card; returns `item_id` |
+| `remove_issue_from_project` | Remove a card from the board |
+| `update_project_item_field` | Set a field value on a board item |
+| `get_project_items` | List items with field values; supports client-side filtering |
+
+### Field Value Format Reference
+
+When calling `update_project_item_field`, the `value` dict format depends on the field type:
+
+| Field Type | Value Format |
+|------------|--------------|
+| TEXT | `{"text": "some text"}` |
+| NUMBER | `{"number": 42}` |
+| DATE | `{"date": "2024-01-15"}` |
+| SINGLE_SELECT | `{"singleSelectOptionId": "<option_id>"}` |
+
+Use `list_project_fields` to retrieve option IDs for SINGLE_SELECT fields.
+
+### End-to-End Workflow Example
+
+```yaml
+# 1. Create a project board
+create_project(owner="acme", title="Sprint 1")
+# returns: {id: "PVT_abc", number: 1, title: "Sprint 1", url: "..."}
+
+# 2. Add a custom SINGLE_SELECT field
+add_project_field(project_id="PVT_abc", name="Priority", data_type="SINGLE_SELECT", options=["High", "Medium", "Low"])
+# returns: {id: "PVTF_123", name: "Priority", options: [{id: "OPT_1", name: "High"}, ...]}
+
+# 3. Add an issue as a board card
+add_issue_to_project(project_id="PVT_abc", issue_number=42)
+# returns: {id: "PVTI_item1"}
+
+# 4. Set the Priority field on the card
+update_project_item_field(project_id="PVT_abc", item_id="PVTI_item1", field_id="PVTF_123",
+                          value={"singleSelectOptionId": "OPT_1"})
+
+# 5. Query board items with optional filtering
+get_project_items(project_id="PVT_abc", filter_field="Priority", filter_value="High")
+# returns: [{id: "PVTI_item1", title: "Fix bug", number: 42, fields: {Priority: "High"}}]
+```
+
