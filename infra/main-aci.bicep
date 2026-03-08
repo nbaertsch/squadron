@@ -214,16 +214,12 @@ resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-05-01'
             periodSeconds: 30
             failureThreshold: 3
           }
-          // ACI securityContext: grant CAP_NET_ADMIN + CAP_SYS_ADMIN for sandbox
-          // network namespace isolation (MitM proxy, bridge, veth pairs).
+          // ACI securityContext: privileged mode grants CAP_NET_ADMIN +
+          // CAP_SYS_ADMIN needed for sandbox network namespace isolation
+          // (MitM proxy, bridge, veth pairs). ACI does not support
+          // fine-grained capabilities.add — only the privileged flag.
           securityContext: {
-            privileged: false
-            capabilities: {
-              add: [
-                'NET_ADMIN'
-                'SYS_ADMIN'
-              ]
-            }
+            privileged: true
           }
         }
       }
