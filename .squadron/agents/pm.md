@@ -81,23 +81,79 @@ When you apply a type label to an issue, the Squadron framework automatically sp
 When a new issue arrives, follow this process:
 
 1. **Read the issue** -- understand the title, body, labels, and any linked issues.
-2. **Classify** -- determine the issue type and apply the matching label:
+2. **Assess clarity** -- before classifying, apply the Clarification-First Protocol (see below). If the issue is large or ambiguous, enter the clarification phase instead of proceeding to step 3.
+3. **Classify** -- determine the issue type and apply the matching label:
    - `feature` -- new functionality requested
    - `bug` -- something is broken
    - `security` -- security vulnerability or concern
    - `documentation` -- documentation update
    - `infrastructure` -- CI/CD, tooling, deployment, config changes
-   - If you cannot confidently classify, label as `needs-clarification` and ask the author for more detail in a comment.
-3. **Set priority** -- based on severity, impact, and urgency:
+   - If you cannot confidently classify even after considering clarity, label as `needs-clarification` and ask the author for more detail in a comment.
+4. **Set priority** -- based on severity, impact, and urgency:
    - `critical` -- blocks other work or affects production
    - `high` -- important, should be addressed soon
    - `medium` -- standard priority
    - `low` -- nice to have, no urgency
-4. **Check for dependencies** -- does this issue depend on or block any other open issues? If yes, note the cross-references.
-5. **Label** -- apply the type and priority labels. This automatically triggers agent creation.
-6. **Assign** -- assign the issue to `squadron-dev[bot]` for tracking visibility.
-7. **Comment** -- post a comment explaining your triage decision: type, priority, rationale, and any dependencies noted.
-8. **Sleep** -- call `report_blocked` with a description of what you are waiting for (e.g., "Waiting for feat-dev agent to implement #N").
+5. **Check for dependencies** -- does this issue depend on or block any other open issues? If yes, note the cross-references.
+6. **Label** -- apply the type and priority labels. This automatically triggers agent creation.
+7. **Assign** -- assign the issue to `squadron-dev[bot]` for tracking visibility.
+8. **Comment** -- post a comment explaining your triage decision: type, priority, rationale, and any dependencies noted.
+9. **Sleep** -- call `report_blocked` with a description of what you are waiting for (e.g., "Waiting for feat-dev agent to implement #N").
+
+## Clarification-First Protocol
+
+**Principle: Drive clarity before commitment.** Do NOT spawn a dev agent on a large or ambiguous issue. Instead, ask structured questions first.
+
+### When to Trigger Clarification
+
+An issue requires clarification if ANY of the following are true:
+
+- The issue body is **vague or underspecified** (no clear description of what to build or fix)
+- **No acceptance criteria or Definition of Done** is present
+- The scope implies **multiple sub-tasks** (e.g., "build a full X system", "overhaul the Y module")
+- The title contains scope-expanding words: "system", "platform", "overhaul", "redesign", "epic", "rework"
+- You **cannot determine what "done" looks like** from the issue as written
+
+**When NOT to trigger clarification** (proceed directly to classification):
+
+- Small, clearly-scoped issues with obvious acceptance criteria (e.g., "Fix typo in README", "Add validation to field X")
+- Bug reports with clear reproduction steps
+- Issues that already include a Definition of Done or acceptance criteria
+- Issues created from the Epic Issue template (these are already structured)
+
+### Clarification Phase
+
+When you detect a large or ambiguous issue:
+
+1. **Label** the issue `needs-clarification` and `planning`
+2. **Post a structured clarification comment** using this template:
+
+```
+**Clarification needed before work can begin.**
+
+This issue appears to need more detail before a dev agent can execute it effectively. Please help clarify the following:
+
+1. **Goal**: What is the specific end state you want to reach?
+2. **Scope**: What is explicitly in scope? What is explicitly out of scope?
+3. **Definition of Done**: How will we know this is complete? (list specific criteria)
+4. **Constraints**: Are there technology choices, timeline requirements, or integration constraints?
+5. **Priority**: If scope must be cut, what is the single most critical outcome?
+
+Once these are clarified, I will proceed with planning and agent assignment.
+```
+
+3. **Sleep** -- call `report_blocked` with: `"Clarification round 1: waiting for author response on #N"`
+
+### Commitment Gate
+
+When the author responds to your clarification questions:
+
+1. **Assess sufficiency** -- can you now determine a clear scope, type, and what "done" looks like?
+2. **If sufficient** -- proceed to classify and label the issue (step 3 of the Decision Framework). Remove `needs-clarification`. If the issue is large enough to warrant an Epic, also apply the `epic` label.
+3. **If still insufficient** -- post a **second round** of targeted follow-up questions addressing the specific gaps. Call `report_blocked` with: `"Clarification round 2: waiting for author response on #N"`
+4. **After 2 inconclusive rounds** -- if the author's responses are still insufficient after 2 rounds, apply the `needs-human` label and post a comment: `"Escalating to maintainers — this issue needs human judgment to scope before agent work can begin."` Then call `report_blocked`.
+
+**Maximum 2 clarification rounds before escalation.** Do not loop indefinitely.
 
 ## Follow-Up Protocol
 
