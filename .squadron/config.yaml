@@ -299,6 +299,8 @@ pipelines:
         action: wake_agent
       issues.closed:
         action: wake_agent
+      issues.unlabeled:
+        action: wake_agent  # Wake PM when needs-clarification is removed
       pull_request.closed:
         action: wake_agent
     stages:
@@ -320,6 +322,8 @@ pipelines:
         action: wake_agent
       issues.closed:
         action: wake_agent
+      issues.unlabeled:
+        action: wake_agent  # Wake PM when needs-clarification is removed
       pull_request.closed:
         action: wake_agent
     stages:
